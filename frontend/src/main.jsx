@@ -1,8 +1,9 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Bot, GitBranch, Play, CheckCircle2, XCircle, FileCode2, Terminal, GitCommit, Upload, Sparkles} from 'lucide-react';
+import {Bot, GitBranch, Play, CheckCircle2, XCircle, FileCode2, Terminal, GitCommit, Upload, Sparkles, Moon, Sun} from 'lucide-react';
 import './styles.css';
 import {formatTime} from './timer.js';
+import {getInitialTheme, nextTheme} from './theme.js';
 
 const API = import.meta.env.VITE_API_URL || '';
 const initial = {project_path:'', guide_paths:'', task_id:'podw-205', request:'', test_command:''};
@@ -15,13 +16,15 @@ function Clock(){
 
 function App(){
   const [form,setForm]=useState(initial), [task,setTask]=useState(null), [busy,setBusy]=useState(false), [tab,setTab]=useState('changes'), [notice,setNotice]=useState('');
+  const [theme,setTheme]=useState(()=>getInitialTheme(localStorage,window.matchMedia('(prefers-color-scheme: dark)').matches));
   const update=e=>setForm({...form,[e.target.name]:e.target.value});
+  useEffect(()=>{document.documentElement.dataset.theme=theme;localStorage.setItem('taskloom-theme',theme)},[theme]);
   useEffect(()=>{ if(!task || ['passed','failed'].includes(task.status)) return; const timer=setInterval(async()=>{const r=await fetch(`${API}/api/tasks/${task.id}`); if(r.ok)setTask(await r.json())},1400); return()=>clearInterval(timer)},[task?.id,task?.status]);
   async function start(e){e.preventDefault();setBusy(true);setNotice('');try{const body={...form,guide_paths:form.guide_paths.split('\n').map(x=>x.trim()).filter(Boolean),test_command:form.test_command||null};const r=await fetch(`${API}/api/tasks`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.detail||'شروع تسک ناموفق بود');setTask(d)}catch(err){setNotice(err.message)}finally{setBusy(false)}}
   async function action(kind,body){setBusy(true);setNotice('');try{const r=await fetch(`${API}/api/tasks/${task.id}/${kind}`,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const d=await r.json();if(!r.ok)throw Error(d.detail);setTask(d.task);setNotice(kind==='commit'?'تغییرات با موفقیت commit شدند.':'برنچ با موفقیت push شد.')}catch(e){setNotice(e.message)}finally{setBusy(false)}}
   const running=task&&!['passed','failed'].includes(task.status), passed=task?.status==='passed';
   return <div className="app" dir="rtl">
-    <header><div className="brand"><span className="logo"><Sparkles size={20}/></span><div><b>Taskloom</b><small>Codex delivery console</small></div></div><div className="header-status"><Clock/><div className="online"><i/> Codex محلی</div></div></header>
+    <header><div className="brand"><span className="logo"><Sparkles size={20}/></span><div><b>Taskloom</b><small>Codex delivery console</small></div></div><div className="header-status"><Clock/><button className="theme-toggle" type="button" onClick={()=>setTheme(nextTheme(theme))} aria-label={theme==='dark'?'فعال‌کردن تم روشن':'فعال‌کردن تم تاریک'} aria-pressed={theme==='dark'}>{theme==='dark'?<Sun size={16}/>:<Moon size={16}/>}<span>{theme==='dark'?'روشن':'دارک'}</span></button><div className="online"><i/> Codex محلی</div></div></header>
     <main>
       <section className="intro"><div><span className="eyebrow"><Bot size={15}/> همکار مهندسی شما</span><h1>از درخواست تا برنچ آماده‌ی تحویل</h1><p>Codex کد و مستندات را می‌سازد، تست می‌کند و کنترل commit و push را به شما می‌سپارد.</p></div><div className="orb"><Bot size={46}/></div></section>
       <div className="grid">
