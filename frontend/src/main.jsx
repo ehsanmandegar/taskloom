@@ -2,9 +2,16 @@ import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Bot, GitBranch, Play, CheckCircle2, XCircle, FileCode2, Terminal, GitCommit, Upload, Sparkles} from 'lucide-react';
 import './styles.css';
+import {formatTime} from './timer.js';
 
 const API = import.meta.env.VITE_API_URL || '';
 const initial = {project_path:'', guide_paths:'', task_id:'podw-205', request:'', test_command:''};
+
+function Clock(){
+  const [now,setNow]=useState(()=>new Date());
+  useEffect(()=>{const timer=setInterval(()=>setNow(new Date()),10);return()=>clearInterval(timer)},[]);
+  return <time className="clock" dateTime={now.toISOString()} aria-label="زمان فعلی"><small>زمان فعلی</small><b dir="ltr">{formatTime(now)}</b></time>;
+}
 
 function App(){
   const [form,setForm]=useState(initial), [task,setTask]=useState(null), [busy,setBusy]=useState(false), [tab,setTab]=useState('changes'), [notice,setNotice]=useState('');
@@ -14,7 +21,7 @@ function App(){
   async function action(kind,body){setBusy(true);setNotice('');try{const r=await fetch(`${API}/api/tasks/${task.id}/${kind}`,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const d=await r.json();if(!r.ok)throw Error(d.detail);setTask(d.task);setNotice(kind==='commit'?'تغییرات با موفقیت commit شدند.':'برنچ با موفقیت push شد.')}catch(e){setNotice(e.message)}finally{setBusy(false)}}
   const running=task&&!['passed','failed'].includes(task.status), passed=task?.status==='passed';
   return <div className="app" dir="rtl">
-    <header><div className="brand"><span className="logo"><Sparkles size={20}/></span><div><b>Taskloom</b><small>Codex delivery console</small></div></div><div className="online"><i/> Codex محلی</div></header>
+    <header><div className="brand"><span className="logo"><Sparkles size={20}/></span><div><b>Taskloom</b><small>Codex delivery console</small></div></div><div className="header-status"><Clock/><div className="online"><i/> Codex محلی</div></div></header>
     <main>
       <section className="intro"><div><span className="eyebrow"><Bot size={15}/> همکار مهندسی شما</span><h1>از درخواست تا برنچ آماده‌ی تحویل</h1><p>Codex کد و مستندات را می‌سازد، تست می‌کند و کنترل commit و push را به شما می‌سپارد.</p></div><div className="orb"><Bot size={46}/></div></section>
       <div className="grid">
