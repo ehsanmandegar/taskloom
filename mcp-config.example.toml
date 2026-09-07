@@ -1,0 +1,8 @@
+# Copy this table into a trusted project's .codex/config.toml.
+[mcp_servers.taskloom_guides]
+command = "python"
+args = ["-m", "backend.app.guide_mcp", "--root", "."]
+cwd = "."
+enabled = true
+enabled_tools = ["list_guides", "read_guide", "search_guides"]
+default_tools_approval_mode = "auto"

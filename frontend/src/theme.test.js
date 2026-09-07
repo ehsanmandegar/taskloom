@@ -17,10 +17,11 @@ test('toggles between light and dark themes', () => {
   assert.equal(nextTheme('dark'), 'light');
 });
 
-test('dark theme exposes and uses the orange hacker accent', () => {
+test('dark theme exposes and uses the phosphor-green hacker accent', () => {
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
-  assert.match(styles, /html\[data-theme="dark"\]\{--hacker-orange:#ff7a18;/);
-  assert.match(styles, /html\[data-theme="dark"\] \.primary[^}]*background:var\(--hacker-orange\)/);
+  assert.match(styles, /html\[data-theme="dark"\]\{--hacker-green:#00ff88;/);
+  assert.match(styles, /html\[data-theme="dark"\] \.primary[^}]*var\(--hacker-green\)/);
+  assert.match(styles, /body:after\{[^}]*repeating-linear-gradient/);
   assert.match(styles, /html\[data-theme="dark"\] pre\{[^}]*font-family:"Cascadia Code",Consolas,monospace/);
 });

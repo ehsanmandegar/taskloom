@@ -1,6 +1,12 @@
+import json
 from pathlib import Path
+import subprocess
+import sys
+
+import pytest
 from fastapi.testclient import TestClient
 from backend.app.main import app, tasks
+from backend.app.guide_mcp import GuideCatalog
 from backend.app.models import RunStatus, TaskState
 from backend.app.services import resolve_guides
 
@@ -51,3 +57,78 @@ def test_resolve_guides_expands_markdown_directories(tmp_path: Path):
     (docs / "ignored.txt").write_text("no", encoding="utf-8")
 
     assert resolve_guides(tmp_path, ["docs", str(first)]) == [first.resolve(), second.resolve()]
+
+
+def test_guide_catalog_reads_and_searches_only_markdown_roots(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    guide = docs / "setup.md"
+    guide.write_text("# Setup\nRun pytest for verification.\n", encoding="utf-8")
+    (docs / "private.txt").write_text("not a guide", encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    catalog = GuideCatalog([docs])
+
+    assert [item["path"] for item in catalog.list_guides()] == ["setup.md"]
+    assert catalog.read_guide("setup.md").startswith("# Setup")
+    assert catalog.search_guides("PYTEST") == [
+        {
+            "path": "setup.md",
+            "uri": guide.resolve().as_uri(),
+            "line": 2,
+            "text": "Run pytest for verification.",
+        }
+    ]
+    with pytest.raises(ValueError, match="not available"):
+        catalog.read_guide(str(outside))
+
+
+def test_guide_mcp_stdio_handshake_and_tools(tmp_path: Path):
+    guide = tmp_path / "README.md"
+    guide.write_text("# راهنما\nMCP can read this guide.\n", encoding="utf-8")
+    requests = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"},
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "read_guide", "arguments": {"path": "README.md"}},
+        },
+        {"jsonrpc": "2.0", "id": 4, "method": "resources/list", "params": {}},
+    ]
+    project_root = Path(__file__).parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backend.app.guide_mcp",
+            "--root",
+            str(tmp_path),
+        ],
+        input="".join(json.dumps(request) + "\n" for request in requests),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=project_root,
+        timeout=10,
+        check=True,
+    )
+    responses = [json.loads(line) for line in result.stdout.splitlines()]
+
+    assert [response["id"] for response in responses] == [1, 2, 3, 4]
+    assert responses[0]["result"]["serverInfo"]["name"] == "taskloom-guides"
+    assert {tool["name"] for tool in responses[1]["result"]["tools"]} == {
+        "list_guides",
+        "read_guide",
+        "search_guides",
+    }
+    assert "# راهنما" in responses[2]["result"]["content"][0]["text"]
+    assert "MCP can read this guide" in responses[2]["result"]["content"][0]["text"]
+    assert responses[3]["result"]["resources"][0]["uri"] == guide.resolve().as_uri()
