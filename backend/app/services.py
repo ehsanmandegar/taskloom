@@ -26,13 +26,20 @@ def repository(path: str) -> Path:
 
 
 def resolve_guides(repo: Path, paths: list[str]) -> list[Path]:
-    result = []
+    result: list[Path] = []
     for raw in paths:
         path = Path(raw).expanduser()
         path = path.resolve() if path.is_absolute() else (repo / path).resolve()
         if not path.exists():
             raise ValueError(f"Guide path does not exist: {raw}")
-        result.append(path)
+        if path.is_dir():
+            result.extend(candidate for candidate in path.rglob("*.md") if candidate.is_file())
+        elif path.is_file():
+            result.append(path)
+        else:
+            raise ValueError(f"Guide path must be a file or directory: {raw}")
+    # Keep prompt order stable and avoid duplicates from overlapping directories.
+    result = list(dict.fromkeys(result))
     return result
 
 

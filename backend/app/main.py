@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import uuid
 from pathlib import Path
 
@@ -7,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import CommitRequest, RunStatus, TaskRequest, TaskState
+from .models import CommitRequest, ProjectProfile, RunStatus, TaskRequest, TaskState
 from .services import execute_task, git_commit, git_push, repository
 
 app = FastAPI(title="Taskloom", version="0.1.0")
@@ -15,9 +17,60 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allo
 tasks: dict[str, TaskState] = {}
 
 
+def profiles_path() -> Path:
+    configured = os.getenv("TASKLOOM_PROFILES_PATH")
+    return Path(configured).expanduser() if configured else Path.home() / ".taskloom" / "profiles.json"
+
+
+def load_profiles() -> dict[str, ProjectProfile]:
+    path = profiles_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {name: ProjectProfile.model_validate(profile) for name, profile in data.items()}
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(500, f"Could not read project profiles: {exc}") from exc
+
+
+def save_profiles(profiles: dict[str, ProjectProfile]) -> None:
+    path = profiles_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps({name: value.model_dump() for name, value in profiles.items()}, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        raise HTTPException(500, f"Could not save project profiles: {exc}") from exc
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/profiles", response_model=list[ProjectProfile])
+async def list_profiles():
+    return sorted(load_profiles().values(), key=lambda profile: profile.name.casefold())
+
+
+@app.put("/api/profiles/{name}", response_model=ProjectProfile)
+async def put_profile(name: str, profile: ProjectProfile):
+    if name != profile.name:
+        raise HTTPException(422, "Profile name in URL and body must match")
+    profiles = load_profiles()
+    profiles[name] = profile
+    save_profiles(profiles)
+    return profile
+
+
+@app.delete("/api/profiles/{name}", status_code=204)
+async def delete_profile(name: str):
+    profiles = load_profiles()
+    if name not in profiles:
+        raise HTTPException(404, "Project profile not found")
+    del profiles[name]
+    save_profiles(profiles)
 
 
 @app.post("/api/tasks", response_model=TaskState, status_code=202)

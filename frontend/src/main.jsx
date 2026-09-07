@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Bot, GitBranch, Play, CheckCircle2, XCircle, FileCode2, Terminal, GitCommit, Upload, Sparkles, Moon, Sun} from 'lucide-react';
+import {Bot, GitBranch, Play, CheckCircle2, XCircle, FileCode2, Terminal, GitCommit, Upload, Sparkles, Moon, Sun, Save, Trash2} from 'lucide-react';
 import './styles.css';
 import {formatTime} from './timer.js';
 import {getInitialTheme, nextTheme} from './theme.js';
@@ -16,12 +16,17 @@ function Clock(){
 
 function App(){
   const [form,setForm]=useState(initial), [task,setTask]=useState(null), [busy,setBusy]=useState(false), [tab,setTab]=useState('changes'), [notice,setNotice]=useState('');
+  const [profiles,setProfiles]=useState([]), [selectedProfile,setSelectedProfile]=useState('');
   const [theme,setTheme]=useState(()=>getInitialTheme(localStorage,window.matchMedia('(prefers-color-scheme: dark)').matches));
   const update=e=>setForm({...form,[e.target.name]:e.target.value});
   useEffect(()=>{document.documentElement.dataset.theme=theme;localStorage.setItem('taskloom-theme',theme)},[theme]);
+  useEffect(()=>{fetch(`${API}/api/profiles`).then(async r=>{if(!r.ok)throw Error('خواندن پروفایل‌ها ناموفق بود');setProfiles(await r.json())}).catch(e=>setNotice(e.message))},[]);
   useEffect(()=>{ if(!task || ['passed','failed'].includes(task.status)) return; const timer=setInterval(async()=>{const r=await fetch(`${API}/api/tasks/${task.id}`); if(r.ok)setTask(await r.json())},1400); return()=>clearInterval(timer)},[task?.id,task?.status]);
   async function start(e){e.preventDefault();setBusy(true);setNotice('');try{const body={...form,guide_paths:form.guide_paths.split('\n').map(x=>x.trim()).filter(Boolean),test_command:form.test_command||null};const r=await fetch(`${API}/api/tasks`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.detail||'شروع تسک ناموفق بود');setTask(d)}catch(err){setNotice(err.message)}finally{setBusy(false)}}
   async function action(kind,body){setBusy(true);setNotice('');try{const r=await fetch(`${API}/api/tasks/${task.id}/${kind}`,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const d=await r.json();if(!r.ok)throw Error(d.detail);setTask(d.task);setNotice(kind==='commit'?'تغییرات با موفقیت commit شدند.':'برنچ با موفقیت push شد.')}catch(e){setNotice(e.message)}finally{setBusy(false)}}
+  function chooseProfile(name){setSelectedProfile(name);const profile=profiles.find(item=>item.name===name);if(profile)setForm(current=>({...current,project_path:profile.project_path,guide_paths:profile.guide_paths.join('\n'),test_command:profile.test_command||''}))}
+  async function saveProfile(){const name=(selectedProfile||window.prompt('نام پروفایل پروژه را وارد کنید:')||'').trim();if(!name)return;setBusy(true);setNotice('');try{const profile={name,project_path:form.project_path,guide_paths:form.guide_paths.split('\n').map(x=>x.trim()).filter(Boolean),test_command:form.test_command||null};const r=await fetch(`${API}/api/profiles/${encodeURIComponent(name)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(profile)});const d=await r.json();if(!r.ok)throw Error(d.detail||'ذخیره پروفایل ناموفق بود');setProfiles(current=>[...current.filter(item=>item.name!==name),d].sort((a,b)=>a.name.localeCompare(b.name)));setSelectedProfile(name);setNotice('پروفایل پروژه ذخیره شد.')}catch(e){setNotice(e.message)}finally{setBusy(false)}}
+  async function removeProfile(){if(!selectedProfile)return;setBusy(true);setNotice('');try{const r=await fetch(`${API}/api/profiles/${encodeURIComponent(selectedProfile)}`,{method:'DELETE'});if(!r.ok){const d=await r.json();throw Error(d.detail||'حذف پروفایل ناموفق بود')}setProfiles(current=>current.filter(item=>item.name!==selectedProfile));setSelectedProfile('');setNotice('پروفایل حذف شد.')}catch(e){setNotice(e.message)}finally{setBusy(false)}}
   const running=task&&!['passed','failed'].includes(task.status), passed=task?.status==='passed';
   return <div className="app" dir="rtl">
     <header><div className="brand"><span className="logo"><Sparkles size={20}/></span><div><b>Taskloom</b><small>Codex delivery console</small></div></div><div className="header-status"><Clock/><button className="theme-toggle" type="button" onClick={()=>setTheme(nextTheme(theme))} aria-label={theme==='dark'?'فعال‌کردن تم روشن':'فعال‌کردن تم تاریک'} aria-pressed={theme==='dark'}>{theme==='dark'?<Sun size={16}/>:<Moon size={16}/>}<span>{theme==='dark'?'روشن':'دارک'}</span></button><div className="online"><i/> Codex محلی</div></div></header>
@@ -30,8 +35,9 @@ function App(){
       <div className="grid">
         <form className="card form" onSubmit={start}>
           <div className="card-title"><span>تعریف تسک</span><em>01</em></div>
+          <div className="profile-picker"><select aria-label="پروفایل پروژه" value={selectedProfile} onChange={e=>chooseProfile(e.target.value)}><option value="">پروفایل پروژه…</option>{profiles.map(profile=><option key={profile.name} value={profile.name}>{profile.name}</option>)}</select><button type="button" onClick={saveProfile} disabled={busy||!form.project_path} title="ذخیره پروفایل"><Save size={16}/><span>{selectedProfile?'به‌روزرسانی':'ذخیره'}</span></button><button className="danger" type="button" onClick={removeProfile} disabled={busy||!selectedProfile} title="حذف پروفایل"><Trash2 size={16}/></button></div>
           <label>آدرس پروژه<input name="project_path" value={form.project_path} onChange={update} placeholder="C:\\work\\my-project" required/></label>
-          <label>فایل‌های راهنما <small>هر مسیر در یک خط</small><textarea name="guide_paths" value={form.guide_paths} onChange={update} rows="2" placeholder={'AGENTS.md\ndocs/development.md'}/></label>
+          <label>فایل‌ها یا پوشه‌های راهنما <small>هر مسیر در یک خط؛ پوشه‌ها تمام فایل‌های md را اضافه می‌کنند</small><textarea name="guide_paths" value={form.guide_paths} onChange={update} rows="2" placeholder={'AGENTS.md\nC:\\work\\docs'}/></label>
           <div className="row"><label>شماره تسک<input name="task_id" value={form.task_id} onChange={update} required/></label><label>دستور تست <small>اختیاری</small><input name="test_command" value={form.test_command} onChange={update} placeholder="pytest -q"/></label></div>
           <label>درخواست شما<textarea className="request" name="request" value={form.request} onChange={update} required placeholder="دقیقاً بگو چه چیزی باید ساخته یا اصلاح شود…"/></label>
           <button className="primary" disabled={busy||running}><Play size={17}/>{running?'در حال اجرا…':'شروع اجرای تسک'}</button>{notice&&<div className="notice">{notice}</div>}

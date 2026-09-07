@@ -28,6 +28,21 @@ class TaskRequest(BaseModel):
         return value
 
 
+class ProjectProfile(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    project_path: str = Field(min_length=1)
+    guide_paths: list[str] = Field(default_factory=list)
+    test_command: str | None = Field(default=None, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Profile name cannot be empty")
+        return value
+
+
 class CommitRequest(BaseModel):
     message: str = Field(min_length=3, max_length=200)
 
