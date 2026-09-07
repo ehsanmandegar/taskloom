@@ -31,7 +31,7 @@ function App(){
   return <div className="app" dir="rtl">
     <header><div className="brand"><span className="logo"><Sparkles size={20}/></span><div><b>Taskloom</b><small>Codex delivery console</small></div></div><div className="header-status"><Clock/><button className="theme-toggle" type="button" onClick={()=>setTheme(nextTheme(theme))} aria-label={theme==='dark'?'فعال‌کردن تم روشن':'فعال‌کردن تم تاریک'} aria-pressed={theme==='dark'}>{theme==='dark'?<Sun size={16}/>:<Moon size={16}/>}<span>{theme==='dark'?'روشن':'دارک'}</span></button><div className="online"><i/> Codex محلی</div></div></header>
     <main>
-      <section className="intro"><div><span className="eyebrow"><Bot size={15}/> همکار مهندسی شما</span><h1>از درخواست تا برنچ آماده‌ی تحویل</h1><p>Codex کد و مستندات را می‌سازد، تست می‌کند و کنترل commit و push را به شما می‌سپارد.</p></div><div className="orb"><Bot size={46}/></div></section>
+      <section className="intro"><div><span className="eyebrow"><Bot size={15}/> همکار مهندسی شما</span><p>Codex کد و مستندات را می‌سازد، تست می‌کند و کنترل commit و push را به شما می‌سپارد.</p></div><div className="orb"><Bot size={46}/></div></section>
       <div className="grid">
         <form className="card form" onSubmit={start}>
           <div className="card-title"><span>تعریف تسک</span><em>01</em></div>
