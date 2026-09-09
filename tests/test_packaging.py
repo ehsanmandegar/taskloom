@@ -34,11 +34,12 @@ def test_run_starts_browser_and_local_server(monkeypatch):
 def test_python_builder_creates_one_file_with_frontend_assets():
     script = (Path(__file__).parents[1] / "build_exe.py").read_text(encoding="utf-8")
 
-    assert '"npm.cmd" if sys.platform == "win32" else "npm"' in script
-    assert '"ci", cwd=FRONTEND' in script
-    assert '"run", "build", cwd=FRONTEND' in script
+    assert 'npm = command_path("npm.cmd")' in script
+    assert 'npm = command_path("npm")' in script
+    assert '"ci",\n            cwd=FRONTEND' in script
+    assert '"run",\n            "build",\n            cwd=FRONTEND' in script
     assert '"--onefile"' in script
-    assert '"--add-data"' in script
+    assert 'f"--add-data="' in script
     assert '"--workpath"' in script
-    assert "shutil.rmtree(BUILD_DIR, ignore_errors=True)" in script
-    assert "Taskloom.exe" in script
+    assert "remove_directory(BUILD_DIR)" in script
+    assert 'f"{EXECUTABLE_NAME}.exe"' in script

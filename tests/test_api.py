@@ -11,7 +11,7 @@ from backend.app import main as main_module
 from backend.app.main import app, load_tasks, save_tasks, tasks
 from backend.app.guide_mcp import GuideCatalog
 from backend.app.models import RunStatus, TaskRequest, TaskState
-from backend.app.services import build_prompt, codex_response, continue_task, resolve_guides
+from backend.app.services import build_prompt, codex_response, continue_task, generate_commit_message, resolve_guides
 
 client = TestClient(app)
 
@@ -192,6 +192,67 @@ def test_task_sessions_are_persisted_and_listed(monkeypatch, tmp_path: Path):
     finally:
         tasks.clear()
         tasks.update(original)
+
+
+def test_load_tasks_keeps_interrupted_sessions_when_storage_is_unavailable(monkeypatch):
+    class SessionFile:
+        def exists(self):
+            return True
+
+        def read_text(self, encoding):
+            return json.dumps(
+                {
+                    "interrupted": {
+                        "id": "interrupted",
+                        "task_id": "podw-219",
+                        "project_path": "project",
+                        "branch": "task/podw-219",
+                        "status": "running",
+                        "step": "Codex is implementing the request",
+                    }
+                }
+            )
+
+    def unavailable_storage(_states):
+        raise main_module.HTTPException(500, "storage unavailable")
+
+    monkeypatch.setattr(main_module, "sessions_path", lambda: SessionFile())
+    monkeypatch.setattr(main_module, "save_tasks", unavailable_storage)
+
+    restored = load_tasks()
+
+    assert restored["interrupted"].status == RunStatus.failed
+    assert restored["interrupted"].step == "Interrupted by Taskloom restart"
+
+
+def test_generate_commit_message_uses_the_task_codex_session(monkeypatch):
+    state = TaskState(
+        id="commit-message",
+        task_id="podw-219",
+        project_path=str(Path(__file__).parents[1]),
+        branch="task/podw-219",
+        status=RunStatus.passed,
+        step="Ready for review",
+        codex_thread_id="thread-219",
+        changed_files=["backend/app/main.py"],
+    )
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append((args, cwd, timeout))
+        return 0, "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "thread-219"}),
+                json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "fix(podw-219): recover sessions when storage is unavailable"}}),
+            ]
+        )
+
+    monkeypatch.setattr(services, "command", fake_command)
+    monkeypatch.setattr(services.shutil, "which", lambda name: "codex" if name == "codex" else name)
+
+    assert asyncio.run(generate_commit_message(state)) == "fix(podw-219): recover sessions when storage is unavailable"
+    assert calls[0][0][:5] == ["codex", "exec", "resume", "--json", "thread-219"]
+    assert "exactly one Conventional Commit message" in calls[0][0][-1]
 
 
 def test_continue_task_resumes_same_codex_session_and_retests(monkeypatch):

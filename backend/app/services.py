@@ -165,6 +165,30 @@ async def continue_task(message: str, state: TaskState) -> None:
         state.logs.append(str(exc))
 
 
+async def generate_commit_message(state: TaskState) -> str:
+    """Ask the task's existing Codex session for a concise commit message."""
+    if state.status != RunStatus.passed or not state.changed_files:
+        raise ValueError("A successful test run with changes is required")
+    if state.committed:
+        raise ValueError("The task has already been committed")
+    if not state.codex_thread_id:
+        raise ValueError("This task does not have a resumable Codex session")
+    repo = repository(state.project_path)
+    codex = shutil.which("codex")
+    if not codex:
+        raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
+    prompt = """Review the current uncommitted diff and reply with exactly one Conventional Commit message.
+Keep it under 200 characters and on one line. Do not edit files, run tests, commit, push, or add explanation."""
+    code, output = await command([codex, "exec", "resume", "--json", state.codex_thread_id, prompt], repo, 600)
+    if code:
+        raise RuntimeError(f"Codex exited with code {code}")
+    _, response = codex_response(output)
+    message = response.splitlines()[0].strip().strip("`") if response else ""
+    if not message or len(message) > 200:
+        raise RuntimeError("Codex did not return a valid commit message")
+    return message
+
+
 async def git_commit(state: TaskState, message: str) -> str:
     repo = repository(state.project_path)
     await refresh_git(state, repo)

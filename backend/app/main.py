@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import ChatMessage, ChatRequest, CommitRequest, ProjectProfile, RunStatus, TaskRequest, TaskState
-from .services import continue_task, create_merge_request, execute_task, git_commit, git_push, repository
+from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository
 
 app = FastAPI(title="Taskloom", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
@@ -40,7 +40,12 @@ def load_tasks() -> dict[str, TaskState]:
             state.error = "Taskloom was restarted before Codex finished responding."
             restarted = True
     if restarted:
-        save_tasks(loaded)
+        try:
+            save_tasks(loaded)
+        except HTTPException:
+            # Session history is optional at startup: retain the recovered
+            # states in memory even when its storage is temporarily unavailable.
+            pass
     return loaded
 
 
@@ -179,6 +184,15 @@ async def commit(run_id: str, request: CommitRequest):
         result = {"ok": True, "output": await git_commit(state, request.message.strip()), "task": state}
         save_tasks(tasks)
         return result
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/tasks/{run_id}/commit-message")
+async def suggest_commit_message(run_id: str):
+    state = get_state(run_id)
+    try:
+        return {"message": await generate_commit_message(state)}
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
