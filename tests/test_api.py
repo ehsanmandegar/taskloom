@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 from backend.app import services
 from backend.app.main import app, tasks
 from backend.app.guide_mcp import GuideCatalog
-from backend.app.models import RunStatus, TaskState
-from backend.app.services import resolve_guides
+from backend.app.models import RunStatus, TaskRequest, TaskState
+from backend.app.services import build_prompt, resolve_guides
 
 client = TestClient(app)
 
@@ -108,6 +108,20 @@ def test_resolve_guides_expands_markdown_directories(tmp_path: Path):
     (docs / "ignored.txt").write_text("no", encoding="utf-8")
 
     assert resolve_guides(tmp_path, ["docs", str(first)]) == [first.resolve(), second.resolve()]
+
+
+def test_build_prompt_requires_reviewing_markdown_after_changes():
+    request = TaskRequest(
+        project_path="project",
+        task_id="podw-215",
+        request="change application behavior",
+    )
+
+    prompt = build_prompt(request, [])
+
+    assert "After every implementation change" in prompt
+    assert "review the relevant Markdown (.md) files" in prompt
+    assert "If no Markdown update is needed, state that explicitly" in prompt
 
 
 def test_guide_catalog_reads_and_searches_only_markdown_roots(tmp_path: Path):

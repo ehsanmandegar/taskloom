@@ -57,7 +57,7 @@ def build_prompt(req: TaskRequest, guides: list[Path]) -> str:
     return f"""Implement task {req.task_id}.
 User request: {req.request}
 Instruction/documentation paths:\n{listed}
-Inspect and obey repository instructions. Implement the smallest complete change. Create or update documentation only when its structure calls for it. Add meaningful pytest or project-native tests; use Locust only for performance work. Do not commit, push, switch branches, or modify files outside this repository. Finish with a concise summary and testing notes."""
+Inspect and obey repository instructions. Implement the smallest complete change. After every implementation change, review the relevant Markdown (.md) files and update any documentation affected by that change. If no Markdown update is needed, state that explicitly in the final summary. Add meaningful pytest or project-native tests; use Locust only for performance work. Do not commit, push, switch branches, or modify files outside this repository. Finish with a concise summary and testing notes."""
 
 
 async def refresh_git(state: TaskState, repo: Path) -> None:
