@@ -47,11 +47,21 @@ class CommitRequest(BaseModel):
     message: str = Field(min_length=3, max_length=200)
 
 
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=20_000)
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
 class TaskState(BaseModel):
     id: str
     task_id: str
     project_path: str
     branch: str
+    test_command: str | None = None
     status: RunStatus
     step: str
     logs: list[str] = Field(default_factory=list)
@@ -64,3 +74,5 @@ class TaskState(BaseModel):
     committed: bool = False
     pushed: bool = False
     merge_request_url: str = ""
+    codex_thread_id: str = ""
+    messages: list[ChatMessage] = Field(default_factory=list)

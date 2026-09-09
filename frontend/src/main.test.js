@@ -15,3 +15,19 @@ test('offers merge request creation only after push and links the result', () =>
   assert.match(source, /disabled=\{!task\.pushed\|\|!!task\.merge_request_url\|\|busy\}/);
   assert.match(source, /href=\{task\.merge_request_url\}/);
 });
+
+test('restores a saved Codex session and lets the user switch recent conversations', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /taskloom-active-session/);
+  assert.match(source, /fetch\(`\$\{API\}\/api\/tasks`\)/);
+  assert.match(source, /session-picker/);
+});
+
+test('offers a follow-up chat that resumes the task session', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /\/api\/tasks\/\$\{task\.id\}\/messages/);
+  assert.match(source, /task\.codex_thread_id/);
+  assert.match(source, /گفت‌وگو با Codex/);
+});

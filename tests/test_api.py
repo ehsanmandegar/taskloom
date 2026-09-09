@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -6,10 +7,11 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 from backend.app import services
-from backend.app.main import app, tasks
+from backend.app import main as main_module
+from backend.app.main import app, load_tasks, save_tasks, tasks
 from backend.app.guide_mcp import GuideCatalog
 from backend.app.models import RunStatus, TaskRequest, TaskState
-from backend.app.services import build_prompt, resolve_guides
+from backend.app.services import build_prompt, codex_response, continue_task, resolve_guides
 
 client = TestClient(app)
 
@@ -61,8 +63,9 @@ def test_merge_request_requires_push():
         ),
     ],
 )
-def test_creates_merge_request_and_returns_url(monkeypatch, remote, cli, cli_args, url):
+def test_creates_merge_request_and_returns_url(monkeypatch, tmp_path: Path, remote, cli, cli_args, url):
     project_root = Path(__file__).parents[1]
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
     run_id = f"pushed-{cli}"
     tasks[run_id] = TaskState(id=run_id, task_id="podw-214", project_path=str(project_root), branch="task/podw-214", status=RunStatus.passed, step="ready", committed=True, pushed=True)
     calls = []
@@ -122,6 +125,109 @@ def test_build_prompt_requires_reviewing_markdown_after_changes():
     assert "After every implementation change" in prompt
     assert "review the relevant Markdown (.md) files" in prompt
     assert "If no Markdown update is needed, state that explicitly" in prompt
+
+
+def test_codex_response_reads_thread_and_final_message_from_jsonl():
+    output = "\n".join(
+        [
+            "Codex progress on stderr",
+            json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "First response"}}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Final response"}}),
+        ]
+    )
+
+    assert codex_response(output) == ("thread-123", "First response\n\nFinal response")
+
+
+def test_follow_up_is_queued_for_the_existing_codex_session(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+    run_id = "chat-ready"
+    tasks[run_id] = TaskState(
+        id=run_id,
+        task_id="podw-217",
+        project_path=str(Path(__file__).parents[1]),
+        branch="task/podw-217",
+        status=RunStatus.passed,
+        step="ready",
+        codex_thread_id="thread-123",
+    )
+
+    async def fake_continue(message, state):
+        return None
+
+    monkeypatch.setattr(main_module, "continue_task", fake_continue)
+    response = client.post(f"/api/tasks/{run_id}/messages", json={"message": "Please improve the result"})
+
+    assert response.status_code == 202
+    assert response.json()["step"] == "Queued follow-up"
+    assert response.json()["messages"] == [{"role": "user", "content": "Please improve the result"}]
+
+
+def test_task_sessions_are_persisted_and_listed(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+    state = TaskState(
+        id="saved-chat",
+        task_id="podw-218",
+        project_path=str(tmp_path),
+        branch="task/podw-218",
+        status=RunStatus.passed,
+        step="Ready for further instructions",
+        codex_thread_id="thread-218",
+        messages=[{"role": "user", "content": "Keep improving this."}],
+    )
+
+    save_tasks({state.id: state})
+    restored = load_tasks()
+
+    assert restored[state.id].codex_thread_id == "thread-218"
+    assert restored[state.id].messages[0].content == "Keep improving this."
+    original = dict(tasks)
+    try:
+        tasks.clear()
+        tasks.update(restored)
+        response = client.get("/api/tasks")
+        assert response.status_code == 200
+        assert response.json()[0]["id"] == "saved-chat"
+    finally:
+        tasks.clear()
+        tasks.update(original)
+
+
+def test_continue_task_resumes_same_codex_session_and_retests(monkeypatch):
+    state = TaskState(
+        id="continue",
+        task_id="podw-217",
+        project_path=str(Path(__file__).parents[1]),
+        branch="task/podw-217",
+        test_command="pytest -q custom",
+        status=RunStatus.passed,
+        step="ready",
+        codex_thread_id="thread-123",
+    )
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append(args)
+        if args[:3] == ["codex", "exec", "resume"]:
+            return 0, "\n".join(
+                [
+                    json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
+                    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Improved it."}}),
+                ]
+            )
+        return 0, ""
+
+    monkeypatch.setattr(services, "command", fake_command)
+    monkeypatch.setattr(services.shutil, "which", lambda name: "codex" if name == "codex" else name)
+
+    asyncio.run(continue_task("Improve it", state))
+
+    assert calls[0][:5] == ["codex", "exec", "resume", "--json", "thread-123"]
+    assert ["pytest", "-q", "custom"] in calls
+    assert state.status == RunStatus.passed
+    assert state.step == "Ready for further instructions"
+    assert [message.model_dump() for message in state.messages] == [{"role": "assistant", "content": "Improved it."}]
 
 
 def test_guide_catalog_reads_and_searches_only_markdown_roots(tmp_path: Path):

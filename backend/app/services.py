@@ -1,11 +1,12 @@
 import asyncio
+import json
 import os
 import re
 import shlex
 import shutil
 from pathlib import Path
 
-from .models import RunStatus, TaskRequest, TaskState
+from .models import ChatMessage, RunStatus, TaskRequest, TaskState
 
 
 async def command(args: list[str], cwd: Path, timeout: int = 900) -> tuple[int, str]:
@@ -60,6 +61,23 @@ Instruction/documentation paths:\n{listed}
 Inspect and obey repository instructions. Implement the smallest complete change. After every implementation change, review the relevant Markdown (.md) files and update any documentation affected by that change. If no Markdown update is needed, state that explicitly in the final summary. Add meaningful pytest or project-native tests; use Locust only for performance work. Do not commit, push, switch branches, or modify files outside this repository. Finish with a concise summary and testing notes."""
 
 
+def codex_response(output: str) -> tuple[str, str]:
+    """Extract the persisted thread ID and final agent message from JSONL output."""
+    thread_id = ""
+    messages: list[str] = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "thread.started":
+            thread_id = event.get("thread_id", "")
+        item = event.get("item", {})
+        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+            messages.append(item.get("text", ""))
+    return thread_id, "\n\n".join(message for message in messages if message).strip()
+
+
 async def refresh_git(state: TaskState, repo: Path) -> None:
     _, state.diff = await command(["git", "diff", "--no-ext-diff", "--"], repo)
     _, staged = await command(["git", "diff", "--cached", "--no-ext-diff", "--"], repo)
@@ -83,9 +101,15 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         codex = shutil.which("codex")
         if not codex:
             raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
-        code, output = await command([codex, "exec", "--sandbox", "workspace-write", "--color", "never", build_prompt(req, guides)], repo, 3600)
+        code, output = await command([codex, "exec", "--sandbox", "workspace-write", "--color", "never", "--json", build_prompt(req, guides)], repo, 3600)
+        thread_id, response = codex_response(output)
+        if not thread_id:
+            raise RuntimeError("Codex did not return a resumable session ID")
+        state.codex_thread_id = thread_id
         state.logs.append(output[-12000:])
-        state.summary = output.strip()[-4000:]
+        state.summary = response or output.strip()[-4000:]
+        if response:
+            state.messages.append(ChatMessage(role="assistant", content=response))
         await refresh_git(state, repo)
         if code:
             raise RuntimeError(f"Codex exited with code {code}")
@@ -102,6 +126,42 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         await refresh_git(state, repo)
     except Exception as exc:
         state.status, state.step, state.error = RunStatus.failed, "Run failed", str(exc)
+        state.logs.append(str(exc))
+
+
+async def continue_task(message: str, state: TaskState) -> None:
+    """Continue the exact Codex thread used for the task with a user follow-up."""
+    try:
+        if not state.codex_thread_id:
+            raise RuntimeError("This task does not have a resumable Codex session")
+        repo = repository(state.project_path)
+        codex = shutil.which("codex")
+        if not codex:
+            raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
+        state.status, state.step, state.error = RunStatus.running, "Codex is responding", None
+        prompt = f"""User follow-up:\n{message}\n\nContinue this conversation. Make edits when they help answer the request, but do not commit, push, switch branches, or modify files outside this repository. Summarize what you did or recommend next."""
+        code, output = await command([codex, "exec", "resume", "--json", state.codex_thread_id, prompt], repo, 3600)
+        _, response = codex_response(output)
+        state.logs.append(output[-12000:])
+        state.summary = response or output.strip()[-4000:]
+        if response:
+            state.messages.append(ChatMessage(role="assistant", content=response))
+        await refresh_git(state, repo)
+        if code:
+            raise RuntimeError(f"Codex exited with code {code}")
+        state.status, state.step = RunStatus.testing, "Running tests"
+        tests = shlex.split(state.test_command, posix=False) if state.test_command else detect_tests(repo)
+        code, output = await command(tests, repo, 1800)
+        state.test_output = output[-20000:]
+        state.status, state.step = (RunStatus.passed, "Ready for further instructions") if code == 0 else (RunStatus.failed, "Tests failed")
+        if code:
+            state.error = f"Tests exited with code {code}"
+        await refresh_git(state, repo)
+        if state.changed_files:
+            state.committed = False
+            state.pushed = False
+    except Exception as exc:
+        state.status, state.step, state.error = RunStatus.failed, "Conversation failed", str(exc)
         state.logs.append(str(exc))
 
 
