@@ -31,3 +31,21 @@ test('offers a follow-up chat that resumes the task session', () => {
   assert.match(source, /task\.codex_thread_id/);
   assert.match(source, /گفت‌وگو با Codex/);
 });
+
+test('sends chat messages with Enter while preserving Shift+Enter for a new line', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /function submitChatOnEnter\(e\)\{if\(e\.key!==\'Enter\'\|\|e\.shiftKey\|\|e\.nativeEvent\.isComposing\)return;e\.preventDefault\(\);e\.currentTarget\.form\?\.requestSubmit\(\)\}/);
+  assert.match(source, /onKeyDown=\{submitChatOnEnter\}/);
+});
+
+test('distinguishes Codex replies and shows a typing indicator while Codex responds', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /codexTyping=task&&\['queued','running'\]\.includes\(task\.status\)/);
+  assert.match(source, /chat-typing/);
+  assert.match(source, /Codex در حال پاسخ است/);
+  assert.match(styles, /\.chat-message\.assistant\{[^}]*background:#eef1fb/);
+  assert.match(styles, /@keyframes typing-dot/);
+});
