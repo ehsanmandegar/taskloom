@@ -24,6 +24,13 @@ test('restores a saved Codex session and lets the user switch recent conversatio
   assert.match(source, /session-picker/);
 });
 
+test('turns API validation details into readable form errors', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /const apiError=/);
+  assert.match(source, /apiError\(d\.detail,'شروع تسک ناموفق بود'\)/);
+});
+
 test('offers a follow-up chat that resumes the task session', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 
