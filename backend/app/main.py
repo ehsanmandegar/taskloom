@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import CommitRequest, ProjectProfile, RunStatus, TaskRequest, TaskState
-from .services import execute_task, git_commit, git_push, repository
+from .services import create_merge_request, execute_task, git_commit, git_push, repository
 
 app = FastAPI(title="Taskloom", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
@@ -111,6 +111,16 @@ async def push(run_id: str):
     state = get_state(run_id)
     try:
         return {"ok": True, "output": await git_push(state), "task": state}
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/tasks/{run_id}/merge-request")
+async def merge_request(run_id: str):
+    state = get_state(run_id)
+    try:
+        output = await create_merge_request(state)
+        return {"ok": True, "output": output, "url": state.merge_request_url, "task": state}
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
 

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shlex
 import shutil
 from pathlib import Path
@@ -128,4 +129,38 @@ async def git_push(state: TaskState) -> str:
     if code:
         raise RuntimeError(output)
     state.pushed = True
+    return output
+
+
+async def create_merge_request(state: TaskState) -> str:
+    if not state.pushed:
+        raise ValueError("Push the task branch first")
+    if state.merge_request_url:
+        raise ValueError("A merge request already exists for this task")
+    repo = repository(state.project_path)
+    code, remote = await command(["git", "remote", "get-url", "origin"], repo)
+    if code:
+        raise RuntimeError(remote.strip() or "Could not read the origin remote")
+
+    normalized_remote = remote.casefold()
+    if "github" in normalized_remote:
+        cli_name = "gh"
+        args = ["pr", "create", "--fill", "--head", state.branch]
+    elif "gitlab" in normalized_remote:
+        cli_name = "glab"
+        args = ["mr", "create", "--fill", "--source-branch", state.branch, "--yes"]
+    else:
+        raise ValueError("Merge requests are supported for GitHub and GitLab origin remotes")
+
+    cli = shutil.which(cli_name)
+    if not cli:
+        raise RuntimeError(f"{cli_name} CLI was not found. Install it and sign in first.")
+    code, output = await command([cli, *args], repo, 600)
+    if code:
+        raise RuntimeError(output.strip() or "Could not create the merge request")
+    urls = re.findall(r"https?://[^\s]+", output)
+    if not urls:
+        raise RuntimeError("The merge request was created but its URL was not returned")
+    state.merge_request_url = urls[-1].rstrip(".,;)")
+    state.step = "Merge request ready"
     return output

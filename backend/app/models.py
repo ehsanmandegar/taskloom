@@ -63,3 +63,4 @@ class TaskState(BaseModel):
     error: str | None = None
     committed: bool = False
     pushed: bool = False
+    merge_request_url: str = ""

@@ -5,6 +5,7 @@ import sys
 
 import pytest
 from fastapi.testclient import TestClient
+from backend.app import services
 from backend.app.main import app, tasks
 from backend.app.guide_mcp import GuideCatalog
 from backend.app.models import RunStatus, TaskState
@@ -32,6 +33,56 @@ def test_push_requires_commit(tmp_path: Path):
     (tmp_path / ".git").mkdir()
     tasks["demo"] = TaskState(id="demo", task_id="podw-205", project_path=str(tmp_path), branch="task/podw-205", status=RunStatus.passed, step="ready")
     assert client.post("/api/tasks/demo/push").status_code == 409
+
+
+def test_merge_request_requires_push():
+    tasks["not-pushed"] = TaskState(id="not-pushed", task_id="podw-214", project_path="unused", branch="task/podw-214", status=RunStatus.passed, step="ready", committed=True)
+
+    response = client.post("/api/tasks/not-pushed/merge-request")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Push the task branch first"
+
+
+@pytest.mark.parametrize(
+    ("remote", "cli", "cli_args", "url"),
+    [
+        (
+            "https://github.com/acme/example.git",
+            "gh",
+            ["pr", "create", "--fill", "--head", "task/podw-214"],
+            "https://github.com/acme/example/pull/42",
+        ),
+        (
+            "git@gitlab.com:acme/example.git",
+            "glab",
+            ["mr", "create", "--fill", "--source-branch", "task/podw-214", "--yes"],
+            "https://gitlab.com/acme/example/-/merge_requests/42",
+        ),
+    ],
+)
+def test_creates_merge_request_and_returns_url(monkeypatch, remote, cli, cli_args, url):
+    project_root = Path(__file__).parents[1]
+    run_id = f"pushed-{cli}"
+    tasks[run_id] = TaskState(id=run_id, task_id="podw-214", project_path=str(project_root), branch="task/podw-214", status=RunStatus.passed, step="ready", committed=True, pushed=True)
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append((args, cwd, timeout))
+        if args == ["git", "remote", "get-url", "origin"]:
+            return 0, remote + "\n"
+        return 0, url + "\n"
+
+    monkeypatch.setattr(services, "command", fake_command)
+    monkeypatch.setattr(services.shutil, "which", lambda name: f"/tools/{name}")
+
+    response = client.post(f"/api/tasks/{run_id}/merge-request")
+
+    assert response.status_code == 200
+    assert response.json()["url"] == url
+    assert response.json()["task"]["merge_request_url"] == response.json()["url"]
+    assert calls[1] == ([f"/tools/{cli}", *cli_args], project_root.resolve(), 600)
+    assert client.post(f"/api/tasks/{run_id}/merge-request").status_code == 409
 
 
 def test_profiles_are_persisted(monkeypatch, tmp_path: Path):
