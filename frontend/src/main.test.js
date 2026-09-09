@@ -41,10 +41,15 @@ test('offers a follow-up chat that resumes the task session', () => {
 
 test('can request an automatic commit message from the task Codex session', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
   assert.match(source, /\/api\/tasks\/\$\{task\.id\}\/commit-message/);
   assert.match(source, /Generate commit message with Codex/);
   assert.match(source, /onClick=\{generateCommitMessage\}/);
+  assert.match(source, /<Sparkles size=\{14\}\/>AutoGenerate/);
+  assert.match(source, /<GitCommit size=\{16\}\/>commit/);
+  assert.match(source, /<Upload size=\{16\}\/>push/);
+  assert.match(styles, /\.delivery \.suggest-commit\{height:32px;padding:0 9px;font-size:10px/);
 });
 
 test('sends chat messages with Enter while preserving Shift+Enter for a new line', () => {
