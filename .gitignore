@@ -6,5 +6,7 @@ pytest-cache-files-*/
 .venv/
 frontend/node_modules/
 frontend/dist/
+.taskloom-build/
+dist/
 *.pyc
 .env
