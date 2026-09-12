@@ -8,6 +8,7 @@ class RunStatus(str, Enum):
     queued = "queued"
     running = "running"
     testing = "testing"
+    stopped = "stopped"
     passed = "passed"
     failed = "failed"
     blocked = "blocked"

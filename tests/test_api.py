@@ -381,7 +381,44 @@ def test_task_event_stream_returns_latest_terminal_snapshot():
         tasks.pop(state.id, None)
 
 
-def test_follow_up_is_queued_for_the_existing_codex_session(monkeypatch, tmp_path: Path):
+def test_stopping_a_running_task_cancels_worker_and_keeps_session_resumable(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+
+    async def scenario():
+        state = TaskState(
+            id="stop-me",
+            task_id="podw-stop",
+            project_path="unused",
+            branch="tasks/podw-stop",
+            status=RunStatus.running,
+            step="Codex is responding",
+            codex_thread_id="thread-stop",
+            live_response="پاسخ ناتمام",
+        )
+        tasks[state.id] = state
+        started = asyncio.Event()
+
+        async def active_worker():
+            started.set()
+            await asyncio.Event().wait()
+
+        worker = asyncio.create_task(active_worker())
+        main_module.task_workers[state.id] = worker
+        await started.wait()
+        try:
+            result = await main_module.stop_task(state.id)
+            assert worker.cancelled()
+            assert result.status == RunStatus.stopped
+            assert result.codex_thread_id == "thread-stop"
+            assert result.live_response == "پاسخ ناتمام"
+        finally:
+            tasks.pop(state.id, None)
+            main_module.task_workers.pop(state.id, None)
+
+    asyncio.run(scenario())
+
+
+def test_follow_up_is_queued_for_a_stopped_codex_session(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
     run_id = "chat-ready"
     tasks[run_id] = TaskState(
@@ -389,8 +426,8 @@ def test_follow_up_is_queued_for_the_existing_codex_session(monkeypatch, tmp_pat
         task_id="podw-217",
         project_path=str(Path(__file__).parents[1]),
         branch="tasks/podw-217",
-        status=RunStatus.passed,
-        step="ready",
+        status=RunStatus.stopped,
+        step="Stopped by user",
         codex_thread_id="thread-123",
     )
 

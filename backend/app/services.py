@@ -40,9 +40,15 @@ async def command(args: list[str], cwd: Path, timeout: int = 900) -> tuple[int, 
             await asyncio.wait_for(read_output(), timeout)
             output = b"".join(chunks)
     except asyncio.TimeoutError:
-        process.kill()
+        if process.returncode is None:
+            process.kill()
         await process.communicate()
         return 124, f"Command timed out after {timeout}s"
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.kill()
+        await process.communicate()
+        raise
     return process.returncode or 0, output.decode("utf-8", errors="replace")
 
 
@@ -369,6 +375,13 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         if code:
             state.error = f"Tests exited with code {code}"
         await refresh_git(state, repo)
+    except asyncio.CancelledError:
+        state.status, state.step, state.error = RunStatus.stopped, "Stopped by user", None
+        state.logs.append("Run stopped by user")
+        try:
+            await refresh_git(state, repo)
+        except Exception:
+            pass
     except Exception as exc:
         state.status, state.step, state.error = RunStatus.failed, "Run failed", str(exc)
         state.logs.append(str(exc))
@@ -407,6 +420,16 @@ async def continue_task(message: str, state: TaskState) -> None:
             state.committed = False
             state.pushed = False
         cleanup_owned_test_artifacts(repo)
+    except asyncio.CancelledError:
+        state.status, state.step, state.error = RunStatus.stopped, "Stopped by user", None
+        state.logs.append("Conversation stopped by user")
+        try:
+            await refresh_git(state, repo)
+        except Exception:
+            pass
+        if state.changed_files:
+            state.committed = False
+            state.pushed = False
     except Exception as exc:
         state.status, state.step, state.error = RunStatus.failed, "Conversation failed", str(exc)
         state.logs.append(str(exc))
