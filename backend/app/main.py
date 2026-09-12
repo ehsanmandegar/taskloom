@@ -1,15 +1,16 @@
 import asyncio
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import ChatMessage, ChatRequest, CommitRequest, ProjectProfile, RunStatus, TaskRequest, TaskState
+from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState
 from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository
 
 app = FastAPI(title="Taskloom", version="0.1.0")
@@ -66,6 +67,85 @@ def save_tasks(states: dict[str, TaskState]) -> None:
 tasks: dict[str, TaskState] = load_tasks()
 
 
+DEFAULT_GUIDE_NAME = "04-taskloom-project-contract.md"
+
+
+def _default_project_path() -> Path:
+    configured = os.getenv("DWS_PROJECT_PATH")
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if candidate.is_dir() and (candidate / ".git").exists():
+            return candidate
+    configured = os.getenv("TASKLOOM_DEFAULT_PROJECT_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    dws = Path(r"E:\dws")
+    if dws.is_dir() and (dws / ".git").exists():
+        return dws.resolve()
+    source_root = Path(__file__).resolve().parents[2]
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates = [Path.cwd().resolve(), executable_dir, executable_dir.parent, source_root]
+    for candidate in dict.fromkeys(candidates):
+        if (candidate / DEFAULT_GUIDE_NAME).is_file() and (candidate / ".git").exists():
+            return candidate
+    return source_root
+
+
+def project_defaults() -> ProjectDefaults:
+    project_path = _default_project_path()
+    configured_guides = os.getenv("TASKLOOM_DEFAULT_GUIDE_PATHS")
+    if configured_guides is not None:
+        guide_paths = [value.strip() for value in configured_guides.split(os.pathsep) if value.strip()]
+    else:
+        contract = project_path / DEFAULT_GUIDE_NAME
+        if contract.is_file():
+            guide_paths = [str(contract)]
+        else:
+            guide_candidates = (
+                project_path / "README.md",
+                project_path / "backend" / "TESTING_GUIDE.md",
+                project_path / "backend" / "docs",
+            )
+            guide_paths = [
+                str(path)
+                for path in guide_candidates
+                if path.is_file() or path.is_dir()
+            ]
+
+    configured_test = os.getenv("TASKLOOM_DEFAULT_TEST_COMMAND")
+    if configured_test is not None:
+        test_command = configured_test.strip() or None
+    elif os.name == "nt" and (project_path / ".venv" / "Scripts" / "python.exe").is_file():
+        test_command = r".venv\Scripts\python.exe -m pytest -q"
+    elif (project_path / ".venv" / "bin" / "python").is_file():
+        test_command = ".venv/bin/python -m pytest -q"
+    elif os.name == "nt" and (project_path / "backend" / "venv" / "Scripts" / "python.exe").is_file():
+        test_command = r"backend\venv\Scripts\python.exe -m pytest -q"
+    else:
+        test_command = None
+
+    configured_mcp = os.getenv("TASKLOOM_DEFAULT_MCP_SERVER")
+    mcp_server_name = configured_mcp.strip() if configured_mcp is not None else (
+        "dws_project" if (project_path / DEFAULT_GUIDE_NAME).is_file() or project_path.name.casefold() == "dws" else None
+    )
+    mcp_server_name = mcp_server_name or None
+    configured_mode = os.getenv("TASKLOOM_DEFAULT_MCP_FAILURE_MODE")
+    mcp_failure_mode = McpFailureMode(
+        configured_mode.strip().lower() if configured_mode else (
+            McpFailureMode.blocked if mcp_server_name else McpFailureMode.warning
+        )
+    )
+
+    return ProjectDefaults(
+        project_path=str(project_path),
+        guide_paths=guide_paths,
+        test_command=test_command,
+        mcp_server_name=mcp_server_name,
+        mcp_failure_mode=mcp_failure_mode,
+        git_provider=GitProvider.gitlab,
+    )
+
+
 def profiles_path() -> Path:
     configured = os.getenv("TASKLOOM_PROFILES_PATH")
     return Path(configured).expanduser() if configured else Path.home() / ".taskloom" / "profiles.json"
@@ -96,6 +176,11 @@ def save_profiles(profiles: dict[str, ProjectProfile]) -> None:
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/defaults", response_model=ProjectDefaults)
+async def defaults():
+    return project_defaults()
 
 
 @app.get("/api/tasks", response_model=list[TaskState])
@@ -134,7 +219,19 @@ async def create_task(request: TaskRequest):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     run_id = uuid.uuid4().hex[:12]
-    state = TaskState(id=run_id, task_id=request.task_id, project_path=str(repo), branch=f"task/{request.task_id}", test_command=request.test_command, status=RunStatus.queued, step="Queued", messages=[ChatMessage(role="user", content=request.request)])
+    state = TaskState(
+        id=run_id,
+        task_id=request.task_id,
+        project_path=str(repo),
+        branch=f"tasks/{request.task_id}",
+        test_command=request.test_command,
+        mcp_server_name=request.mcp_server_name,
+        mcp_failure_mode=request.mcp_failure_mode,
+        git_provider=request.git_provider,
+        status=RunStatus.queued,
+        step="Queued",
+        messages=[ChatMessage(role="user", content=request.request)],
+    )
     tasks[run_id] = state
     save_tasks(tasks)
     asyncio.create_task(run_task(request, state))
@@ -160,6 +257,32 @@ async def run_follow_up(message: str, state: TaskState) -> None:
 @app.get("/api/tasks/{run_id}", response_model=TaskState)
 async def task_status(run_id: str):
     return get_state(run_id)
+
+
+@app.get("/api/tasks/{run_id}/events")
+async def task_events(run_id: str, request: Request):
+    """Stream changing task snapshots so the UI can render Codex output live."""
+    get_state(run_id)
+
+    async def snapshots():
+        previous = ""
+        while True:
+            if await request.is_disconnected():
+                return
+            state = get_state(run_id)
+            serialized = state.model_dump_json()
+            if serialized != previous:
+                yield f"data: {serialized}\n\n"
+                previous = serialized
+            if state.status in {RunStatus.passed, RunStatus.failed, RunStatus.blocked}:
+                return
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        snapshots(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/tasks/{run_id}/messages", response_model=TaskState, status_code=202)

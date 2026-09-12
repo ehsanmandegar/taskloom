@@ -10,6 +10,26 @@ class RunStatus(str, Enum):
     testing = "testing"
     passed = "passed"
     failed = "failed"
+    blocked = "blocked"
+
+
+class McpFailureMode(str, Enum):
+    blocked = "blocked"
+    warning = "warning"
+
+
+class McpStatus(str, Enum):
+    not_configured = "not_configured"
+    checking = "checking"
+    ready = "ready"
+    warning = "warning"
+    blocked = "blocked"
+
+
+class GitProvider(str, Enum):
+    auto = "auto"
+    gitlab = "gitlab"
+    github = "github"
 
 
 class TaskRequest(BaseModel):
@@ -18,6 +38,9 @@ class TaskRequest(BaseModel):
     task_id: str = Field(min_length=2, max_length=80)
     request: str = Field(min_length=5, max_length=20_000)
     test_command: str | None = Field(default=None, max_length=500)
+    mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+    mcp_failure_mode: McpFailureMode = McpFailureMode.warning
+    git_provider: GitProvider = GitProvider.auto
 
     @field_validator("task_id")
     @classmethod
@@ -33,6 +56,9 @@ class ProjectProfile(BaseModel):
     project_path: str = Field(min_length=1)
     guide_paths: list[str] = Field(default_factory=list)
     test_command: str | None = Field(default=None, max_length=500)
+    mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+    mcp_failure_mode: McpFailureMode = McpFailureMode.warning
+    git_provider: GitProvider = GitProvider.auto
 
     @field_validator("name")
     @classmethod
@@ -41,6 +67,15 @@ class ProjectProfile(BaseModel):
         if not value:
             raise ValueError("Profile name cannot be empty")
         return value
+
+
+class ProjectDefaults(BaseModel):
+    project_path: str
+    guide_paths: list[str] = Field(default_factory=list)
+    test_command: str | None = None
+    mcp_server_name: str | None = None
+    mcp_failure_mode: McpFailureMode = McpFailureMode.warning
+    git_provider: GitProvider = GitProvider.gitlab
 
 
 class CommitRequest(BaseModel):
@@ -62,9 +97,16 @@ class TaskState(BaseModel):
     project_path: str
     branch: str
     test_command: str | None = None
+    mcp_server_name: str | None = None
+    mcp_failure_mode: McpFailureMode = McpFailureMode.warning
+    mcp_status: McpStatus = McpStatus.not_configured
+    mcp_message: str = ""
+    git_provider: GitProvider = GitProvider.auto
     status: RunStatus
     step: str
     logs: list[str] = Field(default_factory=list)
+    live_output: str = ""
+    live_response: str = ""
     summary: str = ""
     diff: str = ""
     changed_files: list[str] = Field(default_factory=list)

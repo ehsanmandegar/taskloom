@@ -31,6 +31,39 @@ test('turns API validation details into readable form errors', () => {
   assert.match(source, /apiError\(d\.detail,'شروع تسک ناموفق بود'\)/);
 });
 
+test('loads Taskloom defaults while keeping the project path editable', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /fetch\(`\$\{API\}\/api\/defaults`\)/);
+  assert.match(source, /setForm\(current=>current\.project_path\?current:\{\.\.\.current,\.\.\.loaded\}\)/);
+  assert.match(source, /name="project_path" value=\{form\.project_path\} onChange=\{update\}/);
+  assert.match(source, /current\.guide_paths===startupDefaults\.guide_paths\?'':current\.guide_paths/);
+  assert.match(source, /mcp_server_name:current\.mcp_server_name===startupDefaults\.mcp_server_name\?'':current\.mcp_server_name/);
+  assert.match(source, /با تغییر مسیر، راهنما، تست و MCP پیش‌فرض آن پروژه پاک می‌شوند/);
+});
+
+test('keeps the project profile controls aligned in one row', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /aria-label="حذف پروفایل"/);
+  assert.match(source, /<Trash2 size=\{16\}\/\><span>حذف<\/span>/);
+  assert.match(styles, /\.profile-picker\{display:grid;grid-template-columns:minmax\(0,1fr\) auto auto/);
+  assert.match(styles, /\.form \.profile-picker select\{width:auto;min-width:0;height:38px;margin:0/);
+});
+
+test('configures and displays project MCP preflight status', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /name="mcp_server_name" value=\{form\.mcp_server_name\}/);
+  assert.match(source, /name="mcp_failure_mode" value=\{form\.mcp_failure_mode\}/);
+  assert.match(source, /\['passed','failed','blocked'\]\.includes\(task\.status\)/);
+  assert.match(source, /\['failed','blocked'\]\.includes\(task\.status\)/);
+  assert.match(source, /MCP \{task\.mcp_server_name\}: \{task\.mcp_message\|\|task\.mcp_status\}/);
+  assert.match(styles, /\.mcp-state\.blocked/);
+});
+
 test('offers a follow-up chat that resumes the task session', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 
@@ -41,10 +74,15 @@ test('offers a follow-up chat that resumes the task session', () => {
 
 test('can request an automatic commit message from the task Codex session', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
   assert.match(source, /\/api\/tasks\/\$\{task\.id\}\/commit-message/);
   assert.match(source, /Generate commit message with Codex/);
   assert.match(source, /onClick=\{generateCommitMessage\}/);
+  assert.match(source, /<Sparkles size=\{14\}\/>AutoGenerate/);
+  assert.match(source, /<GitCommit size=\{16\}\/>commit/);
+  assert.match(source, /<Upload size=\{16\}\/>push/);
+  assert.match(styles, /\.delivery \.suggest-commit\{height:32px;padding:0 9px;font-size:10px/);
 });
 
 test('sends chat messages with Enter while preserving Shift+Enter for a new line', () => {
@@ -63,4 +101,27 @@ test('distinguishes Codex replies and shows a typing indicator while Codex respo
   assert.match(source, /Codex در حال پاسخ است/);
   assert.match(styles, /\.chat-message\.assistant\{[^}]*background:#eef1fb/);
   assert.match(styles, /@keyframes typing-dot/);
+});
+
+test('streams Codex activity into changes and the in-progress reply', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /new EventSource\(`\$\{API\}\/api\/tasks\/\$\{task\.id\}\/events`\)/);
+  assert.match(source, /codexTyping&&task\.live_output\?task\.live_output/);
+  assert.match(source, /task\.live_response/);
+  assert.match(source, /className="chat-message assistant live-response"/);
+  assert.match(styles, /\.live-console/);
+  assert.match(styles, /@keyframes live-cursor/);
+});
+
+test('renders mixed Persian and English output with per-line direction', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /function DirectionalOutput\(\{text\}\)/);
+  assert.match(source, /className="output-line" dir="auto"/);
+  assert.match(source, /<DirectionalOutput text=\{outputText\}\/\>/);
+  assert.match(source, /<p dir="auto">\{message\.content\}<\/p>/);
+  assert.match(styles, /\.output-line\{display:block;min-height:1\.7em;unicode-bidi:plaintext;text-align:start\}/);
 });
