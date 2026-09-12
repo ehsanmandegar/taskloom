@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import ChatMessage, ChatRequest, CommitRequest, ProjectProfile, RunStatus, TaskRequest, TaskState
+from .models import ChatMessage, ChatRequest, CommitRequest, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState
 from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository
 
 app = FastAPI(title="Taskloom", version="0.1.0")
@@ -66,6 +67,49 @@ def save_tasks(states: dict[str, TaskState]) -> None:
 tasks: dict[str, TaskState] = load_tasks()
 
 
+DEFAULT_GUIDE_NAME = "04-taskloom-project-contract.md"
+
+
+def _default_project_path() -> Path:
+    configured = os.getenv("TASKLOOM_DEFAULT_PROJECT_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    source_root = Path(__file__).resolve().parents[2]
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates = [Path.cwd().resolve(), executable_dir, executable_dir.parent, source_root]
+    for candidate in dict.fromkeys(candidates):
+        if (candidate / DEFAULT_GUIDE_NAME).is_file() and (candidate / ".git").exists():
+            return candidate
+    return source_root
+
+
+def project_defaults() -> ProjectDefaults:
+    project_path = _default_project_path()
+    configured_guides = os.getenv("TASKLOOM_DEFAULT_GUIDE_PATHS")
+    if configured_guides is not None:
+        guide_paths = [value.strip() for value in configured_guides.split(os.pathsep) if value.strip()]
+    else:
+        contract = project_path / DEFAULT_GUIDE_NAME
+        guide_paths = [str(contract)] if contract.is_file() else []
+
+    configured_test = os.getenv("TASKLOOM_DEFAULT_TEST_COMMAND")
+    if configured_test is not None:
+        test_command = configured_test.strip() or None
+    elif os.name == "nt" and (project_path / ".venv" / "Scripts" / "python.exe").is_file():
+        test_command = r".venv\Scripts\python.exe -m pytest -q"
+    elif (project_path / ".venv" / "bin" / "python").is_file():
+        test_command = ".venv/bin/python -m pytest -q"
+    else:
+        test_command = None
+
+    return ProjectDefaults(
+        project_path=str(project_path),
+        guide_paths=guide_paths,
+        test_command=test_command,
+    )
+
+
 def profiles_path() -> Path:
     configured = os.getenv("TASKLOOM_PROFILES_PATH")
     return Path(configured).expanduser() if configured else Path.home() / ".taskloom" / "profiles.json"
@@ -96,6 +140,11 @@ def save_profiles(profiles: dict[str, ProjectProfile]) -> None:
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/defaults", response_model=ProjectDefaults)
+async def defaults():
+    return project_defaults()
 
 
 @app.get("/api/tasks", response_model=list[TaskState])

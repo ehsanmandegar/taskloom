@@ -43,6 +43,12 @@ class ProjectProfile(BaseModel):
         return value
 
 
+class ProjectDefaults(BaseModel):
+    project_path: str
+    guide_paths: list[str] = Field(default_factory=list)
+    test_command: str | None = None
+
+
 class CommitRequest(BaseModel):
     message: str = Field(min_length=3, max_length=200)
 

@@ -31,6 +31,16 @@ test('turns API validation details into readable form errors', () => {
   assert.match(source, /apiError\(d\.detail,'شروع تسک ناموفق بود'\)/);
 });
 
+test('loads Taskloom defaults while keeping the project path editable', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /fetch\(`\$\{API\}\/api\/defaults`\)/);
+  assert.match(source, /project_path:current\.project_path\|\|loaded\.project_path/);
+  assert.match(source, /name="project_path" value=\{form\.project_path\} onChange=\{update\}/);
+  assert.match(source, /current\.guide_paths===startupDefaults\.guide_paths\?'':current\.guide_paths/);
+  assert.match(source, /با تغییر مسیر، راهنما و تست پیش‌فرض آن پروژه پاک می‌شوند/);
+});
+
 test('offers a follow-up chat that resumes the task session', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 

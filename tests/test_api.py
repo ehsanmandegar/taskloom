@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from backend.app import services
 from backend.app import main as main_module
-from backend.app.main import app, load_tasks, save_tasks, tasks
+from backend.app.main import app, load_tasks, project_defaults, save_tasks, tasks
 from backend.app.guide_mcp import GuideCatalog
 from backend.app.models import RunStatus, TaskRequest, TaskState
 from backend.app.services import build_prompt, codex_response, continue_task, generate_commit_message, resolve_guides
@@ -18,6 +19,36 @@ client = TestClient(app)
 
 def test_health():
     assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_defaults_point_to_taskloom_and_its_contract(monkeypatch):
+    project_root = Path(__file__).parents[1].resolve()
+    monkeypatch.setenv("TASKLOOM_DEFAULT_PROJECT_PATH", str(project_root))
+    monkeypatch.delenv("TASKLOOM_DEFAULT_GUIDE_PATHS", raising=False)
+    monkeypatch.delenv("TASKLOOM_DEFAULT_TEST_COMMAND", raising=False)
+
+    response = client.get("/api/defaults")
+
+    assert response.status_code == 200
+    assert response.json()["project_path"] == str(project_root)
+    assert response.json()["guide_paths"] == [str(project_root / "04-taskloom-project-contract.md")]
+    assert response.json()["test_command"] in {
+        r".venv\Scripts\python.exe -m pytest -q",
+        ".venv/bin/python -m pytest -q",
+        None,
+    }
+
+
+def test_defaults_can_be_overridden_for_another_project(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_DEFAULT_PROJECT_PATH", str(tmp_path))
+    monkeypatch.setenv("TASKLOOM_DEFAULT_GUIDE_PATHS", os.pathsep.join(["AGENTS.md", "docs"]))
+    monkeypatch.setenv("TASKLOOM_DEFAULT_TEST_COMMAND", "python -m pytest tests/unit")
+
+    defaults = project_defaults()
+
+    assert defaults.project_path == str(tmp_path.resolve())
+    assert defaults.guide_paths == ["AGENTS.md", "docs"]
+    assert defaults.test_command == "python -m pytest tests/unit"
 
 
 def test_rejects_non_git_directory(tmp_path: Path):
