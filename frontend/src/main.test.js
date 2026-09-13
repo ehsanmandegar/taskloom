@@ -39,7 +39,20 @@ test('loads Taskloom defaults while keeping the project path editable', () => {
   assert.match(source, /name="project_path" value=\{form\.project_path\} onChange=\{update\}/);
   assert.match(source, /current\.guide_paths===startupDefaults\.guide_paths\?'':current\.guide_paths/);
   assert.match(source, /mcp_server_name:current\.mcp_server_name===startupDefaults\.mcp_server_name\?'':current\.mcp_server_name/);
-  assert.match(source, /با تغییر مسیر، راهنما، تست و MCP پیش‌فرض آن پروژه پاک می‌شوند/);
+  assert.match(source, /base_branch:current\.base_branch===startupDefaults\.base_branch\?defaultBaseBranch\(value\):current\.base_branch/);
+  assert.match(source, /برنچ مبنای پیش‌فرض همان پروژه تنظیم می‌شوند/);
+});
+
+test('lets each project profile choose its task base branch', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /base_branch:'main'/);
+  assert.match(source, /defaultBaseBranch=.*?'sandbox':'main'/);
+  assert.match(source, /base_branch:defaults\.base_branch\|\|'main'/);
+  assert.match(source, /base_branch:profile\.base_branch\|\|defaultBaseBranch\(profile\.project_path\)/);
+  assert.match(source, /base_branch:form\.base_branch\.trim\(\)/);
+  assert.match(source, /name="base_branch" value=\{form\.base_branch\}/);
+  assert.match(source, /برنچ مبنا/);
 });
 
 test('keeps the project profile controls aligned in one row', () => {
@@ -58,7 +71,7 @@ test('configures and displays project MCP preflight status', () => {
 
   assert.match(source, /name="mcp_server_name" value=\{form\.mcp_server_name\}/);
   assert.match(source, /name="mcp_failure_mode" value=\{form\.mcp_failure_mode\}/);
-  assert.match(source, /\['passed','failed','blocked'\]\.includes\(task\.status\)/);
+  assert.match(source, /\['passed','failed','blocked','stopped'\]\.includes\(task\.status\)/);
   assert.match(source, /\['failed','blocked'\]\.includes\(task\.status\)/);
   assert.match(source, /MCP \{task\.mcp_server_name\}: \{task\.mcp_message\|\|task\.mcp_status\}/);
   assert.match(styles, /\.mcp-state\.blocked/);
@@ -124,4 +137,18 @@ test('renders mixed Persian and English output with per-line direction', () => {
   assert.match(source, /<DirectionalOutput text=\{outputText\}\/\>/);
   assert.match(source, /<p dir="auto">\{message\.content\}<\/p>/);
   assert.match(styles, /\.output-line\{display:block;min-height:1\.7em;unicode-bidi:plaintext;text-align:start\}/);
+});
+
+test('can stop an active Codex run and resume its conversation', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /\/api\/tasks\/\$\{task\.id\}\/stop/);
+  assert.match(source, /running&&task\.codex_thread_id&&<button className="stop-run"/);
+  assert.match(source, /onClick=\{stopTask\}/);
+  assert.match(source, /> توقف<\/button>/);
+  assert.match(source, /task\?\.status==='stopped'&&task\.live_response/);
+  assert.match(source, /پاسخ Codex متوقف شد/);
+  assert.match(styles, /\.stop-run\{/);
+  assert.match(styles, /\.status mark\.stopped/);
 });

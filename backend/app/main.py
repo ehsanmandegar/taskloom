@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState
+from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState, valid_branch_name
 from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository
 
 app = FastAPI(title="Taskloom", version="0.1.0")
@@ -65,6 +65,20 @@ def save_tasks(states: dict[str, TaskState]) -> None:
 
 
 tasks: dict[str, TaskState] = load_tasks()
+task_workers: dict[str, asyncio.Task] = {}
+
+
+def track_worker(run_id: str, worker: asyncio.Task | None) -> None:
+    """Keep the active task handle so a user can stop its subprocess safely."""
+    if worker is None:
+        return
+    task_workers[run_id] = worker
+
+    def forget(completed: asyncio.Task) -> None:
+        if task_workers.get(run_id) is completed:
+            task_workers.pop(run_id, None)
+
+    worker.add_done_callback(forget)
 
 
 DEFAULT_GUIDE_NAME = "04-taskloom-project-contract.md"
@@ -93,6 +107,10 @@ def _default_project_path() -> Path:
 
 def project_defaults() -> ProjectDefaults:
     project_path = _default_project_path()
+    configured_dws = os.getenv("DWS_PROJECT_PATH")
+    is_dws = project_path.name.casefold() == "dws" or bool(
+        configured_dws and Path(configured_dws).expanduser().resolve() == project_path
+    )
     configured_guides = os.getenv("TASKLOOM_DEFAULT_GUIDE_PATHS")
     if configured_guides is not None:
         guide_paths = [value.strip() for value in configured_guides.split(os.pathsep) if value.strip()]
@@ -135,10 +153,13 @@ def project_defaults() -> ProjectDefaults:
             McpFailureMode.blocked if mcp_server_name else McpFailureMode.warning
         )
     )
+    configured_base = os.getenv("TASKLOOM_DEFAULT_BASE_BRANCH")
+    base_branch = valid_branch_name(configured_base) if configured_base else ("sandbox" if is_dws else "main")
 
     return ProjectDefaults(
         project_path=str(project_path),
         guide_paths=guide_paths,
+        base_branch=base_branch,
         test_command=test_command,
         mcp_server_name=mcp_server_name,
         mcp_failure_mode=mcp_failure_mode,
@@ -224,6 +245,7 @@ async def create_task(request: TaskRequest):
         task_id=request.task_id,
         project_path=str(repo),
         branch=f"tasks/{request.task_id}",
+        base_branch=request.base_branch,
         test_command=request.test_command,
         mcp_server_name=request.mcp_server_name,
         mcp_failure_mode=request.mcp_failure_mode,
@@ -234,7 +256,7 @@ async def create_task(request: TaskRequest):
     )
     tasks[run_id] = state
     save_tasks(tasks)
-    asyncio.create_task(run_task(request, state))
+    track_worker(run_id, asyncio.create_task(run_task(request, state)))
     return state
 
 
@@ -274,7 +296,7 @@ async def task_events(run_id: str, request: Request):
             if serialized != previous:
                 yield f"data: {serialized}\n\n"
                 previous = serialized
-            if state.status in {RunStatus.passed, RunStatus.failed, RunStatus.blocked}:
+            if state.status in {RunStatus.passed, RunStatus.failed, RunStatus.blocked, RunStatus.stopped}:
                 return
             await asyncio.sleep(0.1)
 
@@ -296,7 +318,28 @@ async def send_message(run_id: str, request: ChatRequest):
     state.messages.append(ChatMessage(role="user", content=message))
     state.status, state.step, state.error = RunStatus.queued, "Queued follow-up", None
     save_tasks(tasks)
-    asyncio.create_task(run_follow_up(message, state))
+    track_worker(run_id, asyncio.create_task(run_follow_up(message, state)))
+    return state
+
+
+@app.post("/api/tasks/{run_id}/stop", response_model=TaskState)
+async def stop_task(run_id: str):
+    state = get_state(run_id)
+    if state.status not in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
+        raise HTTPException(409, "This task is not currently running")
+
+    state.step = "Stopping Codex"
+    worker = task_workers.get(run_id)
+    if worker is not None and not worker.done():
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+    if state.status in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
+        state.status, state.step, state.error = RunStatus.stopped, "Stopped by user", None
+        state.logs.append("Run stopped by user")
+    save_tasks(tasks)
     return state
 
 
