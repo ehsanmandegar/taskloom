@@ -16,6 +16,32 @@ from backend.app.services import build_prompt, codex_response, continue_task, ge
 client = TestClient(app)
 
 
+def test_command_resolves_relative_executable_from_working_directory(monkeypatch):
+    project_root = Path(__file__).parents[1]
+    executable = project_root / "backend" / "app" / "services.py"
+    calls = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"tests passed", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Process()
+
+    monkeypatch.setattr(services.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    code, output = asyncio.run(
+        services.command([str(executable.relative_to(project_root)), "-m", "pytest", "-q"], project_root)
+    )
+
+    assert (code, output) == (0, "tests passed")
+    assert calls[0][0] == (str(executable.resolve()), "-m", "pytest", "-q")
+    assert calls[0][1]["cwd"] == str(project_root)
+
+
 def test_health():
     assert client.get("/api/health").json() == {"status": "ok"}
 

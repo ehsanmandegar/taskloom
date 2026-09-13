@@ -10,7 +10,16 @@ from .models import ChatMessage, RunStatus, TaskRequest, TaskState
 
 
 async def command(args: list[str], cwd: Path, timeout: int = 900) -> tuple[int, str]:
-    process = await asyncio.create_subprocess_exec(*args, cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=os.environ.copy())
+    executable = args[0]
+    executable_path = Path(executable).expanduser()
+    if not executable_path.is_absolute() and any(separator in executable for separator in ("/", "\\")):
+        executable_path = cwd / executable_path
+    if executable_path.is_file():
+        executable = str(executable_path.resolve())
+    else:
+        executable = shutil.which(executable) or executable
+
+    process = await asyncio.create_subprocess_exec(executable, *args[1:], cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=os.environ.copy())
     try:
         output, _ = await asyncio.wait_for(process.communicate(), timeout)
     except asyncio.TimeoutError:
