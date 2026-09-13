@@ -33,11 +33,25 @@ class GitProvider(str, Enum):
     github = "github"
 
 
+def valid_branch_name(value: str) -> str:
+    value = value.strip()
+    invalid_part = any(part in {"", ".", ".."} for part in value.split("/"))
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value)
+        or invalid_part
+        or ".." in value
+        or value.endswith((".", "/", ".lock"))
+    ):
+        raise ValueError("Branch name contains characters or sequences Git does not allow")
+    return value
+
+
 class TaskRequest(BaseModel):
     project_path: str = Field(min_length=1)
     guide_paths: list[str] = Field(default_factory=list)
     task_id: str = Field(min_length=2, max_length=80)
     request: str = Field(min_length=5, max_length=20_000)
+    base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
@@ -51,11 +65,17 @@ class TaskRequest(BaseModel):
             raise ValueError("Task ID may only contain letters, numbers, dot, dash and underscore")
         return value
 
+    @field_validator("base_branch")
+    @classmethod
+    def clean_base_branch(cls, value: str) -> str:
+        return valid_branch_name(value)
+
 
 class ProjectProfile(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     project_path: str = Field(min_length=1)
     guide_paths: list[str] = Field(default_factory=list)
+    base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
@@ -69,10 +89,16 @@ class ProjectProfile(BaseModel):
             raise ValueError("Profile name cannot be empty")
         return value
 
+    @field_validator("base_branch")
+    @classmethod
+    def clean_base_branch(cls, value: str) -> str:
+        return valid_branch_name(value)
+
 
 class ProjectDefaults(BaseModel):
     project_path: str
     guide_paths: list[str] = Field(default_factory=list)
+    base_branch: str = "main"
     test_command: str | None = None
     mcp_server_name: str | None = None
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
@@ -97,6 +123,7 @@ class TaskState(BaseModel):
     task_id: str
     project_path: str
     branch: str
+    base_branch: str = "main"
     test_command: str | None = None
     mcp_server_name: str | None = None
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning

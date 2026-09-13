@@ -39,7 +39,20 @@ test('loads Taskloom defaults while keeping the project path editable', () => {
   assert.match(source, /name="project_path" value=\{form\.project_path\} onChange=\{update\}/);
   assert.match(source, /current\.guide_paths===startupDefaults\.guide_paths\?'':current\.guide_paths/);
   assert.match(source, /mcp_server_name:current\.mcp_server_name===startupDefaults\.mcp_server_name\?'':current\.mcp_server_name/);
-  assert.match(source, /با تغییر مسیر، راهنما، تست و MCP پیش‌فرض آن پروژه پاک می‌شوند/);
+  assert.match(source, /base_branch:current\.base_branch===startupDefaults\.base_branch\?defaultBaseBranch\(value\):current\.base_branch/);
+  assert.match(source, /برنچ مبنای پیش‌فرض همان پروژه تنظیم می‌شوند/);
+});
+
+test('lets each project profile choose its task base branch', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /base_branch:'main'/);
+  assert.match(source, /defaultBaseBranch=.*?'sandbox':'main'/);
+  assert.match(source, /base_branch:defaults\.base_branch\|\|'main'/);
+  assert.match(source, /base_branch:profile\.base_branch\|\|defaultBaseBranch\(profile\.project_path\)/);
+  assert.match(source, /base_branch:form\.base_branch\.trim\(\)/);
+  assert.match(source, /name="base_branch" value=\{form\.base_branch\}/);
+  assert.match(source, /برنچ مبنا/);
 });
 
 test('keeps the project profile controls aligned in one row', () => {

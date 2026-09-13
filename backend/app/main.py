@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState
+from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState, valid_branch_name
 from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository
 
 app = FastAPI(title="Taskloom", version="0.1.0")
@@ -107,6 +107,10 @@ def _default_project_path() -> Path:
 
 def project_defaults() -> ProjectDefaults:
     project_path = _default_project_path()
+    configured_dws = os.getenv("DWS_PROJECT_PATH")
+    is_dws = project_path.name.casefold() == "dws" or bool(
+        configured_dws and Path(configured_dws).expanduser().resolve() == project_path
+    )
     configured_guides = os.getenv("TASKLOOM_DEFAULT_GUIDE_PATHS")
     if configured_guides is not None:
         guide_paths = [value.strip() for value in configured_guides.split(os.pathsep) if value.strip()]
@@ -149,10 +153,13 @@ def project_defaults() -> ProjectDefaults:
             McpFailureMode.blocked if mcp_server_name else McpFailureMode.warning
         )
     )
+    configured_base = os.getenv("TASKLOOM_DEFAULT_BASE_BRANCH")
+    base_branch = valid_branch_name(configured_base) if configured_base else ("sandbox" if is_dws else "main")
 
     return ProjectDefaults(
         project_path=str(project_path),
         guide_paths=guide_paths,
+        base_branch=base_branch,
         test_command=test_command,
         mcp_server_name=mcp_server_name,
         mcp_failure_mode=mcp_failure_mode,
@@ -238,6 +245,7 @@ async def create_task(request: TaskRequest):
         task_id=request.task_id,
         project_path=str(repo),
         branch=f"tasks/{request.task_id}",
+        base_branch=request.base_branch,
         test_command=request.test_command,
         mcp_server_name=request.mcp_server_name,
         mcp_failure_mode=request.mcp_failure_mode,
