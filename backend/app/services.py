@@ -40,9 +40,15 @@ async def command(args: list[str], cwd: Path, timeout: int = 900) -> tuple[int, 
             await asyncio.wait_for(read_output(), timeout)
             output = b"".join(chunks)
     except asyncio.TimeoutError:
-        process.kill()
+        if process.returncode is None:
+            process.kill()
         await process.communicate()
         return 124, f"Command timed out after {timeout}s"
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.kill()
+        await process.communicate()
+        raise
     return process.returncode or 0, output.decode("utf-8", errors="replace")
 
 
@@ -325,10 +331,18 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         code, output = await command(["git", "status", "--porcelain"], repo)
         if code or output.strip():
             raise RuntimeError("Repository must be clean before starting a task")
-        code, output = await command(["git", "switch", "-c", state.branch], repo)
+        state.base_branch = req.base_branch
+        source_branch = req.base_branch
+        code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{req.base_branch}^{{commit}}"], repo)
+        if code:
+            source_branch = f"origin/{req.base_branch}"
+            code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{source_branch}^{{commit}}"], repo)
+        if code:
+            raise RuntimeError(f"Base branch `{req.base_branch}` was not found locally or on origin")
+        code, output = await command(["git", "switch", "-c", state.branch, source_branch], repo)
         if code:
             raise RuntimeError(output.strip() or "Could not create branch")
-        state.logs.append(f"Created {state.branch}")
+        state.logs.append(f"Created {state.branch} from {source_branch}")
         state.step = "Codex is implementing the request"
         code, output = await codex_command([codex, "exec", "--sandbox", "workspace-write", "--color", "never", "--json", build_prompt(req, guides, active_mcp)], repo, state, 3600)
         runtime_issue = mcp_runtime_issue(output, active_mcp) if active_mcp else None
@@ -369,6 +383,13 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         if code:
             state.error = f"Tests exited with code {code}"
         await refresh_git(state, repo)
+    except asyncio.CancelledError:
+        state.status, state.step, state.error = RunStatus.stopped, "Stopped by user", None
+        state.logs.append("Run stopped by user")
+        try:
+            await refresh_git(state, repo)
+        except Exception:
+            pass
     except Exception as exc:
         state.status, state.step, state.error = RunStatus.failed, "Run failed", str(exc)
         state.logs.append(str(exc))
@@ -407,6 +428,16 @@ async def continue_task(message: str, state: TaskState) -> None:
             state.committed = False
             state.pushed = False
         cleanup_owned_test_artifacts(repo)
+    except asyncio.CancelledError:
+        state.status, state.step, state.error = RunStatus.stopped, "Stopped by user", None
+        state.logs.append("Conversation stopped by user")
+        try:
+            await refresh_git(state, repo)
+        except Exception:
+            pass
+        if state.changed_files:
+            state.committed = False
+            state.pushed = False
     except Exception as exc:
         state.status, state.step, state.error = RunStatus.failed, "Conversation failed", str(exc)
         state.logs.append(str(exc))
@@ -477,10 +508,10 @@ async def create_merge_request(state: TaskState) -> str:
     provider = state.git_provider
     if provider == GitProvider.github or (provider == GitProvider.auto and "github" in normalized_remote):
         cli_name = "gh"
-        args = ["pr", "create", "--fill", "--head", state.branch, "--base", "develop"]
+        args = ["pr", "create", "--fill", "--head", state.branch, "--base", state.base_branch]
     elif provider == GitProvider.gitlab or (provider == GitProvider.auto and "gitlab" in normalized_remote):
         cli_name = "glab"
-        args = ["mr", "create", "--fill", "--source-branch", state.branch, "--target-branch", "develop", "--yes"]
+        args = ["mr", "create", "--fill", "--source-branch", state.branch, "--target-branch", state.base_branch, "--yes"]
     else:
         raise ValueError("Merge requests are supported for GitHub and GitLab origin remotes")
 

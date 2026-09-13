@@ -26,6 +26,7 @@ def test_defaults_point_to_taskloom_and_its_contract(monkeypatch):
     monkeypatch.setenv("TASKLOOM_DEFAULT_PROJECT_PATH", str(project_root))
     monkeypatch.delenv("TASKLOOM_DEFAULT_GUIDE_PATHS", raising=False)
     monkeypatch.delenv("TASKLOOM_DEFAULT_TEST_COMMAND", raising=False)
+    monkeypatch.delenv("TASKLOOM_DEFAULT_BASE_BRANCH", raising=False)
 
     response = client.get("/api/defaults")
 
@@ -39,6 +40,7 @@ def test_defaults_point_to_taskloom_and_its_contract(monkeypatch):
     }
     assert response.json()["mcp_server_name"] == "dws_project"
     assert response.json()["mcp_failure_mode"] == "blocked"
+    assert response.json()["base_branch"] == "main"
 
 
 def test_defaults_can_be_overridden_for_another_project(monkeypatch, tmp_path: Path):
@@ -47,6 +49,7 @@ def test_defaults_can_be_overridden_for_another_project(monkeypatch, tmp_path: P
     monkeypatch.setenv("TASKLOOM_DEFAULT_TEST_COMMAND", "python -m pytest tests/unit")
     monkeypatch.setenv("TASKLOOM_DEFAULT_MCP_SERVER", "other_project")
     monkeypatch.setenv("TASKLOOM_DEFAULT_MCP_FAILURE_MODE", "warning")
+    monkeypatch.setenv("TASKLOOM_DEFAULT_BASE_BRANCH", "release/next")
 
     defaults = project_defaults()
 
@@ -55,6 +58,7 @@ def test_defaults_can_be_overridden_for_another_project(monkeypatch, tmp_path: P
     assert defaults.test_command == "python -m pytest tests/unit"
     assert defaults.mcp_server_name == "other_project"
     assert defaults.mcp_failure_mode == McpFailureMode.warning
+    assert defaults.base_branch == "release/next"
 
 
 def test_dws_defaults_include_the_documentation_directory(monkeypatch, tmp_path: Path):
@@ -66,11 +70,14 @@ def test_dws_defaults_include_the_documentation_directory(monkeypatch, tmp_path:
     readme.write_text("project", encoding="utf-8")
     testing_guide.write_text("testing", encoding="utf-8")
     monkeypatch.setenv("TASKLOOM_DEFAULT_PROJECT_PATH", str(tmp_path))
+    monkeypatch.setenv("DWS_PROJECT_PATH", str(tmp_path))
     monkeypatch.delenv("TASKLOOM_DEFAULT_GUIDE_PATHS", raising=False)
+    monkeypatch.delenv("TASKLOOM_DEFAULT_BASE_BRANCH", raising=False)
 
     defaults = project_defaults()
 
     assert defaults.guide_paths == [str(readme), str(testing_guide), str(docs)]
+    assert defaults.base_branch == "sandbox"
 
 
 def test_rejects_non_git_directory(tmp_path: Path):
@@ -81,6 +88,12 @@ def test_rejects_non_git_directory(tmp_path: Path):
 def test_invalid_task_id_rejected(tmp_path: Path):
     (tmp_path / ".git").mkdir()
     response = client.post("/api/tasks", json={"project_path": str(tmp_path), "task_id": "bad/id", "request": "add a useful feature"})
+    assert response.status_code == 422
+
+
+def test_invalid_base_branch_is_rejected(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    response = client.post("/api/tasks", json={"project_path": str(tmp_path), "task_id": "podw-branch", "request": "add a useful feature", "base_branch": "../sandbox"})
     assert response.status_code == 422
 
 
@@ -96,12 +109,48 @@ def test_new_tasks_use_the_tasks_branch_prefix(monkeypatch, tmp_path: Path):
         project_path=str(tmp_path),
         task_id="podw-225",
         request="add a useful feature",
+        base_branch="sandbox",
     )
 
     state = asyncio.run(main_module.create_task(request))
 
     assert state.branch == "tasks/podw-225"
+    assert state.base_branch == "sandbox"
     tasks.pop(state.id)
+
+
+def test_execute_task_creates_the_task_branch_from_selected_base(monkeypatch):
+    project_root = Path(__file__).parents[1].resolve()
+    request = TaskRequest(
+        project_path=str(project_root),
+        task_id="podw-base",
+        request="add a useful feature",
+        base_branch="sandbox",
+    )
+    state = TaskState(
+        id="base-branch",
+        task_id=request.task_id,
+        project_path=str(project_root),
+        branch="tasks/podw-base",
+        base_branch=request.base_branch,
+        status=RunStatus.queued,
+        step="Queued",
+    )
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append(args)
+        if args[:3] == ["git", "switch", "-c"]:
+            return 1, "stop after branch assertion"
+        return 0, ""
+
+    monkeypatch.setattr(services, "command", fake_command)
+    monkeypatch.setattr(services.shutil, "which", lambda name: "codex")
+
+    asyncio.run(execute_task(request, state))
+
+    assert ["git", "rev-parse", "--verify", "--quiet", "refs/heads/sandbox^{commit}"] in calls
+    assert ["git", "switch", "-c", "tasks/podw-base", "sandbox"] in calls
 
 
 def test_push_requires_commit(tmp_path: Path):
@@ -125,13 +174,13 @@ def test_merge_request_requires_push():
         (
             "https://github.com/acme/example.git",
             "gh",
-            ["pr", "create", "--fill", "--head", "tasks/podw-214", "--base", "develop"],
+            ["pr", "create", "--fill", "--head", "tasks/podw-214", "--base", "sandbox"],
             "https://github.com/acme/example/pull/42",
         ),
         (
             "git@gitlab.com:acme/example.git",
             "glab",
-            ["mr", "create", "--fill", "--source-branch", "tasks/podw-214", "--target-branch", "develop", "--yes"],
+            ["mr", "create", "--fill", "--source-branch", "tasks/podw-214", "--target-branch", "sandbox", "--yes"],
             "https://gitlab.com/acme/example/-/merge_requests/42",
         ),
     ],
@@ -140,7 +189,7 @@ def test_creates_merge_request_and_returns_url(monkeypatch, tmp_path: Path, remo
     project_root = Path(__file__).parents[1]
     monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
     run_id = f"pushed-{cli}"
-    tasks[run_id] = TaskState(id=run_id, task_id="podw-214", project_path=str(project_root), branch="tasks/podw-214", status=RunStatus.passed, step="ready", committed=True, pushed=True)
+    tasks[run_id] = TaskState(id=run_id, task_id="podw-214", project_path=str(project_root), branch="tasks/podw-214", base_branch="sandbox", status=RunStatus.passed, step="ready", committed=True, pushed=True)
     calls = []
 
     async def fake_command(args, cwd, timeout=900):
@@ -168,7 +217,7 @@ def test_profiles_are_persisted(monkeypatch, tmp_path: Path):
 
     assert client.put("/api/profiles/project%201", json=profile).status_code == 200
     assert client.get("/api/profiles").json() == [
-        {**profile, "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto"}
+        {**profile, "base_branch": "main", "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto"}
     ]
     assert profile_file.exists()
 
@@ -381,7 +430,44 @@ def test_task_event_stream_returns_latest_terminal_snapshot():
         tasks.pop(state.id, None)
 
 
-def test_follow_up_is_queued_for_the_existing_codex_session(monkeypatch, tmp_path: Path):
+def test_stopping_a_running_task_cancels_worker_and_keeps_session_resumable(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+
+    async def scenario():
+        state = TaskState(
+            id="stop-me",
+            task_id="podw-stop",
+            project_path="unused",
+            branch="tasks/podw-stop",
+            status=RunStatus.running,
+            step="Codex is responding",
+            codex_thread_id="thread-stop",
+            live_response="پاسخ ناتمام",
+        )
+        tasks[state.id] = state
+        started = asyncio.Event()
+
+        async def active_worker():
+            started.set()
+            await asyncio.Event().wait()
+
+        worker = asyncio.create_task(active_worker())
+        main_module.task_workers[state.id] = worker
+        await started.wait()
+        try:
+            result = await main_module.stop_task(state.id)
+            assert worker.cancelled()
+            assert result.status == RunStatus.stopped
+            assert result.codex_thread_id == "thread-stop"
+            assert result.live_response == "پاسخ ناتمام"
+        finally:
+            tasks.pop(state.id, None)
+            main_module.task_workers.pop(state.id, None)
+
+    asyncio.run(scenario())
+
+
+def test_follow_up_is_queued_for_a_stopped_codex_session(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
     run_id = "chat-ready"
     tasks[run_id] = TaskState(
@@ -389,8 +475,8 @@ def test_follow_up_is_queued_for_the_existing_codex_session(monkeypatch, tmp_pat
         task_id="podw-217",
         project_path=str(Path(__file__).parents[1]),
         branch="tasks/podw-217",
-        status=RunStatus.passed,
-        step="ready",
+        status=RunStatus.stopped,
+        step="Stopped by user",
         codex_thread_id="thread-123",
     )
 
