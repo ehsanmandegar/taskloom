@@ -6,16 +6,32 @@ import os
 import re
 import shlex
 import shutil
+from urllib.parse import unquote, urlsplit
 from pathlib import Path
 from typing import Callable
 
 from .models import ChatMessage, GitProvider, McpFailureMode, McpStatus, RunStatus, TaskRequest, TaskState
 
 
+ADMIN_SQL_RUNNER = (
+    "from pathlib import Path\n"
+    "from urllib.parse import urlsplit\n"
+    "import psycopg2\n"
+    "from app.core.config import get_base_settings\n"
+    "url = get_base_settings().TEST_DATABASE_URL\n"
+    "parsed = urlsplit(url or '')\n"
+    "if parsed.scheme not in {'postgres', 'postgresql'} or parsed.hostname not in {'localhost', '127.0.0.1', '::1'}:\n"
+    "    raise RuntimeError('TEST_DATABASE_URL must target a local PostgreSQL database')\n"
+    "sql = Path('scripts/grant_local_test_admin.sql').read_text(encoding='utf-8')\n"
+    "with psycopg2.connect(url) as connection:\n"
+    "    connection.cursor().execute(sql)\n"
+)
+
+
 _command_output_handler: ContextVar[Callable[[str], None] | None] = ContextVar("command_output_handler", default=None)
 
 
-async def command(args: list[str], cwd: Path, timeout: int = 900) -> tuple[int, str]:
+async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
     executable = args[0]
     executable_path = Path(executable).expanduser()
     if not executable_path.is_absolute() and any(separator in executable for separator in ("/", "\\")):
@@ -25,7 +41,7 @@ async def command(args: list[str], cwd: Path, timeout: int = 900) -> tuple[int, 
     else:
         executable = shutil.which(executable) or executable
 
-    process = await asyncio.create_subprocess_exec(executable, *args[1:], cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=os.environ.copy())
+    process = await asyncio.create_subprocess_exec(executable, *args[1:], cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env or os.environ.copy())
     handler = _command_output_handler.get()
     try:
         if handler is None:
@@ -75,6 +91,73 @@ def cleanup_owned_test_artifacts(repo: Path) -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
+def test_setup_commands(repo: Path) -> tuple[Path, list[tuple[list[str], dict[str, str] | None]]]:
+    """Return local test setup commands without placing secrets in the output."""
+    backend = repo / "backend"
+    scripts = backend / "scripts"
+    interpreter = backend / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    required = [
+        scripts / "seed_local_test_database.py",
+        scripts / "bootstrap_sso_tokens.py",
+        scripts / "grant_local_test_admin.sql",
+    ]
+    if not interpreter.is_file():
+        raise RuntimeError("Test setup requires backend/venv with its Python interpreter")
+    if missing := [str(path.relative_to(repo)) for path in required if not path.is_file()]:
+        raise RuntimeError(f"Test setup scripts are missing: {', '.join(missing)}")
+    database_url = os.getenv("TEST_DATABASE_URL", "").strip()
+    if database_url:
+        parsed = urlsplit(database_url)
+        if parsed.hostname is None or parsed.hostname.casefold() not in {"localhost", "127.0.0.1", "::1"}:
+            raise RuntimeError("Test setup only permits TEST_DATABASE_URL hosts localhost, 127.0.0.1, or ::1")
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.path.strip("/"):
+            raise RuntimeError("TEST_DATABASE_URL must be a PostgreSQL URL with a database name")
+    psql = shutil.which("psql")
+    executable = str(interpreter)
+    if psql and database_url:
+        psql_env = os.environ.copy()
+        psql_env.update(
+            {
+                "PGHOST": parsed.hostname,
+                "PGPORT": str(parsed.port or 5432),
+                "PGUSER": unquote(parsed.username or ""),
+                "PGPASSWORD": unquote(parsed.password or ""),
+                "PGDATABASE": unquote(parsed.path.lstrip("/").split("/", 1)[0]),
+            }
+        )
+        admin_command = ([psql, "-v", "ON_ERROR_STOP=1", "-f", "scripts/grant_local_test_admin.sql"], psql_env)
+    else:
+        admin_command = ([executable, "-c", ADMIN_SQL_RUNNER], None)
+    return backend, [
+        ([executable, "scripts/seed_local_test_database.py", "--reset-public"], None),
+        ([executable, "scripts/bootstrap_sso_tokens.py"], None),
+        admin_command,
+    ]
+
+
+async def run_test_setup(repo: Path) -> str:
+    """Reset a verified local test DB, retry login bootstrap, then grant admin access."""
+    backend, commands = test_setup_commands(repo)
+    labels = ("Resetting local test database", "Bootstrapping test-user logins", "Granting first test user admin access")
+    transcript: list[str] = []
+    for index, (label, (args, command_env)) in enumerate(zip(labels, commands)):
+        attempts = 3 if index == 1 else 1
+        for attempt in range(1, attempts + 1):
+            code, output = await command(args, backend, 900, command_env)
+            transcript.append(f"{label}{f' (attempt {attempt}/{attempts})' if attempts > 1 else ''}: {'ok' if code == 0 else 'failed'}")
+            if code == 0:
+                break
+        else:
+            raise RuntimeError(f"{label} failed after {attempts} attempts")
+    return "\n".join(transcript)[-20_000:]
+
+
+async def prepare_tests(state: TaskState, repo: Path, step: str) -> None:
+    state.step = step
+    state.test_setup_output = await run_test_setup(repo)
+    state.logs.append("Local test environment setup completed")
+
+
 def resolve_guides(repo: Path, paths: list[str]) -> list[Path]:
     result: list[Path] = []
     for raw in paths:
@@ -109,9 +192,13 @@ def build_prompt(req: TaskRequest, guides: list[Path], active_mcp: str | None = 
 Before inspecting the repository directly, use the read-only tools from the `{active_mcp}` MCP server for project knowledge. Start with `search_docs`, `read_doc`, `search_code`, or `read_file` as appropriate. Treat MCP responses as context only. Do not use its `run_tests` tool as evidence for Taskloom gates; Taskloom runs the required test plan independently."""
     elif active_mcp:
         mcp_instruction = f"\nUse the read-only project-knowledge tools from the `{active_mcp}` MCP server before inspecting the repository directly. Treat its responses as context, not test-gate evidence."
+    test_setup_instruction = ""
+    if req.test_setup_enabled:
+        test_setup_instruction = """
+Local test setup has been explicitly enabled for this task. Taskloom prepares it before this session and again before its final test gate. If you run a stateful project test yourself, first run the project's documented local-test setup: reset only TEST_DATABASE_URL after confirming it points to localhost, bootstrap SSO tokens (retry up to three total attempts), then grant the first test user admin access. Stop and report a failed setup; never point these commands at a non-local database."""
     return f"""Implement task {req.task_id}.
 User request: {req.request}
-Instruction/documentation paths:\n{listed}{mcp_instruction}
+Instruction/documentation paths:\n{listed}{mcp_instruction}{test_setup_instruction}
 Inspect and obey repository instructions. Implement the smallest complete change. After every implementation change, review the relevant Markdown (.md) files and update any documentation affected by that change. If no Markdown update is needed, state that explicitly in the final summary. Add meaningful pytest or project-native tests; use Locust only for performance work. Do not commit, push, switch branches, or modify files outside this repository. Finish with a concise summary and testing notes."""
 
 
@@ -336,6 +423,9 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
                 state.mcp_status = McpStatus.warning
             state.logs.append(message)
 
+        if req.test_setup_enabled:
+            await prepare_tests(state, repo, "Preparing local test environment")
+
         state.step = "Creating task branch"
         code, output = await command(["git", "status", "--porcelain"], repo)
         if code or output.strip():
@@ -383,6 +473,8 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
             raise RuntimeError(f"Codex exited with code {code}")
         if not state.changed_files:
             raise RuntimeError("Codex completed without producing file changes")
+        if req.test_setup_enabled:
+            await prepare_tests(state, repo, "Preparing local test environment before final tests")
         state.status, state.step = RunStatus.testing, "Running tests"
         tests = shlex.split(req.test_command, posix=False) if req.test_command else detect_tests(repo)
         code, output = await command(tests, repo, 1800)
@@ -425,6 +517,8 @@ async def continue_task(message: str, state: TaskState) -> None:
         await refresh_git(state, repo)
         if code:
             raise RuntimeError(f"Codex exited with code {code}")
+        if state.test_setup_enabled:
+            await prepare_tests(state, repo, "Preparing local test environment before final tests")
         state.status, state.step = RunStatus.testing, "Running tests"
         tests = shlex.split(state.test_command, posix=False) if state.test_command else detect_tests(repo)
         code, output = await command(tests, repo, 1800)

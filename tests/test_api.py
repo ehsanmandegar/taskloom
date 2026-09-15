@@ -12,7 +12,7 @@ from backend.app import main as main_module
 from backend.app.main import app, load_tasks, project_defaults, save_tasks, tasks
 from backend.app.guide_mcp import GuideCatalog
 from backend.app.models import McpFailureMode, RunStatus, TaskRequest, TaskState
-from backend.app.services import CodexEventStream, build_prompt, codex_response, continue_task, execute_task, generate_commit_message, mcp_runtime_issue, preflight_project_mcp, resolve_guides
+from backend.app.services import CodexEventStream, build_prompt, codex_response, continue_task, execute_task, generate_commit_message, mcp_runtime_issue, preflight_project_mcp, resolve_guides, run_test_setup, test_setup_commands as setup_commands
 
 client = TestClient(app)
 
@@ -179,6 +179,81 @@ def test_execute_task_creates_the_task_branch_from_selected_base(monkeypatch):
     assert ["git", "switch", "-c", "tasks/podw-base", "sandbox"] in calls
 
 
+def local_test_setup_repo(tmp_path: Path) -> Path:
+    (tmp_path / ".git").mkdir()
+    backend = tmp_path / "backend"
+    interpreter = backend / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    scripts = backend / "scripts"
+    scripts.mkdir()
+    for name in ("seed_local_test_database.py", "bootstrap_sso_tokens.py", "grant_local_test_admin.sql"):
+        (scripts / name).touch()
+    return tmp_path
+
+
+def test_test_setup_rejects_non_local_database(monkeypatch, tmp_path: Path):
+    repo = local_test_setup_repo(tmp_path)
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql://user:password@example.test/testing")
+
+    with pytest.raises(RuntimeError, match="only permits"):
+        setup_commands(repo)
+
+
+def test_test_setup_retries_login_without_storing_sensitive_command_output(monkeypatch, tmp_path: Path):
+    repo = local_test_setup_repo(tmp_path)
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql://user:password@localhost/testing")
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900, env=None):
+        calls.append(args)
+        if args[1] == "scripts/bootstrap_sso_tokens.py" and sum(call[1] == args[1] for call in calls) < 3:
+            return 1, "Authorization: Bearer secret-token"
+        return 0, "password=not-for-display"
+
+    monkeypatch.setattr(services, "command", fake_command)
+    monkeypatch.setattr(services.shutil, "which", lambda name: "psql" if name == "psql" else name)
+    output = asyncio.run(run_test_setup(repo))
+
+    assert sum(call[1] == "scripts/bootstrap_sso_tokens.py" for call in calls) == 3
+    assert "Bootstrapping test-user logins (attempt 3/3): ok" in output
+    assert "secret-token" not in output
+    assert "not-for-display" not in output
+    sql_command = next(args for args in calls if args[0] == "psql")
+    assert sql_command == ["psql", "-v", "ON_ERROR_STOP=1", "-f", "scripts/grant_local_test_admin.sql"]
+
+
+def test_task_prepares_enabled_test_environment_before_starting_codex(monkeypatch):
+    project_root = Path(__file__).parents[1].resolve()
+    request = TaskRequest(project_path=str(project_root), task_id="podw-setup", request="add a useful feature", test_setup_enabled=True)
+    state = TaskState(id="setup-enabled", task_id=request.task_id, project_path=str(project_root), branch="tasks/podw-setup", status=RunStatus.queued, step="Queued")
+    setup_steps = []
+
+    async def fake_setup(received_state, repo, step):
+        setup_steps.append(step)
+
+    async def fake_command(args, cwd, timeout=900):
+        if args[:3] == ["git", "switch", "-c"]:
+            return 1, "stop after setup assertion"
+        return 0, ""
+
+    monkeypatch.setattr(services, "prepare_tests", fake_setup)
+    monkeypatch.setattr(services, "command", fake_command)
+    monkeypatch.setattr(services.shutil, "which", lambda name: "codex")
+
+    asyncio.run(execute_task(request, state))
+
+    assert setup_steps == ["Preparing local test environment"]
+
+
+def test_manual_test_setup_requires_confirmation(tmp_path: Path):
+    repo = local_test_setup_repo(tmp_path)
+
+    response = client.post("/api/test-setup", json={"project_path": str(repo), "confirm_test_database": False})
+
+    assert response.status_code == 422
+
+
 def test_push_requires_commit(tmp_path: Path):
     (tmp_path / ".git").mkdir()
     tasks["demo"] = TaskState(id="demo", task_id="podw-205", project_path=str(tmp_path), branch="tasks/podw-205", status=RunStatus.passed, step="ready")
@@ -243,7 +318,7 @@ def test_profiles_are_persisted(monkeypatch, tmp_path: Path):
 
     assert client.put("/api/profiles/project%201", json=profile).status_code == 200
     assert client.get("/api/profiles").json() == [
-        {**profile, "base_branch": "main", "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto"}
+        {**profile, "base_branch": "main", "test_setup_enabled": False, "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto"}
     ]
     assert profile_file.exists()
 

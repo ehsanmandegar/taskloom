@@ -152,3 +152,15 @@ test('can stop an active Codex run and resume its conversation', () => {
   assert.match(styles, /\.stop-run\{/);
   assert.match(styles, /\.status mark\.stopped/);
 });
+
+test('offers an opt-in local test setup and a manual setup tab', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /name="test_setup_enabled" checked=\{form\.test_setup_enabled\}/);
+  assert.match(source, /\/api\/test-setup/);
+  assert.match(source, /tab==='test-setup'/);
+  assert.match(source, /confirm_test_database:true/);
+  assert.match(styles, /\.test-setup-toggle\{/);
+  assert.match(styles, /\.run-test-setup\{/);
+});

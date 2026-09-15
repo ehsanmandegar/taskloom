@@ -10,8 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState, valid_branch_name
-from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository
+from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState, TestSetupRequest, valid_branch_name
+from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository, run_test_setup
 
 app = FastAPI(title="Taskloom", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
@@ -161,6 +161,7 @@ def project_defaults() -> ProjectDefaults:
         guide_paths=guide_paths,
         base_branch=base_branch,
         test_command=test_command,
+        test_setup_enabled=False,
         mcp_server_name=mcp_server_name,
         mcp_failure_mode=mcp_failure_mode,
         git_provider=GitProvider.gitlab,
@@ -247,6 +248,7 @@ async def create_task(request: TaskRequest):
         branch=f"tasks/{request.task_id}",
         base_branch=request.base_branch,
         test_command=request.test_command,
+        test_setup_enabled=request.test_setup_enabled,
         mcp_server_name=request.mcp_server_name,
         mcp_failure_mode=request.mcp_failure_mode,
         git_provider=request.git_provider,
@@ -258,6 +260,17 @@ async def create_task(request: TaskRequest):
     save_tasks(tasks)
     track_worker(run_id, asyncio.create_task(run_task(request, state)))
     return state
+
+
+@app.post("/api/test-setup")
+async def run_manual_test_setup(request: TestSetupRequest):
+    if not request.confirm_test_database:
+        raise HTTPException(422, "Confirm that this is a disposable local test database before running setup")
+    try:
+        output = await run_test_setup(repository(request.project_path))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"output": output}
 
 
 def get_state(run_id: str) -> TaskState:

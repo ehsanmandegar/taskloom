@@ -53,6 +53,7 @@ class TaskRequest(BaseModel):
     request: str = Field(min_length=5, max_length=20_000)
     base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
+    test_setup_enabled: bool = False
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.auto
@@ -77,6 +78,7 @@ class ProjectProfile(BaseModel):
     guide_paths: list[str] = Field(default_factory=list)
     base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
+    test_setup_enabled: bool = False
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.auto
@@ -100,6 +102,7 @@ class ProjectDefaults(BaseModel):
     guide_paths: list[str] = Field(default_factory=list)
     base_branch: str = "main"
     test_command: str | None = None
+    test_setup_enabled: bool = False
     mcp_server_name: str | None = None
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.gitlab
@@ -111,6 +114,11 @@ class CommitRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
+
+
+class TestSetupRequest(BaseModel):
+    project_path: str = Field(min_length=1)
+    confirm_test_database: bool = False
 
 
 class ChatMessage(BaseModel):
@@ -125,6 +133,8 @@ class TaskState(BaseModel):
     branch: str
     base_branch: str = "main"
     test_command: str | None = None
+    test_setup_enabled: bool = False
+    test_setup_output: str = ""
     mcp_server_name: str | None = None
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     mcp_status: McpStatus = McpStatus.not_configured

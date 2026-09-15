@@ -158,13 +158,15 @@ python -m venv venv
 ```powershell
 .\venv\Scripts\python.exe scripts/seed_local_test_database.py --reset-public
 .\venv\Scripts\python.exe scripts/bootstrap_sso_tokens.py
-.\venv\Scripts\python.exe scripts/grant_local_test_admin.py
+psql -v ON_ERROR_STOP=1 -f scripts/grant_local_test_admin.sql
 ```
 
 قواعد ایمنی:
 
-- `--reset-public` مخرب است و فقط پس از تأیید صریح کاربر و فقط برای PostgreSQL
-  محلی و disposable مجاز است. Taskloom نباید آن را خودکار اجرا کند.
+- `--reset-public` مخرب است و فقط برای PostgreSQL محلی و disposable مجاز است.
+  Taskloom فقط پس از opt-in صریح کاربر در گزینهٔ setup خودکار یا تأیید دکمهٔ «Setup
+  تست» آن را اجرا می‌کند، و پیش از اجرا hostname پارس‌شدهٔ `TEST_DATABASE_URL` باید
+  یکی از `localhost`، `127.0.0.1` یا `::1` باشد.
 - `bootstrap_sso_tokens.py` ممکن است مرورگر تعاملی باز کند؛ Taskloom باید آن را
   setup کاربر بداند، نه تستی که Codex پنهانی اجرا می‌کند.
 - پیش از هر عملیات stateful، hostname دیتابیس مقصد باید پس از parse کامل یکی از
@@ -174,6 +176,11 @@ python -m venv venv
   redact شود. فقط نام متغیر و وضعیت configured/not-configured نمایش داده شود.
 - فایل‌های `.env` و `.test-artifacts/` نباید وارد diff، artifact اشتراکی، prompt
   یا commit شوند.
+- setup خودکار، reset را یک‌بار پیش از شروع Codex و بار دیگر بلافاصله پیش از gate
+  تست نهایی انجام می‌دهد. `bootstrap_sso_tokens.py` در هر setup حداکثر سه بار اجرا
+  می‌شود و `scripts/grant_local_test_admin.sql` با `psql -v ON_ERROR_STOP=1` اجرا
+  می‌شود؛ در صورت شکست، Taskloom تست را اجرا نمی‌کند و وضعیت خطا را گزارش می‌کند.
+  خروجی خام اسکریپت‌ها ذخیره یا نمایش داده نمی‌شود تا token، password و URL افشا نشود.
 
 ### نام‌گذاری فایل تغییر دیتابیس
 

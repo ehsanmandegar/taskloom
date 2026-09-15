@@ -19,6 +19,8 @@ Taskloom یک داشبورد محلی FastAPI + React است که اجرای ت�
 
 اگر کاربر مسیر پروژه را عوض کند، مقادیر پیش‌فرض راهنما، تست و MCP پاک می‌شوند تا قرارداد Taskloom روی پروژهٔ دیگر اعمال نشود؛ مقادیری که کاربر سفارشی کرده است حفظ می‌شوند. هر repository دیگری را هم می‌توان مستقیم انتخاب یا به‌عنوان profile ذخیره کرد. برای تغییر پیش‌فرض‌ها از `TASKLOOM_DEFAULT_PROJECT_PATH`، `TASKLOOM_DEFAULT_GUIDE_PATHS` (جداشده با path separator سیستم)، `TASKLOOM_DEFAULT_TEST_COMMAND`، `TASKLOOM_DEFAULT_MCP_SERVER`، `TASKLOOM_DEFAULT_MCP_FAILURE_MODE` و `TASKLOOM_DEFAULT_BASE_BRANCH` استفاده کنید.
 
+برای پروژهٔ DWS، گزینهٔ «پیش از اجرای تست، setup دیتابیس محلی را خودکار اجرا کن» را می‌توان در profile ذخیره کرد. با فعال‌سازی آن، Taskloom پیش از شروع Codex و درست پیش از gate تست نهایی، دیتابیس تست محلی را reset می‌کند، bootstrap ورود کاربران را تا سه تلاش انجام می‌دهد و `scripts/grant_local_test_admin.sql` را با `psql -v ON_ERROR_STOP=1` اجرا می‌کند. تب «Setup تست» نیز همین عملیات را با تأیید دوبارهٔ کاربر اجرا می‌کند. این قابلیت فقط `TEST_DATABASE_URL` با host محلی را می‌پذیرد، به `psql` در PATH نیاز دارد و خروجی حساس اسکریپت‌ها را نمایش نمی‌دهد.
+
 مسیر نسبی فایل اجرایی در دستور تست از ریشهٔ repository پروژه محاسبه می‌شود؛ برای نمونه، `backend\venv\Scripts\python.exe -m pytest -q` از محیط مجازی داخل پوشهٔ `backend` همان پروژه استفاده می‌کند.
 
 ## نگه‌داری و ادامهٔ گفت‌وگو
