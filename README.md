@@ -45,7 +45,7 @@ Set-Location ..
 .venv\Scripts\uvicorn main:app --reload
 ```
 
-نسخه build شده روی `http://localhost:8000` در دسترس است. برای توسعه UI، در ترمینال دوم `Set-Location frontend; npm.cmd run dev` را اجرا کنید؛ Vite درخواست‌های `/api` را به FastAPI می‌فرستد.
+نسخه build شده روی `http://localhost:8003` در دسترس است. برای توسعه UI، در ترمینال دوم `Set-Location frontend; npm.cmd run dev` را اجرا کنید؛ Vite درخواست‌های `/api` را به FastAPI می‌فرستد.
 
 ### ساخت فایل اجرایی ویندوز
 

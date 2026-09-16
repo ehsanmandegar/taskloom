@@ -27,8 +27,8 @@ def test_run_starts_browser_and_local_server(monkeypatch):
     main.run()
 
     assert timers[0].daemon is True
-    assert opened == ["http://127.0.0.1:8000"]
-    assert server_calls == [((main.app,), {"host": "127.0.0.1", "port": 8000})]
+    assert opened == ["http://127.0.0.1:8003"]
+    assert server_calls == [((main.app,), {"host": "127.0.0.1", "port": 8003})]
 
 
 def test_python_builder_creates_one_file_with_frontend_assets():
