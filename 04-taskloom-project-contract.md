@@ -158,7 +158,7 @@ python -m venv venv
 ```powershell
 .\venv\Scripts\python.exe scripts/seed_local_test_database.py --reset-public
 .\venv\Scripts\python.exe scripts/bootstrap_sso_tokens.py
-psql -v ON_ERROR_STOP=1 -f scripts/grant_local_test_admin.sql
+.\venv\Scripts\python.exe scripts/grant_local_test_admin.py
 ```
 
 قواعد ایمنی:
@@ -178,7 +178,7 @@ psql -v ON_ERROR_STOP=1 -f scripts/grant_local_test_admin.sql
   یا commit شوند.
 - setup خودکار، reset را یک‌بار پیش از شروع Codex و بار دیگر بلافاصله پیش از gate
   تست نهایی انجام می‌دهد. `bootstrap_sso_tokens.py` در هر setup حداکثر سه بار اجرا
-  می‌شود و `scripts/grant_local_test_admin.sql` با `psql -v ON_ERROR_STOP=1` اجرا
+  می‌شود و `scripts/grant_local_test_admin.py` با interpreter محیط مجازی اجرا
   می‌شود؛ در صورت شکست، Taskloom تست را اجرا نمی‌کند و وضعیت خطا را گزارش می‌کند.
   خروجی خام اسکریپت‌ها ذخیره یا نمایش داده نمی‌شود تا token، password و URL افشا نشود.
 

@@ -50,10 +50,15 @@ class TaskRequest(BaseModel):
     project_path: str = Field(min_length=1)
     guide_paths: list[str] = Field(default_factory=list)
     task_id: str = Field(min_length=2, max_length=80)
+    session_name: str | None = Field(default=None, max_length=120)
     request: str = Field(min_length=5, max_length=20_000)
     base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
     test_setup_enabled: bool = False
+    auto_commit: bool = False
+    auto_generate_commit_message: bool = False
+    auto_push: bool = False
+    auto_merge_request: bool = False
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.auto
@@ -65,6 +70,14 @@ class TaskRequest(BaseModel):
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", value):
             raise ValueError("Task ID may only contain letters, numbers, dot, dash and underscore")
         return value
+
+    @field_validator("session_name")
+    @classmethod
+    def clean_session_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
     @field_validator("base_branch")
     @classmethod
@@ -79,6 +92,10 @@ class ProjectProfile(BaseModel):
     base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
     test_setup_enabled: bool = False
+    auto_commit: bool = False
+    auto_generate_commit_message: bool = False
+    auto_push: bool = False
+    auto_merge_request: bool = False
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.auto
@@ -103,6 +120,10 @@ class ProjectDefaults(BaseModel):
     base_branch: str = "main"
     test_command: str | None = None
     test_setup_enabled: bool = False
+    auto_commit: bool = False
+    auto_generate_commit_message: bool = False
+    auto_push: bool = False
+    auto_merge_request: bool = False
     mcp_server_name: str | None = None
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.gitlab
@@ -116,9 +137,51 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
 
 
+class TodoRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=20_000)
+    project_path: str = Field(default="", max_length=2_000)
+    branch: str = Field(default="", max_length=240)
+    session_id: str = Field(default="", max_length=120)
+
+    @field_validator("content")
+    @classmethod
+    def clean_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Todo cannot be empty")
+        return value
+
+    @field_validator("project_path", "branch", "session_id")
+    @classmethod
+    def clean_target(cls, value: str) -> str:
+        return value.strip()
+
+
+class RenameTaskRequest(BaseModel):
+    session_name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("session_name")
+    @classmethod
+    def clean_session_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Session name cannot be empty")
+        return value
+
+
 class TestSetupRequest(BaseModel):
     project_path: str = Field(min_length=1)
     confirm_test_database: bool = False
+
+
+class BranchSwitchRequest(BaseModel):
+    project_path: str = Field(min_length=1)
+    branch: str = Field(min_length=1, max_length=240)
+
+    @field_validator("branch")
+    @classmethod
+    def clean_branch(cls, value: str) -> str:
+        return valid_branch_name(value)
 
 
 class ChatMessage(BaseModel):
@@ -126,14 +189,31 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class TodoItem(BaseModel):
+    id: str
+    content: str
+    project_path: str = ""
+    branch: str = ""
+    session_id: str = ""
+    order: int = 0
+    status: str = "pending"
+    error: str = ""
+
+
 class TaskState(BaseModel):
     id: str
     task_id: str
+    session_name: str = ""
     project_path: str
     branch: str
     base_branch: str = "main"
+    guide_paths: list[str] = Field(default_factory=list)
     test_command: str | None = None
     test_setup_enabled: bool = False
+    auto_commit: bool = False
+    auto_generate_commit_message: bool = False
+    auto_push: bool = False
+    auto_merge_request: bool = False
     test_setup_output: str = ""
     mcp_server_name: str | None = None
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
@@ -156,3 +236,4 @@ class TaskState(BaseModel):
     merge_request_url: str = ""
     codex_thread_id: str = ""
     messages: list[ChatMessage] = Field(default_factory=list)
+    todos: list[TodoItem] = Field(default_factory=list)

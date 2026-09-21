@@ -10,8 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RunStatus, TaskRequest, TaskState, TestSetupRequest, valid_branch_name
-from .services import continue_task, create_merge_request, execute_task, generate_commit_message, git_commit, git_push, repository, run_test_setup
+from .models import BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RunStatus, TaskRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
+from .services import codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch
 
 app = FastAPI(title="Taskloom", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
@@ -138,7 +138,7 @@ def project_defaults() -> ProjectDefaults:
     elif (project_path / ".venv" / "bin" / "python").is_file():
         test_command = ".venv/bin/python -m pytest -q"
     elif os.name == "nt" and (project_path / "backend" / "venv" / "Scripts" / "python.exe").is_file():
-        test_command = r"backend\venv\Scripts\python.exe -m pytest -q"
+        test_command = r"python -m pytest -q"
     else:
         test_command = None
 
@@ -200,6 +200,14 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/codex/status")
+async def codex_status():
+    try:
+        return await codex_account_status()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @app.get("/api/defaults", response_model=ProjectDefaults)
 async def defaults():
     return project_defaults()
@@ -213,6 +221,32 @@ async def list_tasks():
 @app.get("/api/profiles", response_model=list[ProjectProfile])
 async def list_profiles():
     return sorted(load_profiles().values(), key=lambda profile: profile.name.casefold())
+
+
+@app.get("/api/branches")
+async def list_branches(project_path: str):
+    try:
+        return await git_branches(repository(project_path))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/branches/switch")
+async def switch_branch(request: BranchSwitchRequest):
+    try:
+        repo = repository(request.project_path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    active_states = {RunStatus.queued, RunStatus.running, RunStatus.testing}
+    if any(
+        state.status in active_states and Path(state.project_path).expanduser().resolve() == repo
+        for state in tasks.values()
+    ):
+        raise HTTPException(409, "Stop the active Codex task for this project before switching branches")
+    try:
+        return await switch_git_branch(repo, request.branch)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.put("/api/profiles/{name}", response_model=ProjectProfile)
@@ -244,11 +278,17 @@ async def create_task(request: TaskRequest):
     state = TaskState(
         id=run_id,
         task_id=request.task_id,
+        session_name=request.session_name or request.task_id,
         project_path=str(repo),
         branch=f"tasks/{request.task_id}",
         base_branch=request.base_branch,
+        guide_paths=request.guide_paths,
         test_command=request.test_command,
         test_setup_enabled=request.test_setup_enabled,
+        auto_commit=request.auto_commit,
+        auto_generate_commit_message=request.auto_generate_commit_message,
+        auto_push=request.auto_push,
+        auto_merge_request=request.auto_merge_request,
         mcp_server_name=request.mcp_server_name,
         mcp_failure_mode=request.mcp_failure_mode,
         git_provider=request.git_provider,
@@ -282,16 +322,200 @@ def get_state(run_id: str) -> TaskState:
 async def run_task(request: TaskRequest, state: TaskState) -> None:
     await execute_task(request, state)
     save_tasks(tasks)
+    await advance_todo_queue(state)
 
 
 async def run_follow_up(message: str, state: TaskState) -> None:
     await continue_task(message, state)
     save_tasks(tasks)
+    await advance_todo_queue(state)
+
+
+async def complete_automatic_delivery(state: TaskState) -> bool:
+    """Finish optional delivery steps before allowing the Todo queue to advance."""
+    if state.status != RunStatus.passed:
+        return False
+    if not state.auto_commit:
+        return state.committed or not state.changed_files
+    try:
+        if state.changed_files and not state.committed:
+            if state.auto_generate_commit_message and not state.commit_message:
+                state.commit_message = await generate_commit_message(state)
+            message = state.commit_message or f"feat({state.task_id}): complete task"
+            await git_commit(state, message)
+        if state.auto_push and state.committed and not state.pushed:
+            await git_push(state)
+        if state.auto_merge_request and state.pushed and not state.merge_request_url:
+            await create_merge_request(state)
+        return True
+    except (ValueError, RuntimeError) as exc:
+        state.status, state.step, state.error = RunStatus.failed, "Automatic delivery failed", str(exc)
+        state.logs.append(f"Automatic delivery failed: {exc}")
+        return False
+
+
+def queue_follow_up(state: TaskState, message: str) -> None:
+    if state.status in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
+        raise HTTPException(409, "Wait for the current Codex response before sending another message")
+    if not state.codex_thread_id:
+        raise HTTPException(409, "This task does not have a resumable Codex session")
+    state.messages.append(ChatMessage(role="user", content=message))
+    state.status, state.step, state.error = RunStatus.queued, "Queued follow-up", None
+    save_tasks(tasks)
+    track_worker(state.id, asyncio.create_task(run_follow_up(message, state)))
+
+
+def pending_todos() -> list[tuple[TaskState, TodoItem]]:
+    """Return the shared Todo queue in the exact order in which it was recorded."""
+    items = [
+        (state, todo)
+        for state in tasks.values()
+        for todo in state.todos
+        if todo.status == "pending"
+    ]
+    return sorted(items, key=lambda item: (item[1].order, item[1].id))
+
+
+def todo_destination(todo: TodoItem) -> TaskState | None:
+    """Resolve a Todo target: current session, then branch, then project."""
+    terminal = {RunStatus.passed, RunStatus.failed, RunStatus.blocked, RunStatus.stopped}
+    session = tasks.get(todo.session_id)
+    if session and session.status in terminal and session.codex_thread_id:
+        return session
+    branch_matches = [
+        state for state in reversed(list(tasks.values()))
+        if state.status in terminal and state.codex_thread_id
+        and state.project_path == todo.project_path and state.branch == todo.branch
+    ]
+    if branch_matches:
+        return branch_matches[0]
+    project_matches = [
+        state for state in reversed(list(tasks.values()))
+        if state.status in terminal and state.codex_thread_id and state.project_path == todo.project_path
+    ]
+    return project_matches[0] if project_matches else None
+
+
+def discard_todo(owner: TaskState, todo: TodoItem) -> None:
+    owner.todos = [item for item in owner.todos if item.id != todo.id]
+
+
+def start_todo_task(owner: TaskState, todo: TodoItem) -> None:
+    """Create a normal Taskloom task when no resumable session can accept the Todo."""
+    project_path = todo.project_path or owner.project_path
+    branch = valid_branch_name(todo.branch or owner.branch)
+    branch_task_id = branch.removeprefix("tasks/")
+    task_id = branch_task_id if branch.startswith("tasks/") and "/" not in branch_task_id else f"todo-{todo.id}"
+    request = TaskRequest(
+        project_path=project_path,
+        task_id=task_id,
+        request=todo.content,
+        base_branch=owner.base_branch,
+        guide_paths=owner.guide_paths,
+        test_command=owner.test_command,
+        test_setup_enabled=owner.test_setup_enabled,
+        auto_commit=owner.auto_commit,
+        auto_generate_commit_message=owner.auto_generate_commit_message,
+        auto_push=owner.auto_push,
+        auto_merge_request=owner.auto_merge_request,
+        mcp_server_name=owner.mcp_server_name,
+        mcp_failure_mode=owner.mcp_failure_mode,
+        git_provider=owner.git_provider,
+    )
+    repo = repository(request.project_path)
+    run_id = uuid.uuid4().hex[:12]
+    state = TaskState(
+        id=run_id,
+        task_id=request.task_id,
+        session_name=request.task_id,
+        project_path=str(repo),
+        branch=branch,
+        base_branch=request.base_branch,
+        guide_paths=request.guide_paths,
+        test_command=request.test_command,
+        test_setup_enabled=request.test_setup_enabled,
+        auto_commit=request.auto_commit,
+        auto_generate_commit_message=request.auto_generate_commit_message,
+        auto_push=request.auto_push,
+        auto_merge_request=request.auto_merge_request,
+        mcp_server_name=request.mcp_server_name,
+        mcp_failure_mode=request.mcp_failure_mode,
+        git_provider=request.git_provider,
+        status=RunStatus.queued,
+        step="Queued Todo",
+        messages=[ChatMessage(role="user", content=request.request)],
+    )
+    tasks[run_id] = state
+    discard_todo(owner, todo)
+    save_tasks(tasks)
+    track_worker(run_id, asyncio.create_task(run_task(request, state)))
+
+
+def start_todo_follow_up(owner: TaskState, todo: TodoItem, destination: TaskState) -> None:
+    destination.messages.append(ChatMessage(role="user", content=todo.content))
+    destination.status, destination.step, destination.error = RunStatus.queued, "Queued Todo", None
+    discard_todo(owner, todo)
+    save_tasks(tasks)
+    track_worker(destination.id, asyncio.create_task(run_follow_up(todo.content, destination)))
+
+
+async def advance_todo_queue(state: TaskState) -> None:
+    """Finish the session and branch queue before delivery and fresh branches."""
+    active = {RunStatus.queued, RunStatus.running, RunStatus.testing}
+    if state.status != RunStatus.passed or any(item.status in active for item in tasks.values()):
+        return
+    pending = pending_todos()
+    session_items = [(owner, todo) for owner, todo in pending if todo.session_id == state.id]
+    branch_items = [
+        (owner, todo) for owner, todo in pending
+        if todo.session_id != state.id
+        and todo.project_path == state.project_path and todo.branch == state.branch
+    ]
+    if session_items:
+        owner, todo = session_items[0]
+        start_todo_follow_up(owner, todo, state)
+        return
+    if branch_items and state.codex_thread_id:
+        owner, todo = branch_items[0]
+        start_todo_follow_up(owner, todo, state)
+        return
+    if not await complete_automatic_delivery(state):
+        save_tasks(tasks)
+        return
+    save_tasks(tasks)
+    await dispatch_next_todo()
+
+
+async def dispatch_next_todo() -> None:
+    """Run only one queued Todo at a time, preserving the user-defined order."""
+    active = {RunStatus.queued, RunStatus.running, RunStatus.testing}
+    if any(state.status in active for state in tasks.values()):
+        return
+    for owner, todo in pending_todos():
+        try:
+            destination = todo_destination(todo)
+            if destination:
+                start_todo_follow_up(owner, todo, destination)
+                return
+            start_todo_task(owner, todo)
+            return
+        except (ValueError, RuntimeError) as exc:
+            todo.status, todo.error = "failed", str(exc)
+            save_tasks(tasks)
 
 
 @app.get("/api/tasks/{run_id}", response_model=TaskState)
 async def task_status(run_id: str):
     return get_state(run_id)
+
+
+@app.patch("/api/tasks/{run_id}", response_model=TaskState)
+async def rename_task(run_id: str, request: RenameTaskRequest):
+    """Rename the user-facing session label without changing its branch or task ID."""
+    state = get_state(run_id)
+    state.session_name = request.session_name
+    save_tasks(tasks)
+    return state
 
 
 @app.get("/api/tasks/{run_id}/events")
@@ -323,15 +547,48 @@ async def task_events(run_id: str, request: Request):
 @app.post("/api/tasks/{run_id}/messages", response_model=TaskState, status_code=202)
 async def send_message(run_id: str, request: ChatRequest):
     state = get_state(run_id)
-    if state.status in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
-        raise HTTPException(409, "Wait for the current Codex response before sending another message")
-    if not state.codex_thread_id:
-        raise HTTPException(409, "This task does not have a resumable Codex session")
     message = request.message.strip()
-    state.messages.append(ChatMessage(role="user", content=message))
-    state.status, state.step, state.error = RunStatus.queued, "Queued follow-up", None
+    queue_follow_up(state, message)
+    return state
+
+
+@app.post("/api/tasks/{run_id}/todos", response_model=TaskState)
+async def add_todo(run_id: str, request: TodoRequest):
+    state = get_state(run_id)
+    next_order = max((todo.order for _, todo in pending_todos()), default=0) + 1
+    state.todos.append(TodoItem(
+        id=uuid.uuid4().hex[:12],
+        content=request.content,
+        project_path=request.project_path or state.project_path,
+        branch=request.branch or state.branch,
+        session_id=request.session_id or state.id,
+        order=next_order,
+    ))
     save_tasks(tasks)
-    track_worker(run_id, asyncio.create_task(run_follow_up(message, state)))
+    await advance_todo_queue(state)
+    return state
+
+
+@app.delete("/api/tasks/{run_id}/todos/{todo_id}", response_model=TaskState)
+async def delete_todo(run_id: str, todo_id: str):
+    state = get_state(run_id)
+    original_count = len(state.todos)
+    state.todos = [todo for todo in state.todos if todo.id != todo_id]
+    if len(state.todos) == original_count:
+        raise HTTPException(404, "Todo not found")
+    save_tasks(tasks)
+    return state
+
+
+@app.post("/api/tasks/{run_id}/todos/{todo_id}/send", response_model=TaskState, status_code=202)
+async def send_todo(run_id: str, todo_id: str):
+    state = get_state(run_id)
+    todo = next((item for item in state.todos if item.id == todo_id), None)
+    if todo is None:
+        raise HTTPException(404, "Todo not found")
+    queue_follow_up(state, todo.content)
+    discard_todo(state, todo)
+    save_tasks(tasks)
     return state
 
 
@@ -362,6 +619,7 @@ async def commit(run_id: str, request: CommitRequest):
     try:
         result = {"ok": True, "output": await git_commit(state, request.message.strip()), "task": state}
         save_tasks(tasks)
+        await advance_todo_queue(state)
         return result
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc

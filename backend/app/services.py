@@ -6,29 +6,15 @@ import os
 import re
 import shlex
 import shutil
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Callable
 
 from .models import ChatMessage, GitProvider, McpFailureMode, McpStatus, RunStatus, TaskRequest, TaskState
 
 
-ADMIN_SQL_RUNNER = (
-    "from pathlib import Path\n"
-    "from urllib.parse import urlsplit\n"
-    "import psycopg2\n"
-    "from app.core.config import get_base_settings\n"
-    "url = get_base_settings().TEST_DATABASE_URL\n"
-    "parsed = urlsplit(url or '')\n"
-    "if parsed.scheme not in {'postgres', 'postgresql'} or parsed.hostname not in {'localhost', '127.0.0.1', '::1'}:\n"
-    "    raise RuntimeError('TEST_DATABASE_URL must target a local PostgreSQL database')\n"
-    "sql = Path('scripts/grant_local_test_admin.sql').read_text(encoding='utf-8')\n"
-    "with psycopg2.connect(url) as connection:\n"
-    "    connection.cursor().execute(sql)\n"
-)
-
-
 _command_output_handler: ContextVar[Callable[[str], None] | None] = ContextVar("command_output_handler", default=None)
+COMMIT_MESSAGE_PATTERN = re.compile(r"^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([a-z0-9][a-z0-9._/-]*\))?!?: [A-Za-z0-9][ -~]{0,117}$")
 
 
 async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
@@ -77,11 +63,130 @@ async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str,
     return process.returncode or 0, output.decode("utf-8", errors="replace")
 
 
+def codex_account_status_payload(responses: dict[int, dict]) -> dict:
+    """Return the non-sensitive part of Codex App Server account responses."""
+    account = responses.get(1, {}).get("account") or {}
+    models = responses.get(4, {}).get("data") or []
+    return {
+        "account": {key: account.get(key) for key in ("type", "planType")},
+        "rate_limits": responses.get(2, {}),
+        "usage": responses.get(3, {}),
+        "models": [
+            {
+                key: model.get(key)
+                for key in ("id", "model", "displayName", "isDefault", "defaultReasoningEffort", "supportedReasoningEfforts")
+            }
+            for model in models
+        ],
+    }
+
+
+async def codex_account_status(timeout: int = 20) -> dict:
+    """Read the local Codex CLI account, model catalog, and usage windows."""
+    codex = shutil.which("codex")
+    if not codex:
+        raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
+    process = await asyncio.create_subprocess_exec(
+        codex,
+        "app-server",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    requests = [
+        {"method": "initialize", "id": 0, "params": {"clientInfo": {"name": "taskloom", "title": "Taskloom", "version": "0.1.0"}}},
+        {"method": "initialized", "params": {}},
+        {"method": "account/read", "id": 1, "params": {"refreshToken": False}},
+        {"method": "account/rateLimits/read", "id": 2},
+        {"method": "account/usage/read", "id": 3},
+        {"method": "model/list", "id": 4, "params": {"limit": 100, "includeHidden": False}},
+    ]
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        for request in requests:
+            process.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+        await process.stdin.drain()
+        responses: dict[int, dict] = {}
+        pending = {1, 2, 3, 4}
+        while pending:
+            line = await asyncio.wait_for(process.stdout.readline(), timeout)
+            if not line:
+                raise RuntimeError("Codex App Server stopped before returning account status")
+            message = json.loads(line)
+            request_id = message.get("id")
+            if request_id not in pending:
+                continue
+            if "error" in message:
+                responses[request_id] = {"error": message["error"].get("message", "Codex request failed")}
+            else:
+                responses[request_id] = message.get("result", {})
+            pending.remove(request_id)
+        return codex_account_status_payload(responses)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("Codex App Server timed out while reading account status") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Codex App Server returned an invalid response") from exc
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), 5)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+
 def repository(path: str) -> Path:
     repo = Path(path).expanduser().resolve()
     if not repo.is_dir() or not (repo / ".git").exists():
         raise ValueError("Project path must be an existing Git repository")
     return repo
+
+
+async def git_branches(repo: Path) -> dict:
+    """List local branches and origin-only branches without changing Git state."""
+    code, output = await command(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"], repo)
+    if code:
+        raise RuntimeError(output.strip() or "Could not read Git branches")
+    local = {line.strip() for line in output.splitlines() if line.strip()}
+
+    code, output = await command(["git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"], repo)
+    if code:
+        # Repositories without an origin are still fully usable locally.
+        output = ""
+    remote = {
+        line.removeprefix("origin/").strip()
+        for line in output.splitlines()
+        if line.startswith("origin/") and line.strip() != "origin/HEAD"
+    }
+    code, current = await command(["git", "branch", "--show-current"], repo)
+    if code:
+        raise RuntimeError(current.strip() or "Could not determine the current Git branch")
+    return {
+        "current": current.strip(),
+        "branches": [
+            {"name": name, "local": name in local, "remote": name in remote}
+            for name in sorted(local | remote, key=str.casefold)
+        ],
+    }
+
+
+async def switch_git_branch(repo: Path, branch: str) -> dict:
+    """Switch to an existing branch, or create it from the current HEAD once."""
+    code, output = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], repo)
+    if code == 0:
+        args, created, message = ["git", "switch", branch], False, f"Checked out existing branch `{branch}`"
+    else:
+        code, output = await command(["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}"], repo)
+        if code == 0:
+            args, created, message = ["git", "switch", "--track", "-c", branch, f"origin/{branch}"], False, f"Checked out existing remote branch `{branch}`"
+        else:
+            args, created, message = ["git", "switch", "-c", branch], True, f"Created and checked out `{branch}`"
+    code, output = await command(args, repo)
+    if code:
+        raise RuntimeError(output.strip() or f"Could not switch to branch `{branch}`")
+    result = await git_branches(repo)
+    return {**result, "created": created, "message": message}
 
 
 def cleanup_owned_test_artifacts(repo: Path) -> None:
@@ -99,7 +204,7 @@ def test_setup_commands(repo: Path) -> tuple[Path, list[tuple[list[str], dict[st
     required = [
         scripts / "seed_local_test_database.py",
         scripts / "bootstrap_sso_tokens.py",
-        scripts / "grant_local_test_admin.sql",
+        scripts / "grant_local_test_admin.py",
     ]
     if not interpreter.is_file():
         raise RuntimeError("Test setup requires backend/venv with its Python interpreter")
@@ -112,26 +217,11 @@ def test_setup_commands(repo: Path) -> tuple[Path, list[tuple[list[str], dict[st
             raise RuntimeError("Test setup only permits TEST_DATABASE_URL hosts localhost, 127.0.0.1, or ::1")
         if parsed.scheme not in {"postgres", "postgresql"} or not parsed.path.strip("/"):
             raise RuntimeError("TEST_DATABASE_URL must be a PostgreSQL URL with a database name")
-    psql = shutil.which("psql")
     executable = str(interpreter)
-    if psql and database_url:
-        psql_env = os.environ.copy()
-        psql_env.update(
-            {
-                "PGHOST": parsed.hostname,
-                "PGPORT": str(parsed.port or 5432),
-                "PGUSER": unquote(parsed.username or ""),
-                "PGPASSWORD": unquote(parsed.password or ""),
-                "PGDATABASE": unquote(parsed.path.lstrip("/").split("/", 1)[0]),
-            }
-        )
-        admin_command = ([psql, "-v", "ON_ERROR_STOP=1", "-f", "scripts/grant_local_test_admin.sql"], psql_env)
-    else:
-        admin_command = ([executable, "-c", ADMIN_SQL_RUNNER], None)
     return backend, [
         ([executable, "scripts/seed_local_test_database.py", "--reset-public"], None),
         ([executable, "scripts/bootstrap_sso_tokens.py"], None),
-        admin_command,
+        ([executable, "scripts/grant_local_test_admin.py"], None),
     ]
 
 
@@ -426,22 +516,31 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         if req.test_setup_enabled:
             await prepare_tests(state, repo, "Preparing local test environment")
 
-        state.step = "Creating task branch"
+        state.step = "Preparing task branch"
         code, output = await command(["git", "status", "--porcelain"], repo)
         if code or output.strip():
             raise RuntimeError("Repository must be clean before starting a task")
         state.base_branch = req.base_branch
-        source_branch = req.base_branch
-        code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{req.base_branch}^{{commit}}"], repo)
+        code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{state.branch}"], repo)
+        if not code:
+            args, message = ["git", "switch", state.branch], f"Checked out existing task branch {state.branch}"
+        else:
+            code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{state.branch}"], repo)
+            if not code:
+                args, message = ["git", "switch", "--track", "-c", state.branch, f"origin/{state.branch}"], f"Checked out existing remote task branch {state.branch}"
+            else:
+                source_branch = req.base_branch
+                code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{req.base_branch}^{{commit}}"], repo)
+                if code:
+                    source_branch = f"origin/{req.base_branch}"
+                    code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{source_branch}^{{commit}}"], repo)
+                if code:
+                    raise RuntimeError(f"Base branch `{req.base_branch}` was not found locally or on origin")
+                args, message = ["git", "switch", "-c", state.branch, source_branch], f"Created {state.branch} from {source_branch}"
+        code, output = await command(args, repo)
         if code:
-            source_branch = f"origin/{req.base_branch}"
-            code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{source_branch}^{{commit}}"], repo)
-        if code:
-            raise RuntimeError(f"Base branch `{req.base_branch}` was not found locally or on origin")
-        code, output = await command(["git", "switch", "-c", state.branch, source_branch], repo)
-        if code:
-            raise RuntimeError(output.strip() or "Could not create branch")
-        state.logs.append(f"Created {state.branch} from {source_branch}")
+            raise RuntimeError(output.strip() or "Could not prepare task branch")
+        state.logs.append(message)
         state.step = "Codex is implementing the request"
         code, output = await codex_command([codex, "exec", "--sandbox", "workspace-write", "--color", "never", "--json", build_prompt(req, guides, active_mcp)], repo, state, 3600)
         runtime_issue = mcp_runtime_issue(output, active_mcp) if active_mcp else None
@@ -478,7 +577,7 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         state.status, state.step = RunStatus.testing, "Running tests"
         tests = shlex.split(req.test_command, posix=False) if req.test_command else detect_tests(repo)
         code, output = await command(tests, repo, 1800)
-        state.test_output = output[-20000:]
+        state.test_output = output
         state.commit_message = f"feat({req.task_id}): implement requested changes"
         state.status, state.step = (RunStatus.passed, "Ready for review") if code == 0 else (RunStatus.failed, "Tests failed")
         if code:
@@ -522,7 +621,7 @@ async def continue_task(message: str, state: TaskState) -> None:
         state.status, state.step = RunStatus.testing, "Running tests"
         tests = shlex.split(state.test_command, posix=False) if state.test_command else detect_tests(repo)
         code, output = await command(tests, repo, 1800)
-        state.test_output = output[-20000:]
+        state.test_output = output
         state.status, state.step = (RunStatus.passed, "Ready for further instructions") if code == 0 else (RunStatus.failed, "Tests failed")
         if code:
             state.error = f"Tests exited with code {code}"
@@ -558,15 +657,16 @@ async def generate_commit_message(state: TaskState) -> str:
     codex = shutil.which("codex")
     if not codex:
         raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
-    prompt = """Review the current uncommitted diff and reply with exactly one Conventional Commit message.
-Keep it under 200 characters and on one line. Do not edit files, run tests, commit, push, or add explanation."""
+    prompt = """Review only the work completed in this task's current session and its uncommitted diff.
+Reply with exactly one concise, English Conventional Commit subject in this format: type(optional-scope): imperative summary
+Choose the type from build, chore, ci, docs, feat, fix, perf, refactor, revert, style, or test. Keep it to one line and 120 ASCII characters or fewer. Do not add a body, Markdown, translation, task commentary, or explanation. Do not edit files, run tests, commit, or push."""
     code, output = await command([codex, "exec", "resume", "--json", state.codex_thread_id, prompt], repo, 600)
     if code:
         raise RuntimeError(f"Codex exited with code {code}")
     _, response = codex_response(output)
     message = response.splitlines()[0].strip().strip("`") if response else ""
-    if not message or len(message) > 200:
-        raise RuntimeError("Codex did not return a valid commit message")
+    if not COMMIT_MESSAGE_PATTERN.fullmatch(message):
+        raise RuntimeError("Codex did not return a concise English Conventional Commit message")
     return message
 
 

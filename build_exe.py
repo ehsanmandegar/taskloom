@@ -27,6 +27,7 @@ FRONTEND_DIST = FRONTEND / "dist"
 
 MAIN_FILE = ROOT / "main.py"
 REQUIREMENTS_FILE = ROOT / "requirements.txt"
+ICON_FILE = ROOT / "assets" / "taskloom.ico"
 
 BUILD_DIR = ROOT / ".taskloom-build"
 DIST_DIR = ROOT / "dist"
@@ -92,6 +93,7 @@ def validate_project() -> None:
     required_paths = {
         "main.py": MAIN_FILE,
         "requirements.txt": REQUIREMENTS_FILE,
+        "application icon": ICON_FILE,
         "frontend directory": FRONTEND,
         "frontend/package.json": FRONTEND / "package.json",
         "frontend/package-lock.json": FRONTEND / "package-lock.json",
@@ -261,6 +263,8 @@ def main() -> None:
             "--onefile",
             "--name",
             EXECUTABLE_NAME,
+            "--icon",
+            str(ICON_FILE),
 
             # Output directories
             "--distpath",

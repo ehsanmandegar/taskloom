@@ -98,6 +98,15 @@ test('can request an automatic commit message from the task Codex session', () =
   assert.match(styles, /\.delivery \.suggest-commit\{height:32px;padding:0 9px;font-size:10px/);
 });
 
+test('can opt into generating a commit message during automatic delivery', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /auto_generate_commit_message:false/);
+  assert.match(source, /checked=\{form\.auto_generate_commit_message\}/);
+  assert.match(source, /پیش از commit، پیام را با Codex خودکار تولید کن/);
+  assert.match(source, /auto_generate_commit_message:form\.auto_generate_commit_message/);
+});
+
 test('sends chat messages with Enter while preserving Shift+Enter for a new line', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 
@@ -153,14 +162,127 @@ test('can stop an active Codex run and resume its conversation', () => {
   assert.match(styles, /\.status mark\.stopped/);
 });
 
+test('copies individual user and Codex messages from the chat history', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /function copyMessage\(content,key\)/);
+  assert.match(source, /navigator\.clipboard\?\.writeText/);
+  assert.match(source, /className="chat-copy"/);
+  assert.match(source, /کپی پیام \$\{message\.role==='user'\?'شما':'Codex'\}/);
+  assert.match(source, /copyMessage\(task\.live_response,`live-\$\{task\.id\}`\)/);
+  assert.match(source, /aria-label="کپی پاسخ Codex"/);
+  assert.match(styles, /\.chat-copy\{position:absolute/);
+});
+
+test('creates separately named sessions and lets the user rename them', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /session_name:''/);
+  assert.match(source, /function newSession\(\)/);
+  assert.match(source, /function renameSession\(\)/);
+  assert.match(source, /method:'PATCH'/);
+  assert.match(source, /task_id=taskIdForBranch\(form\.task_id\)\|\|`session-\$\{Date\.now\(\)\.toString\(36\)\}`/);
+  assert.match(source, /item\.session_name\|\|item\.task_id/);
+  assert.match(source, /className="new-session"/);
+  assert.match(styles, /\.session-controls\{display:grid;grid-template-columns:minmax\(0,1fr\) auto auto;align-items:center/);
+});
+
+test('scrolls chat history to the newest message and streamed reply', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /document\.querySelectorAll\('\.chat-history'\)/);
+  assert.match(source, /history\.scrollTo\(\{top:history\.scrollHeight,behavior:'smooth'\}\)/);
+  assert.match(source, /\[task\?\.id,task\?\.messages\?\.length,task\?\.live_response,task\?\.status\]/);
+});
+
+test('shows real Codex account status, usage windows, and available models', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /\/api\/codex\/status/);
+  assert.match(source, /function refreshCodexStatus/);
+  assert.match(source, /codexRateLimits=Object\.values/);
+  assert.match(source, /codexUsage\.slice\(-7\)/);
+  assert.match(source, /className="codex-rate-limits"/);
+  assert.match(styles, /\.codex-status-overview\{display:grid/);
+});
+
+test('keeps the Codex status section closed until the user opens it', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /<details className="codex-cli" aria-label="Codex CLI">/);
+  assert.match(source, /<summary className="codex-cli-title">/);
+  assert.doesNotMatch(source, /<details className="codex-cli"[^>]*\bopen\b/);
+  assert.match(styles, /\.codex-cli\[open\] \.codex-cli-title:before/);
+});
+
+test('can notify Windows when a Codex reply is ready', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /Notification\.requestPermission\(\)/);
+  assert.match(source, /sameTask=!!task&&previous\?\.id===task\.id/);
+  assert.match(source, /new Notification\(reply\?/);
+  assert.match(source, /reply\?\.content\|\|task\.summary\|\|task\.error/);
+  assert.match(source, /taskloom-windows-notifications/);
+  assert.match(source, /className=\{`windows-notifications/);
+  assert.match(styles, /\.windows-notifications\{/);
+});
+
+test('uses one task field with dropdown suggestions to switch to or create task branches', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /\/api\/branches\?project_path=/);
+  assert.match(source, /\/api\/branches\/switch/);
+  assert.match(source, /function loadBranches/);
+  assert.match(source, /function switchBranch/);
+  assert.match(source, /const taskIdForBranch=/);
+  assert.match(source, /const taskBranchFor=/);
+  assert.match(source, /list="task-branches"/);
+  assert.match(source, /branch\.name\.startsWith\('tasks\/'\)/);
+  assert.match(source, /branch:taskBranchFor\(task_id\)/);
+  assert.equal((source.match(/name="task_id"/g) || []).length, 1);
+  assert.match(source, /برنچ فعال/);
+  assert.match(source, /ساخت یا سوییچ/);
+  assert.match(source, /هیچ reset یا stashی انجام نمی‌شود/);
+  assert.match(styles, /\.branch-manager\{/);
+});
+
 test('offers an opt-in local test setup and a manual setup tab', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
+  assert.match(source, /<details className="test-setup"><summary>Setup تست<\/summary>/);
+  assert.doesNotMatch(source, /<details className="test-setup" open>/);
   assert.match(source, /name="test_setup_enabled" checked=\{form\.test_setup_enabled\}/);
   assert.match(source, /\/api\/test-setup/);
   assert.match(source, /tab==='test-setup'/);
   assert.match(source, /confirm_test_database:true/);
+  assert.match(styles, /\.test-setup\{margin-bottom:14px/);
   assert.match(styles, /\.test-setup-toggle\{/);
   assert.match(styles, /\.run-test-setup\{/);
+});
+
+test('keeps execution details closed until the user opens them', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /<details className="execution-details"><summary>/);
+  assert.doesNotMatch(source, /<details className="execution-details" open>/);
+  assert.match(styles, /\.execution-details\{margin-bottom:14px/);
+});
+
+test('shows the complete failed-test output from a dedicated details control', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /className="test-error-details"/);
+  assert.match(source, /<summary>مشاهده جزئیات<\/summary>/);
+  assert.match(source, /خروجی کامل آخرین اجرای تست/);
+  assert.match(source, /<DirectionalOutput text=\{task\.test_output\}\/>/);
+  assert.match(styles, /\.test-error-details\{margin-top:10px/);
 });
