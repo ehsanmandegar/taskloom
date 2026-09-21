@@ -868,6 +868,67 @@ def test_uncommitted_changes_hold_the_todo_queue_without_auto_commit(tmp_path: P
     assert asyncio.run(main_module.complete_automatic_delivery(state)) is False
 
 
+def test_git_commit_stages_changes_before_running_commit(monkeypatch, tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    state = TaskState(
+        id="stage-before-commit",
+        task_id="podw-stage",
+        project_path=str(tmp_path),
+        branch="tasks/podw-stage",
+        status=RunStatus.passed,
+        step="Ready",
+        changed_files=["backend/app/main.py"],
+    )
+    calls = []
+
+    async def fake_refresh(task, repo):
+        return None
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append(args)
+        if args == ["git", "diff", "--cached", "--quiet"]:
+            return 1, ""
+        return 0, "committed"
+
+    monkeypatch.setattr(services, "refresh_git", fake_refresh)
+    monkeypatch.setattr(services, "command", fake_command)
+
+    assert asyncio.run(services.git_commit(state, "feat(podw-stage): stage changes")) == "committed"
+    assert calls == [
+        ["git", "add", "."],
+        ["git", "diff", "--cached", "--quiet"],
+        ["git", "commit", "-m", "feat(podw-stage): stage changes"],
+    ]
+
+
+def test_git_commit_skips_hooks_when_nothing_is_staged(monkeypatch, tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    state = TaskState(
+        id="nothing-staged",
+        task_id="podw-empty",
+        project_path=str(tmp_path),
+        branch="tasks/podw-empty",
+        status=RunStatus.passed,
+        step="Ready",
+        changed_files=["backend/app/main.py"],
+    )
+    calls = []
+
+    async def fake_refresh(task, repo):
+        return None
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append(args)
+        return 0, ""
+
+    monkeypatch.setattr(services, "refresh_git", fake_refresh)
+    monkeypatch.setattr(services, "command", fake_command)
+
+    with pytest.raises(RuntimeError, match="No changes were staged for commit"):
+        asyncio.run(services.git_commit(state, "feat(podw-empty): try commit"))
+    assert calls == [["git", "add", "."], ["git", "diff", "--cached", "--quiet"]]
+
+
 def test_session_todos_run_before_automatic_delivery_and_new_branches(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
     state = TaskState(

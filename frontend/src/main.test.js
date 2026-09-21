@@ -107,6 +107,17 @@ test('can opt into generating a commit message during automatic delivery', () =>
   assert.match(source, /auto_generate_commit_message:form\.auto_generate_commit_message/);
 });
 
+test('retries a failed commit after staging changes in the background', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /function retryCommit\(\)\{if\(task\)action\('commit',\{message:task\.commit_message\|\|commitRetry\?\.message\|\|''\},true\)\}/);
+  assert.match(source, /در حال اجرای git add \. و تلاش مجدد برای commit…/);
+  assert.match(source, /نیاز به بازبینی انسانی دارد/);
+  assert.match(source, /تلاش مجدد با git add \./);
+  assert.match(styles, /\.delivery \.retry-commit\{/);
+});
+
 test('sends chat messages with Enter while preserving Shift+Enter for a new line', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 

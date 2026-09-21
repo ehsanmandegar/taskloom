@@ -675,8 +675,13 @@ async def git_commit(state: TaskState, message: str) -> str:
     await refresh_git(state, repo)
     if state.status != RunStatus.passed or not state.changed_files:
         raise ValueError("A successful test run with changes is required")
-    code, output = await command(["git", "add", "--all"], repo)
+    code, output = await command(["git", "add", "."], repo)
     if code:
+        raise RuntimeError(output)
+    code, output = await command(["git", "diff", "--cached", "--quiet"], repo)
+    if code == 0:
+        raise RuntimeError("No changes were staged for commit")
+    if code > 1:
         raise RuntimeError(output)
     code, output = await command(["git", "commit", "-m", message], repo)
     if code:
