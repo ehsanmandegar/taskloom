@@ -43,6 +43,25 @@ def test_command_resolves_relative_executable_from_working_directory(monkeypatch
     assert calls[0][1]["cwd"] == str(project_root)
 
 
+def test_test_plan_runs_the_command_from_its_configured_project_subdirectory(tmp_path: Path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+
+    command, cwd = services.test_plan(
+        tmp_path,
+        r".\venv\Scripts\python.exe -m pytest -c pytest-v2.ini",
+        "backend",
+    )
+
+    assert command == [r".\venv\Scripts\python.exe", "-m", "pytest", "-c", "pytest-v2.ini"]
+    assert cwd == backend
+
+
+def test_test_plan_rejects_a_working_directory_outside_the_project(tmp_path: Path):
+    with pytest.raises(ValueError, match="inside the project repository"):
+        services.test_plan(tmp_path, "pytest -q", "..")
+
+
 def test_health():
     assert client.get("/api/health").json() == {"status": "ok"}
 
@@ -196,6 +215,48 @@ def test_dws_defaults_include_the_documentation_directory(monkeypatch, tmp_path:
 
     assert defaults.guide_paths == [str(readme), str(testing_guide), str(docs)]
     assert defaults.base_branch == "sandbox"
+
+
+def test_dws_defaults_use_its_backend_interpreter_and_working_directory(monkeypatch, tmp_path: Path):
+    backend = tmp_path / "backend"
+    interpreter = backend / "venv" / "Scripts" / "python.exe"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    monkeypatch.setenv("TASKLOOM_DEFAULT_PROJECT_PATH", str(tmp_path))
+    monkeypatch.setenv("DWS_PROJECT_PATH", str(tmp_path))
+    monkeypatch.delenv("TASKLOOM_DEFAULT_TEST_COMMAND", raising=False)
+    monkeypatch.delenv("TASKLOOM_DEFAULT_TEST_WORKING_DIRECTORY", raising=False)
+
+    defaults = project_defaults()
+
+    assert defaults.test_command == r".\venv\Scripts\python.exe -m pytest"
+    assert defaults.test_working_directory == "backend"
+
+
+def test_load_tasks_migrates_the_legacy_dws_test_plan(monkeypatch, tmp_path: Path):
+    backend = tmp_path / "backend"
+    interpreter = backend / "venv" / "Scripts" / "python.exe"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    session_file = tmp_path / "sessions.json"
+    legacy = TaskState(
+        id="podw-235.1",
+        task_id="podw-235.1",
+        project_path=str(tmp_path),
+        branch="tasks/podw-235.1",
+        test_command="python -m pytest -q",
+        status=RunStatus.failed,
+        step="Tests failed",
+    )
+    session_file.write_text(json.dumps({legacy.id: legacy.model_dump(mode="json")}), encoding="utf-8")
+    monkeypatch.setattr(main_module, "sessions_path", lambda: session_file)
+
+    loaded = load_tasks()
+
+    assert loaded[legacy.id].test_command == r".\venv\Scripts\python.exe -m pytest"
+    assert loaded[legacy.id].test_working_directory == "backend"
+    stored = json.loads(session_file.read_text(encoding="utf-8"))[legacy.id]
+    assert stored["test_working_directory"] == "backend"
 
 
 def test_rejects_non_git_directory(tmp_path: Path):
@@ -448,7 +509,7 @@ def test_profiles_are_persisted(monkeypatch, tmp_path: Path):
 
     assert client.put("/api/profiles/project%201", json=profile).status_code == 200
     assert client.get("/api/profiles").json() == [
-        {**profile, "base_branch": "main", "test_setup_enabled": False, "auto_commit": False, "auto_generate_commit_message": False, "auto_push": False, "auto_merge_request": False, "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto"}
+        {**profile, "base_branch": "main", "test_working_directory": None, "test_setup_enabled": False, "auto_commit": False, "auto_generate_commit_message": False, "auto_push": False, "auto_merge_request": False, "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto"}
     ]
     assert profile_file.exists()
 

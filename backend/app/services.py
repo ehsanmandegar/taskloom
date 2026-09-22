@@ -63,6 +63,26 @@ async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str,
     return process.returncode or 0, output.decode("utf-8", errors="replace")
 
 
+def test_working_directory(repo: Path, configured: str | None) -> Path:
+    """Resolve a test directory while keeping test execution inside its repository."""
+    if not configured:
+        return repo
+    candidate = (repo / configured).resolve()
+    try:
+        candidate.relative_to(repo.resolve())
+    except ValueError as exc:
+        raise ValueError("Test working directory must be inside the project repository") from exc
+    if not candidate.is_dir():
+        raise ValueError(f"Test working directory does not exist: {configured}")
+    return candidate
+
+
+def test_plan(repo: Path, test_command: str | None, configured_working_directory: str | None) -> tuple[list[str], Path]:
+    """Build the final test invocation from the selected command and directory."""
+    cwd = test_working_directory(repo, configured_working_directory)
+    return (shlex.split(test_command, posix=False) if test_command else detect_tests(cwd), cwd)
+
+
 def codex_account_status_payload(responses: dict[int, dict]) -> dict:
     """Return the non-sensitive part of Codex App Server account responses."""
     account = responses.get(1, {}).get("account") or {}
@@ -575,8 +595,8 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         if req.test_setup_enabled:
             await prepare_tests(state, repo, "Preparing local test environment before final tests")
         state.status, state.step = RunStatus.testing, "Running tests"
-        tests = shlex.split(req.test_command, posix=False) if req.test_command else detect_tests(repo)
-        code, output = await command(tests, repo, 1800)
+        tests, test_cwd = test_plan(repo, state.test_command, state.test_working_directory)
+        code, output = await command(tests, test_cwd, 1800)
         state.test_output = output
         state.commit_message = f"feat({req.task_id}): implement requested changes"
         state.status, state.step = (RunStatus.passed, "Ready for review") if code == 0 else (RunStatus.failed, "Tests failed")
@@ -619,8 +639,8 @@ async def continue_task(message: str, state: TaskState) -> None:
         if state.test_setup_enabled:
             await prepare_tests(state, repo, "Preparing local test environment before final tests")
         state.status, state.step = RunStatus.testing, "Running tests"
-        tests = shlex.split(state.test_command, posix=False) if state.test_command else detect_tests(repo)
-        code, output = await command(tests, repo, 1800)
+        tests, test_cwd = test_plan(repo, state.test_command, state.test_working_directory)
+        code, output = await command(tests, test_cwd, 1800)
         state.test_output = output
         state.status, state.step = (RunStatus.passed, "Ready for further instructions") if code == 0 else (RunStatus.failed, "Tests failed")
         if code:

@@ -17,6 +17,24 @@ app = FastAPI(title="Taskloom", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
 
 
+def dws_test_defaults(project_path: Path) -> tuple[str, str] | None:
+    """Return DWS's backend interpreter and its required test directory."""
+    backend = project_path / "backend"
+    interpreter = backend / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not interpreter.is_file():
+        return None
+    command = r".\venv\Scripts\python.exe -m pytest" if os.name == "nt" else ".venv/bin/python -m pytest"
+    return command, "backend"
+
+
+def migrate_legacy_test_settings(project_path: Path, command: str | None, working_directory: str | None) -> tuple[str | None, str | None]:
+    """Upgrade Taskloom's former generic DWS pytest setting without touching custom plans."""
+    defaults = dws_test_defaults(project_path)
+    if defaults and working_directory is None and command in {"python -m pytest", "python -m pytest -q"}:
+        return defaults
+    return command, working_directory
+
+
 def sessions_path() -> Path:
     configured = os.getenv("TASKLOOM_SESSIONS_PATH")
     return Path(configured).expanduser() if configured else Path.home() / ".taskloom" / "sessions.json"
@@ -33,14 +51,20 @@ def load_tasks() -> dict[str, TaskState]:
         # A damaged history must not prevent the local dashboard from starting.
         return {}
 
-    restarted = False
+    restarted = migrated = False
     for state in loaded.values():
+        command, working_directory = migrate_legacy_test_settings(
+            Path(state.project_path), state.test_command, state.test_working_directory
+        )
+        if (command, working_directory) != (state.test_command, state.test_working_directory):
+            state.test_command, state.test_working_directory = command, working_directory
+            migrated = True
         if state.status in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
             state.status = RunStatus.failed
             state.step = "Interrupted by Taskloom restart"
             state.error = "Taskloom was restarted before Codex finished responding."
             restarted = True
-    if restarted:
+    if restarted or migrated:
         try:
             save_tasks(loaded)
         except HTTPException:
@@ -131,14 +155,16 @@ def project_defaults() -> ProjectDefaults:
             ]
 
     configured_test = os.getenv("TASKLOOM_DEFAULT_TEST_COMMAND")
+    configured_test_working_directory = os.getenv("TASKLOOM_DEFAULT_TEST_WORKING_DIRECTORY")
+    test_working_directory = configured_test_working_directory.strip() if configured_test_working_directory else None
     if configured_test is not None:
         test_command = configured_test.strip() or None
+    elif dws_defaults := dws_test_defaults(project_path):
+        test_command, test_working_directory = dws_defaults
     elif os.name == "nt" and (project_path / ".venv" / "Scripts" / "python.exe").is_file():
         test_command = r".venv\Scripts\python.exe -m pytest -q"
     elif (project_path / ".venv" / "bin" / "python").is_file():
         test_command = ".venv/bin/python -m pytest -q"
-    elif os.name == "nt" and (project_path / "backend" / "venv" / "Scripts" / "python.exe").is_file():
-        test_command = r"python -m pytest -q"
     else:
         test_command = None
 
@@ -161,6 +187,7 @@ def project_defaults() -> ProjectDefaults:
         guide_paths=guide_paths,
         base_branch=base_branch,
         test_command=test_command,
+        test_working_directory=test_working_directory,
         test_setup_enabled=False,
         mcp_server_name=mcp_server_name,
         mcp_failure_mode=mcp_failure_mode,
@@ -179,9 +206,20 @@ def load_profiles() -> dict[str, ProjectProfile]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return {name: ProjectProfile.model_validate(profile) for name, profile in data.items()}
+        profiles = {name: ProjectProfile.model_validate(profile) for name, profile in data.items()}
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(500, f"Could not read project profiles: {exc}") from exc
+    migrated = False
+    for profile in profiles.values():
+        command, working_directory = migrate_legacy_test_settings(
+            Path(profile.project_path), profile.test_command, profile.test_working_directory
+        )
+        if (command, working_directory) != (profile.test_command, profile.test_working_directory):
+            profile.test_command, profile.test_working_directory = command, working_directory
+            migrated = True
+    if migrated:
+        save_profiles(profiles)
+    return profiles
 
 
 def save_profiles(profiles: dict[str, ProjectProfile]) -> None:
@@ -284,6 +322,7 @@ async def create_task(request: TaskRequest):
         base_branch=request.base_branch,
         guide_paths=request.guide_paths,
         test_command=request.test_command,
+        test_working_directory=request.test_working_directory,
         test_setup_enabled=request.test_setup_enabled,
         auto_commit=request.auto_commit,
         auto_generate_commit_message=request.auto_generate_commit_message,
@@ -413,6 +452,7 @@ def start_todo_task(owner: TaskState, todo: TodoItem) -> None:
         base_branch=owner.base_branch,
         guide_paths=owner.guide_paths,
         test_command=owner.test_command,
+        test_working_directory=owner.test_working_directory,
         test_setup_enabled=owner.test_setup_enabled,
         auto_commit=owner.auto_commit,
         auto_generate_commit_message=owner.auto_generate_commit_message,
@@ -433,6 +473,7 @@ def start_todo_task(owner: TaskState, todo: TodoItem) -> None:
         base_branch=request.base_branch,
         guide_paths=request.guide_paths,
         test_command=request.test_command,
+        test_working_directory=request.test_working_directory,
         test_setup_enabled=request.test_setup_enabled,
         auto_commit=request.auto_commit,
         auto_generate_commit_message=request.auto_generate_commit_message,

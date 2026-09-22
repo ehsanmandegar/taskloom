@@ -54,6 +54,7 @@ class TaskRequest(BaseModel):
     request: str = Field(min_length=5, max_length=20_000)
     base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
+    test_working_directory: str | None = Field(default=None, max_length=500)
     test_setup_enabled: bool = False
     auto_commit: bool = False
     auto_generate_commit_message: bool = False
@@ -84,6 +85,14 @@ class TaskRequest(BaseModel):
     def clean_base_branch(cls, value: str) -> str:
         return valid_branch_name(value)
 
+    @field_validator("test_working_directory")
+    @classmethod
+    def clean_test_working_directory(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
 
 class ProjectProfile(BaseModel):
     name: str = Field(min_length=1, max_length=80)
@@ -91,6 +100,7 @@ class ProjectProfile(BaseModel):
     guide_paths: list[str] = Field(default_factory=list)
     base_branch: str = Field(default="main", min_length=1, max_length=240)
     test_command: str | None = Field(default=None, max_length=500)
+    test_working_directory: str | None = Field(default=None, max_length=500)
     test_setup_enabled: bool = False
     auto_commit: bool = False
     auto_generate_commit_message: bool = False
@@ -113,12 +123,21 @@ class ProjectProfile(BaseModel):
     def clean_base_branch(cls, value: str) -> str:
         return valid_branch_name(value)
 
+    @field_validator("test_working_directory")
+    @classmethod
+    def clean_test_working_directory(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
 
 class ProjectDefaults(BaseModel):
     project_path: str
     guide_paths: list[str] = Field(default_factory=list)
     base_branch: str = "main"
     test_command: str | None = None
+    test_working_directory: str | None = None
     test_setup_enabled: bool = False
     auto_commit: bool = False
     auto_generate_commit_message: bool = False
@@ -209,6 +228,7 @@ class TaskState(BaseModel):
     base_branch: str = "main"
     guide_paths: list[str] = Field(default_factory=list)
     test_command: str | None = None
+    test_working_directory: str | None = None
     test_setup_enabled: bool = False
     auto_commit: bool = False
     auto_generate_commit_message: bool = False
