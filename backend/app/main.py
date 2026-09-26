@@ -559,6 +559,20 @@ async def rename_task(run_id: str, request: RenameTaskRequest):
     return state
 
 
+@app.delete("/api/tasks/{run_id}", status_code=204)
+async def delete_task(run_id: str):
+    """Permanently remove a finished session from memory and saved history."""
+    state = get_state(run_id)
+    terminal = {RunStatus.passed, RunStatus.failed, RunStatus.blocked, RunStatus.stopped}
+    if state.status not in terminal:
+        raise HTTPException(409, "Stop or finish the task before deleting its session")
+
+    remaining = {task_id: task for task_id, task in tasks.items() if task_id != run_id}
+    save_tasks(remaining)
+    tasks.pop(run_id, None)
+    task_workers.pop(run_id, None)
+
+
 @app.get("/api/tasks/{run_id}/events")
 async def task_events(run_id: str, request: Request):
     """Stream changing task snapshots so the UI can render Codex output live."""

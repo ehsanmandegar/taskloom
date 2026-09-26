@@ -49,11 +49,11 @@ def test_test_plan_runs_the_command_from_its_configured_project_subdirectory(tmp
 
     command, cwd = services.test_plan(
         tmp_path,
-        r".\venv\Scripts\python.exe -m pytest -c pytest-v2.ini",
+        r".\venv\Scripts\python.exe -m pytest -c pytest.ini",
         "backend",
     )
 
-    assert command == [r".\venv\Scripts\python.exe", "-m", "pytest", "-c", "pytest-v2.ini"]
+    assert command == [r".\venv\Scripts\python.exe", "-m", "pytest", "-c", "pytest.ini"]
     assert cwd == backend
 
 

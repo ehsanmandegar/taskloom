@@ -233,7 +233,7 @@ regex اعتبارسنجی فایل جدید:
 مرجع regression روزمره API این فرمان است:
 
 ```powershell
-.\venv\Scripts\python.exe -m pytest -c pytest-v2.ini
+.\venv\Scripts\python.exe -m pytest -c pytest.ini
 ```
 
 این suite با API محلی در حال اجرا صحبت می‌کند و برای قراردادهای عمومی و
@@ -274,7 +274,7 @@ dependencyها، نصب آن‌ها یک مرحلهٔ setup جداگانه اس�
 ### suite قدیمی
 
 `pytest.ini` و پوشهٔ `backend/tests/` در حال حاضر fixtureها و چند قرارداد قدیمی
-دارند و gate اصلی روزمره نیستند. اجرای `pytest` بدون `-c pytest-v2.ini` فقط وقتی
+دارند و gate اصلی روزمره نیستند. اجرای `pytest` بدون `-c pytest.ini` فقط وقتی
 مجاز است که profile محیط isolated مناسب را مشخص کرده باشد. شکست آن باید با
 برچسب `LEGACY_OR_ENVIRONMENT_FAILURE` و همراه شواهد گزارش شود؛ نه مخفی شود و نه
 خودکار به regression تسک نسبت داده شود.
@@ -391,7 +391,7 @@ codex mcp get dws_project --json
   MCP مانند `search_docs`، `read_doc`، `search_code` و `read_file` استفاده کند.
 - پاسخ MCP شواهد context است، نه شاهد سبزبودن gateهای Taskloom.
 - ابزار `run_tests` فعلی MCP فقط مسیرهای suite قدیمی `backend/tests/` را قبول
-  می‌کند. Taskloom باید gate اصلی `pytest-v2.ini` را با test runner خودش اجرا
+  می‌کند. Taskloom باید gate اصلی `pytest.ini` را با test runner خودش اجرا
   کند و نباید اجرای MCP را جایگزین آن بداند.
 - session فعال پیش از اضافه‌شدن MCP ممکن است tool جدید را نبیند؛ Taskloom باید
   برای اولین استفاده یک Codex process/session تازه ایجاد کند.
