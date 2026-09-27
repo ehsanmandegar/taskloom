@@ -282,7 +282,7 @@ async def switch_branch(request: BranchSwitchRequest):
     ):
         raise HTTPException(409, "Stop the active Codex task for this project before switching branches")
     try:
-        return await switch_git_branch(repo, request.branch)
+        return await switch_git_branch(repo, request.branch, request.base_branch)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
 

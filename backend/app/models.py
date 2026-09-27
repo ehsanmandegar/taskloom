@@ -196,8 +196,9 @@ class TestSetupRequest(BaseModel):
 class BranchSwitchRequest(BaseModel):
     project_path: str = Field(min_length=1)
     branch: str = Field(min_length=1, max_length=240)
+    base_branch: str = Field(default="main", min_length=1, max_length=240)
 
-    @field_validator("branch")
+    @field_validator("branch", "base_branch")
     @classmethod
     def clean_branch(cls, value: str) -> str:
         return valid_branch_name(value)

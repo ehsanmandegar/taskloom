@@ -148,6 +148,22 @@ test('streams Codex activity into changes and the in-progress reply', () => {
   assert.match(styles, /@keyframes live-cursor/);
 });
 
+test('keeps all sessions synchronized after a terminal task starts the next queued Todo', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /async function refreshTasks\(\)/);
+  assert.match(source, /fetch\(`\$\{API\}\/api\/tasks`\)/);
+  assert.match(source, /setInterval\(refreshTasks,1400\)/);
+  assert.match(source, /setTask\(current=>\{if\(!current\)return current;return items\.find\(item=>item\.id===current\.id\)\|\|current\}\)/);
+});
+
+test('shows the pending Todo count across every saved session', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /pendingTodoCount=sessions\.reduce/);
+  assert.match(source, /کارهای بعدی \{pendingTodoCount\?`\(\$\{pendingTodoCount\}\)`:''\}/);
+});
+
 test('renders mixed Persian and English output with per-line direction', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
@@ -197,7 +213,7 @@ test('creates separately named sessions and lets the user rename them', () => {
   assert.match(source, /task_id=taskIdForBranch\(form\.task_id\)\|\|`session-\$\{Date\.now\(\)\.toString\(36\)\}`/);
   assert.match(source, /item\.session_name\|\|item\.task_id/);
   assert.match(source, /className="new-session"/);
-  assert.match(styles, /\.session-controls\{display:grid;grid-template-columns:minmax\(0,1fr\) auto auto;align-items:center/);
+  assert.match(styles, /\.session-controls\{display:grid;grid-template-columns:minmax\(0,1fr\) auto auto auto;align-items:center/);
 });
 
 test('scrolls chat history to the newest message and streamed reply', () => {
@@ -256,6 +272,7 @@ test('uses one task field with dropdown suggestions to switch to or create task 
   assert.match(source, /list="task-branches"/);
   assert.match(source, /branch\.name\.startsWith\('tasks\/'\)/);
   assert.match(source, /branch:taskBranchFor\(task_id\)/);
+  assert.match(source, /base_branch:form\.base_branch\.trim\(\)/);
   assert.equal((source.match(/name="task_id"/g) || []).length, 1);
   assert.match(source, /برنچ فعال/);
   assert.match(source, /ساخت یا سوییچ/);

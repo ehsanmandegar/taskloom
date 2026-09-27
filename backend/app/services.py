@@ -3,9 +3,13 @@ import codecs
 from contextvars import ContextVar
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
+import subprocess
+import threading
+import time
 from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Callable
@@ -17,7 +21,15 @@ _command_output_handler: ContextVar[Callable[[str], None] | None] = ContextVar("
 COMMIT_MESSAGE_PATTERN = re.compile(r"^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([a-z0-9][a-z0-9._/-]*\))?!?: [A-Za-z0-9][ -~]{0,117}$")
 
 
-async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
+def _command_sync(
+    args: list[str],
+    cwd: Path,
+    timeout: int,
+    env: dict[str, str] | None,
+    handler: Callable[[str], None] | None,
+    cancelled: threading.Event,
+) -> tuple[int, str]:
+    """Run a command without depending on the server's asyncio event-loop policy."""
     executable = args[0]
     executable_path = Path(executable).expanduser()
     if not executable_path.is_absolute() and any(separator in executable for separator in ("/", "\\")):
@@ -27,40 +39,71 @@ async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str,
     else:
         executable = shutil.which(executable) or executable
 
-    process = await asyncio.create_subprocess_exec(executable, *args[1:], cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env or os.environ.copy())
-    handler = _command_output_handler.get()
-    try:
-        if handler is None:
-            output, _ = await asyncio.wait_for(process.communicate(), timeout)
-        else:
-            chunks: list[bytes] = []
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    process = subprocess.Popen(
+        [executable, *args[1:]],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env or os.environ.copy(),
+        creationflags=creationflags,
+    )
+    assert process.stdout is not None
+    output_queue: queue.Queue[bytes | None] = queue.Queue()
 
-            async def read_output() -> None:
-                assert process.stdout is not None
-                while chunk := await process.stdout.read(4096):
-                    chunks.append(chunk)
-                    text = decoder.decode(chunk)
-                    if text:
-                        handler(text)
-                tail = decoder.decode(b"", final=True)
-                if tail:
-                    handler(tail)
-                await process.wait()
+    def read_output() -> None:
+        try:
+            while chunk := process.stdout.read(4096):
+                output_queue.put(chunk)
+        finally:
+            output_queue.put(None)
 
-            await asyncio.wait_for(read_output(), timeout)
-            output = b"".join(chunks)
-    except asyncio.TimeoutError:
-        if process.returncode is None:
-            process.kill()
-        await process.communicate()
+    threading.Thread(target=read_output, name="taskloom-command-output", daemon=True).start()
+    chunks: list[bytes] = []
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    finished_output = False
+    while not finished_output:
+        if cancelled.is_set() or time.monotonic() >= deadline:
+            timed_out = not cancelled.is_set()
+            if process.poll() is None:
+                process.kill()
+        try:
+            chunk = output_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if chunk is None:
+            finished_output = True
+            continue
+        chunks.append(chunk)
+        if handler:
+            text = decoder.decode(chunk)
+            if text:
+                handler(text)
+    process.wait()
+    if handler:
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            handler(tail)
+    if timed_out:
         return 124, f"Command timed out after {timeout}s"
+    output = b"".join(chunks).decode("utf-8", errors="replace")
+    return process.returncode or 0, output
+
+
+async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
+    """Run a subprocess portably while preserving streaming, timeout, and cancellation."""
+    cancelled = threading.Event()
+    worker = asyncio.create_task(
+        asyncio.to_thread(_command_sync, args, cwd, timeout, env, _command_output_handler.get(), cancelled)
+    )
+    try:
+        return await asyncio.shield(worker)
     except asyncio.CancelledError:
-        if process.returncode is None:
-            process.kill()
-        await process.communicate()
+        cancelled.set()
+        await asyncio.shield(worker)
         raise
-    return process.returncode or 0, output.decode("utf-8", errors="replace")
 
 
 def test_working_directory(repo: Path, configured: str | None) -> Path:
@@ -101,18 +144,24 @@ def codex_account_status_payload(responses: dict[int, dict]) -> dict:
     }
 
 
-async def codex_account_status(timeout: int = 20) -> dict:
-    """Read the local Codex CLI account, model catalog, and usage windows."""
-    codex = shutil.which("codex")
-    if not codex:
-        raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
-    process = await asyncio.create_subprocess_exec(
-        codex,
-        "app-server",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+def _codex_account_status(codex: str, timeout: int) -> dict:
+    """Read App Server messages without asyncio's Windows named-pipe transport."""
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        process = subprocess.Popen(
+            [codex, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=creationflags,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Could not start Codex App Server: {exc}") from exc
+
     requests = [
         {"method": "initialize", "id": 0, "params": {"clientInfo": {"name": "taskloom", "title": "Taskloom", "version": "0.1.0"}}},
         {"method": "initialized", "params": {}},
@@ -122,38 +171,85 @@ async def codex_account_status(timeout: int = 20) -> dict:
         {"method": "model/list", "id": 4, "params": {"limit": 100, "includeHidden": False}},
     ]
     assert process.stdin is not None and process.stdout is not None
-    try:
-        for request in requests:
-            process.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
-        await process.stdin.drain()
+    messages: queue.Queue[str | None] = queue.Queue()
+    diagnostics: list[str] = []
+
+    def read_output() -> None:
+        try:
+            for line in process.stdout:
+                messages.put(line)
+        finally:
+            messages.put(None)
+
+    threading.Thread(target=read_output, name="taskloom-codex-status", daemon=True).start()
+    deadline = time.monotonic() + timeout
+
+    def send(request: dict) -> None:
+        try:
+            process.stdin.write(json.dumps(request) + "\n")
+            process.stdin.flush()
+        except OSError as exc:
+            raise RuntimeError(f"Could not send a request to Codex App Server: {exc}") from exc
+
+    def receive(pending: set[int]) -> dict[int, dict]:
         responses: dict[int, dict] = {}
-        pending = {1, 2, 3, 4}
         while pending:
-            line = await asyncio.wait_for(process.stdout.readline(), timeout)
-            if not line:
-                raise RuntimeError("Codex App Server stopped before returning account status")
-            message = json.loads(line)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Codex App Server timed out while reading account status")
+            try:
+                line = messages.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise RuntimeError("Codex App Server timed out while reading account status") from exc
+            if line is None:
+                detail = f": {diagnostics[-1]}" if diagnostics else ""
+                raise RuntimeError(f"Codex App Server stopped before returning account status{detail}")
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                if stripped := line.strip():
+                    diagnostics.append(stripped)
+                continue
             request_id = message.get("id")
             if request_id not in pending:
                 continue
             if "error" in message:
-                responses[request_id] = {"error": message["error"].get("message", "Codex request failed")}
+                error = message["error"]
+                responses[request_id] = {"error": error.get("message", "Codex request failed") if isinstance(error, dict) else str(error)}
             else:
                 responses[request_id] = message.get("result", {})
             pending.remove(request_id)
+        return responses
+
+    try:
+        send(requests[0])
+        initialized = receive({0})[0]
+        if error := initialized.get("error"):
+            raise RuntimeError(f"Codex App Server initialization failed: {error}")
+        for request in requests[1:]:
+            send(request)
+        responses = receive({1, 2, 3, 4})
         return codex_account_status_payload(responses)
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError("Codex App Server timed out while reading account status") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Codex App Server returned an invalid response") from exc
     finally:
-        if process.returncode is None:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        if process.poll() is None:
             process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), 5)
-            except asyncio.TimeoutError:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 process.kill()
-                await process.wait()
+                process.wait()
+
+
+async def codex_account_status(timeout: int = 20) -> dict:
+    """Read the local Codex CLI account, model catalog, and usage windows."""
+    codex = shutil.which("codex")
+    if not codex:
+        raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
+    return await asyncio.to_thread(_codex_account_status, codex, timeout)
 
 
 def repository(path: str) -> Path:
@@ -191,8 +287,20 @@ async def git_branches(repo: Path) -> dict:
     }
 
 
-async def switch_git_branch(repo: Path, branch: str) -> dict:
-    """Switch to an existing branch, or create it from the current HEAD once."""
+async def base_branch_ref(repo: Path, base_branch: str) -> str:
+    """Resolve a selected base branch locally, then fall back to origin."""
+    code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{base_branch}^{{commit}}"], repo)
+    if code == 0:
+        return base_branch
+    source_branch = f"origin/{base_branch}"
+    code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{source_branch}^{{commit}}"], repo)
+    if code:
+        raise RuntimeError(f"Base branch `{base_branch}` was not found locally or on origin")
+    return source_branch
+
+
+async def switch_git_branch(repo: Path, branch: str, base_branch: str) -> dict:
+    """Switch to an existing branch, or create it from the selected base once."""
     code, output = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], repo)
     if code == 0:
         args, created, message = ["git", "switch", branch], False, f"Checked out existing branch `{branch}`"
@@ -201,7 +309,9 @@ async def switch_git_branch(repo: Path, branch: str) -> dict:
         if code == 0:
             args, created, message = ["git", "switch", "--track", "-c", branch, f"origin/{branch}"], False, f"Checked out existing remote branch `{branch}`"
         else:
-            args, created, message = ["git", "switch", "-c", branch], True, f"Created and checked out `{branch}`"
+            source_branch = await base_branch_ref(repo, base_branch)
+            args = ["git", "switch", "-c", branch, source_branch]
+            created, message = True, f"Created and checked out `{branch}` from `{source_branch}`"
     code, output = await command(args, repo)
     if code:
         raise RuntimeError(output.strip() or f"Could not switch to branch `{branch}`")
@@ -287,10 +397,18 @@ def resolve_guides(repo: Path, paths: list[str]) -> list[Path]:
 
 
 def detect_tests(repo: Path) -> list[str]:
+    package_json = repo / "package.json"
+    if package_json.is_file():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            package = {}
+        scripts = package.get("scripts") if isinstance(package, dict) else None
+        test_script = scripts.get("test") if isinstance(scripts, dict) else None
+        if isinstance(test_script, str) and test_script.strip():
+            return [shutil.which("npm") or "npm", "test"]
     if (repo / "pytest.ini").exists() or (repo / "pyproject.toml").exists() or (repo / "tests").exists():
         return [shutil.which("pytest") or "pytest", "-q"]
-    if (repo / "package.json").exists():
-        return [shutil.which("npm") or "npm", "test", "--", "--run"]
     return [shutil.which("python") or "python", "-m", "pytest", "-q"]
 
 
@@ -549,13 +667,7 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
             if not code:
                 args, message = ["git", "switch", "--track", "-c", state.branch, f"origin/{state.branch}"], f"Checked out existing remote task branch {state.branch}"
             else:
-                source_branch = req.base_branch
-                code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{req.base_branch}^{{commit}}"], repo)
-                if code:
-                    source_branch = f"origin/{req.base_branch}"
-                    code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{source_branch}^{{commit}}"], repo)
-                if code:
-                    raise RuntimeError(f"Base branch `{req.base_branch}` was not found locally or on origin")
+                source_branch = await base_branch_ref(repo, req.base_branch)
                 args, message = ["git", "switch", "-c", state.branch, source_branch], f"Created {state.branch} from {source_branch}"
         code, output = await command(args, repo)
         if code:
@@ -715,11 +827,31 @@ async def git_push(state: TaskState) -> str:
     if not state.committed:
         raise ValueError("Commit the reviewed changes first")
     repo = repository(state.project_path)
-    code, output = await command(["git", "push", "-u", "origin", state.branch], repo, 600)
+    code, current = await command(["git", "branch", "--show-current"], repo)
     if code:
-        raise RuntimeError(output)
+        raise RuntimeError(current.strip() or "Could not determine the current Git branch")
+    if current.strip() != state.branch:
+        raise ValueError(f"Switch to task branch `{state.branch}` before pushing")
+    code, status = await command(["git", "status", "--porcelain"], repo)
+    if code:
+        raise RuntimeError(status.strip() or "Could not inspect the repository before pushing")
+    if status.strip():
+        raise ValueError("Commit all changes and resolve any merge conflicts before pushing")
+    code, pull_output = await command(
+        ["git", "pull", "--no-rebase", "--no-edit", "origin", state.base_branch],
+        repo,
+        600,
+    )
+    if code:
+        raise RuntimeError(
+            pull_output.strip()
+            or f"Could not merge origin/{state.base_branch} before pushing; resolve conflicts and commit them first"
+        )
+    code, push_output = await command(["git", "push", "-u", "origin", state.branch], repo, 600)
+    if code:
+        raise RuntimeError(push_output)
     state.pushed = True
-    return output
+    return "\n".join(part.strip() for part in (pull_output, push_output) if part.strip())
 
 
 async def create_merge_request(state: TaskState) -> str:

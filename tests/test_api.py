@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 from pathlib import Path
@@ -24,22 +25,29 @@ def test_command_resolves_relative_executable_from_working_directory(monkeypatch
 
     class Process:
         returncode = 0
+        stdout = io.BytesIO(b"tests passed")
 
-        async def communicate(self):
-            return b"tests passed", b""
+        def poll(self):
+            return self.returncode
 
-    async def fake_create_subprocess_exec(*args, **kwargs):
+        def wait(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -1
+
+    def fake_popen(*args, **kwargs):
         calls.append((args, kwargs))
         return Process()
 
-    monkeypatch.setattr(services.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(services.subprocess, "Popen", fake_popen)
 
     code, output = asyncio.run(
         services.command([str(executable.relative_to(project_root)), "-m", "pytest", "-q"], project_root)
     )
 
     assert (code, output) == (0, "tests passed")
-    assert calls[0][0] == (str(executable.resolve()), "-m", "pytest", "-q")
+    assert calls[0][0] == ([str(executable.resolve()), "-m", "pytest", "-q"],)
     assert calls[0][1]["cwd"] == str(project_root)
 
 
@@ -60,6 +68,25 @@ def test_test_plan_runs_the_command_from_its_configured_project_subdirectory(tmp
 def test_test_plan_rejects_a_working_directory_outside_the_project(tmp_path: Path):
     with pytest.raises(ValueError, match="inside the project repository"):
         services.test_plan(tmp_path, "pytest -q", "..")
+
+
+def test_detect_tests_prefers_the_node_test_script_over_a_generic_tests_directory(monkeypatch, tmp_path: Path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node tests/unit/run.js"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(services.shutil, "which", lambda command: f"{command}.exe")
+
+    assert services.detect_tests(tmp_path) == ["npm.exe", "test"]
+
+
+def test_detect_tests_uses_pytest_when_package_has_no_test_script(monkeypatch, tmp_path: Path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"start": "node server.js"}}), encoding="utf-8")
+    monkeypatch.setattr(services.shutil, "which", lambda command: f"{command}.exe")
+
+    assert services.detect_tests(tmp_path) == ["pytest.exe", "-q"]
 
 
 def test_health():
@@ -85,25 +112,36 @@ def test_branch_switch_uses_existing_branch_or_creates_a_missing_one(monkeypatch
     (tmp_path / ".git").mkdir()
     calls = []
 
-    async def fake_switch(repo, branch):
-        calls.append((repo, branch))
+    async def fake_switch(repo, branch, base_branch):
+        calls.append((repo, branch, base_branch))
         return {"current": branch, "branches": [{"name": branch, "local": True, "remote": False}], "created": branch == "feature/new", "message": "done"}
 
     monkeypatch.setattr(main_module, "switch_git_branch", fake_switch)
-    existing = client.post("/api/branches/switch", json={"project_path": str(tmp_path), "branch": "feature/existing"})
-    missing = client.post("/api/branches/switch", json={"project_path": str(tmp_path), "branch": "feature/new"})
+    existing = client.post("/api/branches/switch", json={"project_path": str(tmp_path), "branch": "feature/existing", "base_branch": "develop"})
+    missing = client.post("/api/branches/switch", json={"project_path": str(tmp_path), "branch": "feature/new", "base_branch": "develop"})
 
     assert existing.status_code == 200
     assert existing.json()["created"] is False
     assert missing.status_code == 200
     assert missing.json()["created"] is True
-    assert [branch for _, branch in calls] == ["feature/existing", "feature/new"]
+    assert [(branch, base) for _, branch, base in calls] == [("feature/existing", "develop"), ("feature/new", "develop")]
 
 
 def test_branch_switch_rejects_invalid_branch_name(tmp_path: Path):
     (tmp_path / ".git").mkdir()
 
     response = client.post("/api/branches/switch", json={"project_path": str(tmp_path), "branch": "../main"})
+
+    assert response.status_code == 422
+
+
+def test_branch_switch_rejects_invalid_base_branch(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+
+    response = client.post(
+        "/api/branches/switch",
+        json={"project_path": str(tmp_path), "branch": "tasks/podw-225", "base_branch": "../develop"},
+    )
 
     assert response.status_code == 422
 
@@ -124,10 +162,33 @@ def test_switch_git_branch_checks_out_remote_before_creating(monkeypatch, tmp_pa
         return 0, ""
 
     monkeypatch.setattr(services, "command", fake_command)
-    result = asyncio.run(services.switch_git_branch(tmp_path, "feature/remote"))
+    result = asyncio.run(services.switch_git_branch(tmp_path, "feature/remote", "develop"))
 
     assert result["created"] is False
     assert ["git", "switch", "--track", "-c", "feature/remote", "origin/feature/remote"] in calls
+
+
+def test_switch_git_branch_creates_missing_branch_from_selected_base(monkeypatch, tmp_path: Path):
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append(args)
+        if args[-1] in {"refs/heads/tasks/podw-225", "refs/remotes/origin/tasks/podw-225"}:
+            return 1, ""
+        if args[-1] == "refs/heads/develop^{commit}":
+            return 0, ""
+        if args[:3] == ["git", "for-each-ref", "--format=%(refname:short)"]:
+            return 0, "develop\ntasks/podw-225\n" if args[-1] == "refs/heads" else ""
+        if args == ["git", "branch", "--show-current"]:
+            return 0, "tasks/podw-225\n"
+        return 0, ""
+
+    monkeypatch.setattr(services, "command", fake_command)
+    result = asyncio.run(services.switch_git_branch(tmp_path, "tasks/podw-225", "develop"))
+
+    assert result["created"] is True
+    assert ["git", "switch", "-c", "tasks/podw-225", "develop"] in calls
+    assert "`develop`" in result["message"]
 
 
 def test_codex_status_exposes_account_limits_usage_and_models(monkeypatch):
@@ -156,6 +217,74 @@ def test_codex_account_status_payload_omits_account_email_and_keeps_usage_data()
     assert "email" not in payload["account"]
     assert payload["usage"]["dailyUsageBuckets"][0]["tokens"] == 1234
     assert payload["models"][0]["displayName"] == "GPT-5.6 Sol"
+
+
+def test_codex_account_status_uses_portable_pipes_and_waits_for_initialization(monkeypatch):
+    written: list[str] = []
+
+    class Input:
+        def write(self, value):
+            written.append(value)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Process:
+        stdin = Input()
+        stdout = io.StringIO(
+            "not-json diagnostic\n"
+            '{"id":0,"result":{"userAgent":"test"}}\n'
+            '{"method":"account/updated","params":{}}\n'
+            '{"id":1,"result":{"account":{"type":"chatgpt","planType":"plus"}}}\n'
+            '{"id":2,"result":{"rateLimits":{}}}\n'
+            '{"id":3,"result":{"dailyUsageBuckets":[]}}\n'
+            '{"id":4,"result":{"data":[{"id":"gpt-test","isDefault":true}]}}\n'
+        )
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -1
+
+    monkeypatch.setattr(services.shutil, "which", lambda _: "codex.exe")
+    monkeypatch.setattr(services.subprocess, "Popen", lambda *args, **kwargs: Process())
+
+    payload = asyncio.run(services.codex_account_status())
+    sent = [json.loads(line) for chunk in written for line in chunk.splitlines()]
+
+    assert sent[0]["method"] == "initialize"
+    assert [request["method"] for request in sent[1:]] == [
+        "initialized",
+        "account/read",
+        "account/rateLimits/read",
+        "account/usage/read",
+        "model/list",
+    ]
+    assert payload["account"]["planType"] == "plus"
+    assert payload["models"][0]["id"] == "gpt-test"
+
+
+def test_codex_account_status_reports_process_start_errors(monkeypatch):
+    monkeypatch.setattr(services.shutil, "which", lambda _: "codex.exe")
+
+    def fail_to_start(*args, **kwargs):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(services.subprocess, "Popen", fail_to_start)
+
+    with pytest.raises(RuntimeError, match="Could not start Codex App Server.*Access is denied"):
+        asyncio.run(services.codex_account_status())
 
 
 def test_defaults_point_to_taskloom_and_its_contract(monkeypatch):
@@ -449,6 +578,78 @@ def test_push_requires_commit(tmp_path: Path):
     (tmp_path / ".git").mkdir()
     tasks["demo"] = TaskState(id="demo", task_id="podw-205", project_path=str(tmp_path), branch="tasks/podw-205", status=RunStatus.passed, step="ready")
     assert client.post("/api/tasks/demo/push").status_code == 409
+
+
+def test_git_push_merges_latest_base_before_pushing(monkeypatch):
+    project_root = Path(__file__).parents[1].resolve()
+    state = TaskState(
+        id="push-base",
+        task_id="podw-225",
+        project_path=str(project_root),
+        branch="tasks/podw-225",
+        base_branch="develop",
+        status=RunStatus.passed,
+        step="ready",
+        committed=True,
+    )
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900, env=None):
+        calls.append(args)
+        if args == ["git", "branch", "--show-current"]:
+            return 0, "tasks/podw-225\n"
+        if args == ["git", "status", "--porcelain"]:
+            return 0, ""
+        if args[:2] == ["git", "pull"]:
+            return 0, "Merged origin/develop"
+        if args[:2] == ["git", "push"]:
+            return 0, "Pushed task branch"
+        return 1, "unexpected command"
+
+    monkeypatch.setattr(services, "command", fake_command)
+    output = asyncio.run(services.git_push(state))
+
+    assert calls == [
+        ["git", "branch", "--show-current"],
+        ["git", "status", "--porcelain"],
+        ["git", "pull", "--no-rebase", "--no-edit", "origin", "develop"],
+        ["git", "push", "-u", "origin", "tasks/podw-225"],
+    ]
+    assert output == "Merged origin/develop\nPushed task branch"
+    assert state.pushed is True
+
+
+def test_git_push_stops_on_base_merge_conflict(monkeypatch):
+    project_root = Path(__file__).parents[1].resolve()
+    state = TaskState(
+        id="push-conflict",
+        task_id="podw-226",
+        project_path=str(project_root),
+        branch="tasks/podw-226",
+        base_branch="develop",
+        status=RunStatus.passed,
+        step="ready",
+        committed=True,
+    )
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900, env=None):
+        calls.append(args)
+        if args == ["git", "branch", "--show-current"]:
+            return 0, "tasks/podw-226\n"
+        if args == ["git", "status", "--porcelain"]:
+            return 0, ""
+        if args[:2] == ["git", "pull"]:
+            return 1, "CONFLICT (content): Merge conflict in backend/app.py"
+        return 1, "push must not run"
+
+    monkeypatch.setattr(services, "command", fake_command)
+
+    with pytest.raises(RuntimeError, match="CONFLICT.*backend/app.py"):
+        asyncio.run(services.git_push(state))
+
+    assert not any(args[:2] == ["git", "push"] for args in calls)
+    assert state.pushed is False
 
 
 def test_merge_request_requires_push():
