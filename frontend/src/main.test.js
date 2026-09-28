@@ -98,6 +98,21 @@ test('can request an automatic commit message from the task Codex session', () =
   assert.match(styles, /\.delivery \.suggest-commit\{height:32px;padding:0 9px;font-size:10px/);
 });
 
+test('keeps multiple browser-style workspaces mounted with independent persisted state', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /function TaskWorkspace\(\{workspaceId,onIdentityChange\}\)/);
+  assert.match(source, /taskloom-workspaces-v1/);
+  assert.match(source, /taskloom-workspace-\$\{workspaceId\}-state/);
+  assert.match(source, /workspaces\.map\(item=><div className="workspace-pane"/);
+  assert.match(source, /hidden=\{activeWorkspace!==item\.id\}/);
+  assert.match(source, /className="workspace-tab-add"/);
+  assert.match(source, /window\.location\.host\|\|'Codex محلی'/);
+  assert.match(styles, /\.workspace-tabbar\{/);
+  assert.match(styles, /\.workspace-pane\[hidden\]\{display:none\}/);
+});
+
 test('can opt into generating a commit message during automatic delivery', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 
@@ -162,6 +177,17 @@ test('shows the pending Todo count across every saved session', () => {
 
   assert.match(source, /pendingTodoCount=sessions\.reduce/);
   assert.match(source, /کارهای بعدی \{pendingTodoCount\?`\(\$\{pendingTodoCount\}\)`:''\}/);
+});
+
+test('lets a Todo be scheduled using the local date and time', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /type="datetime-local"/);
+  assert.match(source, /new Date\(todoScheduledFor\)\.toISOString\(\)/);
+  assert.match(source, /scheduled_for&&<time className="todo-scheduled"/);
+  assert.match(source, /زمان اجرا:/);
+  assert.match(styles, /\.todo-scheduled/);
 });
 
 test('renders mixed Persian and English output with per-line direction', () => {
@@ -269,7 +295,8 @@ test('uses one task field with dropdown suggestions to switch to or create task 
   assert.match(source, /function switchBranch/);
   assert.match(source, /const taskIdForBranch=/);
   assert.match(source, /const taskBranchFor=/);
-  assert.match(source, /list="task-branches"/);
+  assert.match(source, /list=\{taskBranchesId\}/);
+  assert.match(source, /id=\{taskBranchesId\}/);
   assert.match(source, /branch\.name\.startsWith\('tasks\/'\)/);
   assert.match(source, /branch:taskBranchFor\(task_id\)/);
   assert.match(source, /base_branch:form\.base_branch\.trim\(\)/);

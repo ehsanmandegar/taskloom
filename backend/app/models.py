@@ -1,4 +1,5 @@
 from enum import Enum
+from datetime import datetime, timezone
 import re
 
 from pydantic import BaseModel, Field, field_validator
@@ -161,6 +162,7 @@ class TodoRequest(BaseModel):
     project_path: str = Field(default="", max_length=2_000)
     branch: str = Field(default="", max_length=240)
     session_id: str = Field(default="", max_length=120)
+    scheduled_for: datetime | None = None
 
     @field_validator("content")
     @classmethod
@@ -174,6 +176,15 @@ class TodoRequest(BaseModel):
     @classmethod
     def clean_target(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("scheduled_for")
+    @classmethod
+    def normalize_scheduled_for(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Scheduled time must include a timezone")
+        return value.astimezone(timezone.utc)
 
 
 class RenameTaskRequest(BaseModel):
@@ -218,6 +229,16 @@ class TodoItem(BaseModel):
     order: int = 0
     status: str = "pending"
     error: str = ""
+    scheduled_for: datetime | None = None
+
+    @field_validator("scheduled_for")
+    @classmethod
+    def normalize_scheduled_for(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Scheduled time must include a timezone")
+        return value.astimezone(timezone.utc)
 
 
 class TaskState(BaseModel):

@@ -843,10 +843,16 @@ async def git_push(state: TaskState) -> str:
         600,
     )
     if code:
-        raise RuntimeError(
+        # Keeping the task branch current with the base is a best-effort delivery
+        # check. A conflict must not leave the repository mid-merge or prevent the
+        # already committed task branch from being pushed.
+        await command(["git", "merge", "--abort"], repo)
+        pull_warning = (
             pull_output.strip()
-            or f"Could not merge origin/{state.base_branch} before pushing; resolve conflicts and commit them first"
+            or f"Could not merge origin/{state.base_branch} before pushing"
         )
+        state.logs.append(f"Optional base-branch pull skipped: {pull_warning}")
+        pull_output = f"Warning: optional base-branch pull skipped. {pull_warning}"
     code, push_output = await command(["git", "push", "-u", "origin", state.branch], repo, 600)
     if code:
         raise RuntimeError(push_output)

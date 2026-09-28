@@ -1,4 +1,6 @@
 import asyncio
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -13,7 +15,24 @@ from fastapi.staticfiles import StaticFiles
 from .models import BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RunStatus, TaskRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
 from .services import codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch
 
-app = FastAPI(title="Taskloom", version="0.1.0")
+scheduler_worker: asyncio.Task | None = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Keep scheduled Todos moving while the Taskloom server is running."""
+    global scheduler_worker
+    scheduler_worker = asyncio.create_task(todo_scheduler())
+    try:
+        yield
+    finally:
+        scheduler_worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await scheduler_worker
+        scheduler_worker = None
+
+
+app = FastAPI(title="Taskloom", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -312,6 +331,15 @@ async def create_task(request: TaskRequest):
         repo = repository(request.project_path)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    active_states = {RunStatus.queued, RunStatus.running, RunStatus.testing}
+    if any(
+        state.status in active_states and Path(state.project_path).expanduser().resolve() == repo
+        for state in tasks.values()
+    ):
+        raise HTTPException(
+            409,
+            "Another task is already running in this project path. Use a separate Git worktree path for parallel tasks.",
+        )
     run_id = uuid.uuid4().hex[:12]
     state = TaskState(
         id=run_id,
@@ -415,6 +443,24 @@ def pending_todos() -> list[tuple[TaskState, TodoItem]]:
     return sorted(items, key=lambda item: (item[1].order, item[1].id))
 
 
+def todo_is_due(todo: TodoItem, now: datetime | None = None) -> bool:
+    """Unscheduled Todos are immediate; scheduled ones become eligible at their UTC deadline."""
+    if todo.scheduled_for is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return todo.scheduled_for <= current.astimezone(timezone.utc)
+
+
+def due_todos(*, scheduled_only: bool = False) -> list[tuple[TaskState, TodoItem]]:
+    return [
+        (owner, todo)
+        for owner, todo in pending_todos()
+        if todo_is_due(todo) and (not scheduled_only or todo.scheduled_for is not None)
+    ]
+
+
 def todo_destination(todo: TodoItem) -> TaskState | None:
     """Resolve a Todo target: current session, then branch, then project."""
     terminal = {RunStatus.passed, RunStatus.failed, RunStatus.blocked, RunStatus.stopped}
@@ -505,7 +551,7 @@ async def advance_todo_queue(state: TaskState) -> None:
     active = {RunStatus.queued, RunStatus.running, RunStatus.testing}
     if state.status != RunStatus.passed or any(item.status in active for item in tasks.values()):
         return
-    pending = pending_todos()
+    pending = due_todos()
     session_items = [(owner, todo) for owner, todo in pending if todo.session_id == state.id]
     branch_items = [
         (owner, todo) for owner, todo in pending
@@ -527,12 +573,12 @@ async def advance_todo_queue(state: TaskState) -> None:
     await dispatch_next_todo()
 
 
-async def dispatch_next_todo() -> None:
+async def dispatch_next_todo(*, scheduled_only: bool = False) -> None:
     """Run only one queued Todo at a time, preserving the user-defined order."""
     active = {RunStatus.queued, RunStatus.running, RunStatus.testing}
     if any(state.status in active for state in tasks.values()):
         return
-    for owner, todo in pending_todos():
+    for owner, todo in due_todos(scheduled_only=scheduled_only):
         try:
             destination = todo_destination(todo)
             if destination:
@@ -543,6 +589,18 @@ async def dispatch_next_todo() -> None:
         except (ValueError, RuntimeError) as exc:
             todo.status, todo.error = "failed", str(exc)
             save_tasks(tasks)
+
+
+async def todo_scheduler() -> None:
+    """Release due Todos, including persisted deadlines recovered after a restart."""
+    while True:
+        try:
+            await dispatch_next_todo(scheduled_only=True)
+        except Exception:
+            # A transient persistence or repository error must not permanently
+            # stop later deadlines from being checked.
+            pass
+        await asyncio.sleep(0.5)
 
 
 @app.get("/api/tasks/{run_id}", response_model=TaskState)
@@ -618,6 +676,7 @@ async def add_todo(run_id: str, request: TodoRequest):
         branch=request.branch or state.branch,
         session_id=request.session_id or state.id,
         order=next_order,
+        scheduled_for=request.scheduled_for,
     ))
     save_tasks(tasks)
     await advance_todo_queue(state)

@@ -31,6 +31,32 @@ def test_run_starts_browser_and_local_server(monkeypatch):
     assert server_calls == [((main.app,), {"host": "127.0.0.1", "port": 8003})]
 
 
+def test_custom_port_uses_an_isolated_data_directory(monkeypatch, tmp_path):
+    server_calls = []
+    data_dir = tmp_path / "instance-8124"
+    monkeypatch.delenv("TASKLOOM_SESSIONS_PATH", raising=False)
+    monkeypatch.delenv("TASKLOOM_PROFILES_PATH", raising=False)
+    monkeypatch.setattr(main.backend_main, "load_tasks", lambda: {})
+    monkeypatch.setattr(main.uvicorn, "run", lambda *args, **kwargs: server_calls.append((args, kwargs)))
+
+    main.run(["--port", "8124", "--data-dir", str(data_dir), "--no-browser"])
+
+    assert Path(main.os.environ["TASKLOOM_SESSIONS_PATH"]) == data_dir / "sessions.json"
+    assert Path(main.os.environ["TASKLOOM_PROFILES_PATH"]) == data_dir / "profiles.json"
+    assert server_calls == [((main.app,), {"host": "127.0.0.1", "port": 8124})]
+
+
+def test_each_non_default_port_has_its_own_default_namespace(monkeypatch, tmp_path):
+    monkeypatch.setattr(main.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("TASKLOOM_SESSIONS_PATH", raising=False)
+    monkeypatch.delenv("TASKLOOM_PROFILES_PATH", raising=False)
+
+    root = main.configure_instance_storage(8125)
+
+    assert root == (tmp_path / ".taskloom" / "instances" / "port-8125").resolve()
+    assert Path(main.os.environ["TASKLOOM_SESSIONS_PATH"]).parent == root
+
+
 def test_python_builder_creates_one_file_with_frontend_assets():
     script = (Path(__file__).parents[1] / "build_exe.py").read_text(encoding="utf-8")
 

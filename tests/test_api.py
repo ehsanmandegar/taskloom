@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -427,6 +428,31 @@ def test_new_tasks_use_the_tasks_branch_prefix(monkeypatch, tmp_path: Path):
     tasks.pop(state.id)
 
 
+def test_parallel_tasks_require_separate_project_or_worktree_paths(monkeypatch, tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    active = TaskState(
+        id="already-running",
+        task_id="podw-active",
+        project_path=str(tmp_path),
+        branch="tasks/podw-active",
+        status=RunStatus.running,
+        step="Codex is implementing the request",
+    )
+    request = TaskRequest(project_path=str(tmp_path), task_id="podw-next", request="add another useful feature")
+    original = dict(tasks)
+    try:
+        tasks.clear()
+        tasks[active.id] = active
+
+        with pytest.raises(main_module.HTTPException, match="separate Git worktree") as error:
+            asyncio.run(main_module.create_task(request))
+
+        assert error.value.status_code == 409
+    finally:
+        tasks.clear()
+        tasks.update(original)
+
+
 def test_execute_task_creates_the_task_branch_from_selected_base(monkeypatch):
     project_root = Path(__file__).parents[1].resolve()
     request = TaskRequest(
@@ -619,7 +645,7 @@ def test_git_push_merges_latest_base_before_pushing(monkeypatch):
     assert state.pushed is True
 
 
-def test_git_push_stops_on_base_merge_conflict(monkeypatch):
+def test_git_push_aborts_optional_base_merge_conflict_and_continues(monkeypatch):
     project_root = Path(__file__).parents[1].resolve()
     state = TaskState(
         id="push-conflict",
@@ -641,15 +667,23 @@ def test_git_push_stops_on_base_merge_conflict(monkeypatch):
             return 0, ""
         if args[:2] == ["git", "pull"]:
             return 1, "CONFLICT (content): Merge conflict in backend/app.py"
-        return 1, "push must not run"
+        if args == ["git", "merge", "--abort"]:
+            return 0, ""
+        if args[:2] == ["git", "push"]:
+            return 0, "Pushed task branch"
+        return 1, "unexpected command"
 
     monkeypatch.setattr(services, "command", fake_command)
+    output = asyncio.run(services.git_push(state))
 
-    with pytest.raises(RuntimeError, match="CONFLICT.*backend/app.py"):
-        asyncio.run(services.git_push(state))
-
-    assert not any(args[:2] == ["git", "push"] for args in calls)
-    assert state.pushed is False
+    assert calls[-2:] == [
+        ["git", "merge", "--abort"],
+        ["git", "push", "-u", "origin", "tasks/podw-226"],
+    ]
+    assert "Warning: optional base-branch pull skipped" in output
+    assert "CONFLICT (content): Merge conflict in backend/app.py" in output
+    assert state.logs[-1].startswith("Optional base-branch pull skipped:")
+    assert state.pushed is True
 
 
 def test_merge_request_requires_push():
@@ -1021,6 +1055,133 @@ def test_todo_is_persisted_and_automatically_queued_for_its_session(monkeypatch,
             worker.cancel()
         tasks.clear()
         tasks.update(original)
+
+
+def test_future_todo_is_persisted_without_running_early(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+    state = TaskState(
+        id="scheduled-session",
+        task_id="podw-scheduled",
+        project_path=str(tmp_path),
+        branch="tasks/podw-scheduled",
+        status=RunStatus.passed,
+        step="Ready",
+        codex_thread_id="thread-scheduled",
+    )
+    scheduled_for = datetime.now(timezone.utc) + timedelta(hours=2)
+    original = dict(tasks)
+    try:
+        tasks.clear()
+        tasks[state.id] = state
+        response = client.post(
+            f"/api/tasks/{state.id}/todos",
+            json={
+                "content": "Run this tonight",
+                "session_id": state.id,
+                "project_path": str(tmp_path),
+                "branch": state.branch,
+                "scheduled_for": scheduled_for.isoformat(),
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "passed"
+        assert body["messages"] == []
+        assert body["todos"][0]["content"] == "Run this tonight"
+        assert datetime.fromisoformat(body["todos"][0]["scheduled_for"]) == scheduled_for
+        assert load_tasks()[state.id].todos[0].scheduled_for == scheduled_for
+    finally:
+        tasks.clear()
+        tasks.update(original)
+
+
+def test_due_todos_skip_future_deadlines_without_blocking_ready_work(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    state = TaskState(
+        id="deadline-order",
+        task_id="podw-deadline",
+        project_path=str(tmp_path),
+        branch="tasks/podw-deadline",
+        status=RunStatus.passed,
+        step="Ready",
+        codex_thread_id="thread-deadline",
+        todos=[
+            TodoItem(id="later", content="Do this later", project_path=str(tmp_path), branch="tasks/podw-deadline", session_id="deadline-order", order=1, scheduled_for=future),
+            TodoItem(id="now", content="Do this now", project_path=str(tmp_path), branch="tasks/podw-deadline", session_id="deadline-order", order=2),
+        ],
+    )
+
+    class RecordedTask:
+        def add_done_callback(self, callback):
+            return None
+
+    def fake_create_task(coroutine):
+        coroutine.close()
+        return RecordedTask()
+
+    original = dict(tasks)
+    try:
+        tasks.clear()
+        tasks[state.id] = state
+        monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+        asyncio.run(main_module.dispatch_next_todo())
+
+        assert [todo.id for todo in state.todos] == ["later"]
+        assert state.messages[-1].content == "Do this now"
+        assert state.status == RunStatus.queued
+    finally:
+        tasks.clear()
+        tasks.update(original)
+
+
+def test_scheduler_dispatch_releases_only_explicitly_scheduled_work(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+    state = TaskState(
+        id="scheduler-only",
+        task_id="podw-scheduler",
+        project_path=str(tmp_path),
+        branch="tasks/podw-scheduler",
+        status=RunStatus.passed,
+        step="Ready",
+        codex_thread_id="thread-scheduler",
+        todos=[
+            TodoItem(id="normal", content="Wait for normal delivery", project_path=str(tmp_path), branch="tasks/podw-scheduler", session_id="scheduler-only", order=1),
+            TodoItem(id="scheduled", content="Start at its deadline", project_path=str(tmp_path), branch="tasks/podw-scheduler", session_id="scheduler-only", order=2, scheduled_for=datetime.now(timezone.utc) - timedelta(minutes=1)),
+        ],
+    )
+
+    class RecordedTask:
+        def add_done_callback(self, callback):
+            return None
+
+    def fake_create_task(coroutine):
+        coroutine.close()
+        return RecordedTask()
+
+    original = dict(tasks)
+    try:
+        tasks.clear()
+        tasks[state.id] = state
+        monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+        asyncio.run(main_module.dispatch_next_todo(scheduled_only=True))
+
+        assert [todo.id for todo in state.todos] == ["normal"]
+        assert state.messages[-1].content == "Start at its deadline"
+    finally:
+        tasks.clear()
+        tasks.update(original)
+
+
+def test_todo_schedule_requires_an_explicit_timezone():
+    response = client.post(
+        "/api/tasks/missing/todos",
+        json={"content": "Run later", "scheduled_for": "2099-01-01T22:00:00"},
+    )
+
+    assert response.status_code == 422
+    assert "timezone" in str(response.json()["detail"]).lower()
 
 
 def test_todo_destination_prioritizes_session_then_branch_then_project(tmp_path: Path):

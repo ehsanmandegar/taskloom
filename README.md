@@ -47,10 +47,19 @@ Set-Location frontend
 npm.cmd install
 npm.cmd run build
 Set-Location ..
-.venv\Scripts\uvicorn main:app --reload
+.venv\Scripts\python.exe main.py
 ```
 
 نسخه build شده روی `http://localhost:8003` در دسترس است. برای توسعه UI، در ترمینال دوم `Set-Location frontend; npm.cmd run dev` را اجرا کنید؛ Vite درخواست‌های `/api` را به FastAPI می‌فرستد.
+
+برای اجرای هم‌زمان چند نمونه، به هرکدام پورت جدا بدهید. سشن‌ها و پروفایل هر پورت به‌طور خودکار در پوشه‌ای جدا ذخیره می‌شوند و با نمونه‌های دیگر مخلوط نمی‌شوند:
+
+```powershell
+.venv\Scripts\python.exe main.py --port 8003
+.venv\Scripts\python.exe main.py --port 8004
+```
+
+پورت پیش‌فرض ۸۰۰۳ برای سازگاری، داده‌های قبلی `~/.taskloom` را نگه می‌دارد؛ پورت‌های دیگر از `~/.taskloom/instances/port-<port>` استفاده می‌کنند. با `--data-dir C:\path\to\instance` می‌توان محل دادهٔ یک نمونه را صریح تعیین کرد و با `--no-browser` از بازشدن خودکار مرورگر جلوگیری کرد. در خود داشبورد نیز دکمهٔ `+` یک تب کاری مستقل می‌سازد؛ فرم، تنظیمات، سشن، پیام در حال نگارش و وضعیت اجرای هر تب مستقل است و جابه‌جایی بین تب‌ها اجرای پس‌زمینه را متوقف نمی‌کند. تسک‌های دو پروژه یا دو Git worktree می‌توانند موازی اجرا شوند؛ Taskloom شروع دو اجرای هم‌زمان روی یک مسیر فیزیکی repository را رد می‌کند تا checkout و فایل‌های آن‌ها با هم تداخل نکنند. همین قاعده را هنگام اجرای چند process روی پورت‌های متفاوت نیز رعایت کنید، چون جداسازی پورت مربوط به داده‌های Taskloom است، نه فایل‌های repository.
 
 ### ساخت فایل اجرایی ویندوز
 
