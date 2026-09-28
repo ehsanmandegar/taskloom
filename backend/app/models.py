@@ -34,6 +34,11 @@ class GitProvider(str, Enum):
     github = "github"
 
 
+class AgentType(str, Enum):
+    codex = "codex"
+    claude = "claude"
+
+
 def valid_branch_name(value: str) -> str:
     value = value.strip()
     invalid_part = any(part in {"", ".", ".."} for part in value.split("/"))
@@ -64,6 +69,7 @@ class TaskRequest(BaseModel):
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.auto
+    agent_type: AgentType = AgentType.codex
 
     @field_validator("task_id")
     @classmethod
@@ -110,6 +116,7 @@ class ProjectProfile(BaseModel):
     mcp_server_name: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.auto
+    agent_type: AgentType = AgentType.codex
 
     @field_validator("name")
     @classmethod
@@ -147,6 +154,7 @@ class ProjectDefaults(BaseModel):
     mcp_server_name: str | None = None
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.gitlab
+    agent_type: AgentType = AgentType.codex
 
 
 class CommitRequest(BaseModel):
@@ -262,6 +270,7 @@ class TaskState(BaseModel):
     mcp_status: McpStatus = McpStatus.not_configured
     mcp_message: str = ""
     git_provider: GitProvider = GitProvider.auto
+    agent_type: AgentType = AgentType.codex
     status: RunStatus
     step: str
     logs: list[str] = Field(default_factory=list)

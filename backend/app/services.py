@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Callable
 
-from .models import ChatMessage, GitProvider, McpFailureMode, McpStatus, RunStatus, TaskRequest, TaskState
+from .models import AgentType, ChatMessage, GitProvider, McpFailureMode, McpStatus, RunStatus, TaskRequest, TaskState
 
 
 _command_output_handler: ContextVar[Callable[[str], None] | None] = ContextVar("command_output_handler", default=None)
@@ -252,6 +252,35 @@ async def codex_account_status(timeout: int = 20) -> dict:
     return await asyncio.to_thread(_codex_account_status, codex, timeout)
 
 
+async def agent_account_status(agent_type: AgentType, timeout: int = 20) -> dict:
+    """Return a small, non-sensitive status payload for the selected local agent."""
+    if agent_type == AgentType.codex:
+        return {"agent": agent_type.value, **await codex_account_status(timeout)}
+    claude = shutil.which("claude")
+    if not claude:
+        raise RuntimeError("Claude Code CLI was not found. Install it and sign in first.")
+    code, output = await command([claude, "auth", "status"], Path.cwd(), timeout)
+    if code:
+        raise RuntimeError(output.strip() or "Claude Code is not signed in.")
+    try:
+        status = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Claude Code returned an unreadable authentication status.") from exc
+    if status.get("loggedIn") is not True:
+        raise RuntimeError("Claude Code is not signed in. Run `claude auth login` first.")
+    return {
+        "agent": agent_type.value,
+        "account": {
+            "type": status.get("authMethod"),
+            "planType": status.get("subscriptionType"),
+            "apiProvider": status.get("apiProvider"),
+        },
+        "rate_limits": {},
+        "usage": {},
+        "models": [],
+    }
+
+
 def repository(path: str) -> Path:
     repo = Path(path).expanduser().resolve()
     if not repo.is_dir() or not (repo / ".git").exists():
@@ -442,14 +471,35 @@ def _mcp_config(output: str, server_name: str) -> dict | None:
     return None
 
 
-async def preflight_project_mcp(codex: str, repo: Path, server_name: str) -> tuple[bool, str]:
-    code, output = await command([codex, "mcp", "get", server_name, "--json"], repo, 30)
+async def preflight_project_mcp(
+    executable: str,
+    repo: Path,
+    server_name: str,
+    agent_type: AgentType = AgentType.codex,
+) -> tuple[bool, str]:
+    args = [executable, "mcp", "get", server_name]
+    if agent_type == AgentType.codex:
+        args.append("--json")
+    code, output = await command(args, repo, 30)
     if code:
         if code == 124:
             return False, f"MCP `{server_name}` preflight timed out."
         if "not found" in output.casefold() or "does not exist" in output.casefold():
             return False, f"MCP `{server_name}` is not configured."
         return False, f"MCP `{server_name}` preflight failed with exit code {code}."
+    if agent_type == AgentType.claude:
+        lowered = output.casefold()
+        unavailable = (
+            "pending approval",
+            "rejected",
+            "disabled",
+            "failed to connect",
+            "needs authentication",
+            "not configured",
+        )
+        if any(marker in lowered for marker in unavailable):
+            return False, f"MCP `{server_name}` is configured but unavailable to Claude Code."
+        return True, f"MCP `{server_name}` is configured for Claude Code."
     config = _mcp_config(output, server_name)
     if config is None:
         return False, f"MCP `{server_name}` returned an unreadable preflight response."
@@ -458,7 +508,27 @@ async def preflight_project_mcp(codex: str, repo: Path, server_name: str) -> tup
     return True, f"MCP `{server_name}` is configured and enabled."
 
 
-def mcp_runtime_issue(output: str, server_name: str) -> str | None:
+def mcp_runtime_issue(
+    output: str,
+    server_name: str,
+    agent_type: AgentType = AgentType.codex,
+) -> str | None:
+    if agent_type == AgentType.claude:
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "system" or event.get("subtype") != "init":
+                continue
+            servers = event.get("mcp_servers") or []
+            server = next(
+                (item for item in servers if isinstance(item, dict) and item.get("name") == server_name),
+                None,
+            )
+            if server is None or str(server.get("status", "")).casefold() not in {"connected", "ready"}:
+                return f"MCP `{server_name}` did not initialize in the Claude session."
+        return None
     markers = (
         "failed to start",
         "failed to initialize",
@@ -488,6 +558,36 @@ def codex_response(output: str) -> tuple[str, str]:
         if event.get("type") == "item.completed" and item.get("type") == "agent_message":
             messages.append(item.get("text", ""))
     return thread_id, "\n\n".join(message for message in messages if message).strip()
+
+
+def _claude_text_blocks(event: dict) -> list[str]:
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+    ]
+
+
+def claude_response(output: str) -> tuple[str, str]:
+    """Extract Claude Code's persisted session ID and final result from JSONL."""
+    session_id = ""
+    messages: list[str] = []
+    result = ""
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        session_id = event.get("session_id", "") or session_id
+        if event.get("type") == "assistant":
+            messages.extend(_claude_text_blocks(event))
+        elif event.get("type") == "result" and isinstance(event.get("result"), str):
+            result = event["result"].strip()
+    return session_id, result or "\n\n".join(message for message in messages if message).strip()
 
 
 class CodexEventStream:
@@ -600,6 +700,65 @@ class CodexEventStream:
             self._append(f"Search: {query}\n")
 
 
+class ClaudeEventStream:
+    """Turn Claude Code stream-json events into Taskloom's live transcript."""
+
+    def __init__(self, state: TaskState) -> None:
+        self.state = state
+        self.buffer = ""
+        self.saw_data = False
+
+    def feed(self, chunk: str) -> None:
+        self.saw_data = True
+        self.buffer += chunk
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            self._event(line.rstrip("\r"))
+
+    def finish(self) -> None:
+        if self.buffer:
+            self._event(self.buffer.rstrip("\r"))
+            self.buffer = ""
+
+    def _append(self, text: str) -> None:
+        if not text:
+            return
+        separator = "" if not self.state.live_output or self.state.live_output.endswith("\n") else "\n"
+        self.state.live_output = f"{self.state.live_output}{separator}{text}"[-30_000:]
+
+    def _event(self, line: str) -> None:
+        if not line.strip():
+            return
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            self._append(line)
+            return
+        self.state.codex_thread_id = event.get("session_id", "") or self.state.codex_thread_id
+        event_type = event.get("type")
+        if event_type == "system" and event.get("subtype") == "init":
+            self._append("Claude session started.\n")
+            return
+        if event_type == "assistant":
+            texts = _claude_text_blocks(event)
+            if texts:
+                text = "\n\n".join(texts)
+                self.state.live_response = f"{self.state.live_response}\n\n{text}".strip()[-20_000:]
+                self._append(text + "\n")
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else []
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                tool, tool_input = block.get("name", "tool"), block.get("input") or {}
+                detail = tool_input.get("command") or tool_input.get("file_path") or tool_input.get("pattern") or ""
+                self._append(f"{tool}: {detail}\n" if detail else f"{tool}\n")
+            return
+        if event_type == "result" and event.get("is_error"):
+            error = event.get("result") or event.get("subtype") or "Claude reported an error."
+            self._append(f"Error: {error}\n")
+
+
 async def codex_command(args: list[str], repo: Path, state: TaskState, timeout: int) -> tuple[int, str]:
     """Run Codex while applying its JSONL events to the observable task state."""
     state.live_output = ""
@@ -617,6 +776,83 @@ async def codex_command(args: list[str], repo: Path, state: TaskState, timeout: 
     return code, output
 
 
+async def claude_command(args: list[str], repo: Path, state: TaskState, timeout: int) -> tuple[int, str]:
+    """Run Claude Code while applying stream-json events to the task state."""
+    state.live_output = ""
+    state.live_response = ""
+    stream = ClaudeEventStream(state)
+    token = _command_output_handler.set(stream.feed)
+    try:
+        code, output = await command(args, repo, timeout)
+    finally:
+        _command_output_handler.reset(token)
+    if not stream.saw_data:
+        stream.feed(output)
+    stream.finish()
+    return code, output
+
+
+def agent_name(agent_type: AgentType) -> str:
+    return "Claude" if agent_type == AgentType.claude else "Codex"
+
+
+def agent_executable(agent_type: AgentType) -> str:
+    executable_name = "claude" if agent_type == AgentType.claude else "codex"
+    executable = shutil.which(executable_name)
+    if not executable:
+        display_name = "Claude Code" if agent_type == AgentType.claude else "Codex"
+        raise RuntimeError(f"{display_name} CLI was not found. Install it and sign in first.")
+    return executable
+
+
+def initial_agent_args(agent_type: AgentType, executable: str, prompt: str) -> list[str]:
+    if agent_type == AgentType.claude:
+        return [
+            executable,
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-mode",
+            "acceptEdits",
+            prompt,
+        ]
+    return [executable, "exec", "--sandbox", "workspace-write", "--color", "never", "--json", prompt]
+
+
+def resume_agent_args(agent_type: AgentType, executable: str, session_id: str, prompt: str) -> list[str]:
+    if agent_type == AgentType.claude:
+        return [
+            executable,
+            "--print",
+            "--resume",
+            session_id,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-mode",
+            "acceptEdits",
+            prompt,
+        ]
+    return [executable, "exec", "resume", "--json", session_id, prompt]
+
+
+async def run_agent_command(
+    agent_type: AgentType,
+    args: list[str],
+    repo: Path,
+    state: TaskState,
+    timeout: int,
+) -> tuple[int, str]:
+    if agent_type == AgentType.claude:
+        return await claude_command(args, repo, state, timeout)
+    return await codex_command(args, repo, state, timeout)
+
+
+def agent_response(agent_type: AgentType, output: str) -> tuple[str, str]:
+    return claude_response(output) if agent_type == AgentType.claude else codex_response(output)
+
+
 async def refresh_git(state: TaskState, repo: Path) -> None:
     _, state.diff = await command(["git", "diff", "--no-ext-diff", "--"], repo)
     _, staged = await command(["git", "diff", "--cached", "--no-ext-diff", "--"], repo)
@@ -629,13 +865,12 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
     try:
         repo, guides = repository(req.project_path), resolve_guides(repository(req.project_path), req.guide_paths)
         state.status, state.step = RunStatus.running, "Checking project prerequisites"
-        codex = shutil.which("codex")
-        if not codex:
-            raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
+        executable = agent_executable(req.agent_type)
+        display_name = agent_name(req.agent_type)
         active_mcp = None
         if req.mcp_server_name:
             state.mcp_status = McpStatus.checking
-            ready, message = await preflight_project_mcp(codex, repo, req.mcp_server_name)
+            ready, message = await preflight_project_mcp(executable, repo, req.mcp_server_name, req.agent_type)
             state.mcp_message = message
             if ready:
                 state.mcp_status = McpStatus.ready
@@ -673,9 +908,10 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         if code:
             raise RuntimeError(output.strip() or "Could not prepare task branch")
         state.logs.append(message)
-        state.step = "Codex is implementing the request"
-        code, output = await codex_command([codex, "exec", "--sandbox", "workspace-write", "--color", "never", "--json", build_prompt(req, guides, active_mcp)], repo, state, 3600)
-        runtime_issue = mcp_runtime_issue(output, active_mcp) if active_mcp else None
+        state.step = f"{display_name} is implementing the request"
+        args = initial_agent_args(req.agent_type, executable, build_prompt(req, guides, active_mcp))
+        code, output = await run_agent_command(req.agent_type, args, repo, state, 3600)
+        runtime_issue = mcp_runtime_issue(output, active_mcp, req.agent_type) if active_mcp else None
         if runtime_issue:
             state.mcp_message = runtime_issue
             state.logs.append(runtime_issue)
@@ -688,10 +924,10 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
                 return
             state.mcp_status = McpStatus.warning
         elif active_mcp:
-            state.mcp_message = f"MCP `{active_mcp}` was available to the Codex session."
-        thread_id, response = codex_response(output)
+            state.mcp_message = f"MCP `{active_mcp}` was available to the {display_name} session."
+        thread_id, response = agent_response(req.agent_type, output)
         if not thread_id:
-            raise RuntimeError("Codex did not return a resumable session ID")
+            raise RuntimeError(f"{display_name} did not return a resumable session ID")
         state.codex_thread_id = thread_id
         state.logs.append(output[-12000:])
         state.summary = response or output.strip()[-4000:]
@@ -701,9 +937,9 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         await refresh_git(state, repo)
         cleanup_owned_test_artifacts(repo)
         if code:
-            raise RuntimeError(f"Codex exited with code {code}")
+            raise RuntimeError(f"{display_name} exited with code {code}")
         if not state.changed_files:
-            raise RuntimeError("Codex completed without producing file changes")
+            raise RuntimeError(f"{display_name} completed without producing file changes")
         if req.test_setup_enabled:
             await prepare_tests(state, repo, "Preparing local test environment before final tests")
         state.status, state.step = RunStatus.testing, "Running tests"
@@ -728,18 +964,18 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
 
 
 async def continue_task(message: str, state: TaskState) -> None:
-    """Continue the exact Codex thread used for the task with a user follow-up."""
+    """Continue the exact agent session used for the task with a user follow-up."""
     try:
         if not state.codex_thread_id:
-            raise RuntimeError("This task does not have a resumable Codex session")
+            raise RuntimeError("This task does not have a resumable agent session")
         repo = repository(state.project_path)
-        codex = shutil.which("codex")
-        if not codex:
-            raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
-        state.status, state.step, state.error = RunStatus.running, "Codex is responding", None
+        executable = agent_executable(state.agent_type)
+        display_name = agent_name(state.agent_type)
+        state.status, state.step, state.error = RunStatus.running, f"{display_name} is responding", None
         prompt = f"""User follow-up:\n{message}\n\nContinue this conversation. Make edits when they help answer the request, but do not commit, push, switch branches, or modify files outside this repository. Summarize what you did or recommend next."""
-        code, output = await codex_command([codex, "exec", "resume", "--json", state.codex_thread_id, prompt], repo, state, 3600)
-        _, response = codex_response(output)
+        args = resume_agent_args(state.agent_type, executable, state.codex_thread_id, prompt)
+        code, output = await run_agent_command(state.agent_type, args, repo, state, 3600)
+        _, response = agent_response(state.agent_type, output)
         state.logs.append(output[-12000:])
         state.summary = response or output.strip()[-4000:]
         if response:
@@ -747,7 +983,7 @@ async def continue_task(message: str, state: TaskState) -> None:
         state.live_response = ""
         await refresh_git(state, repo)
         if code:
-            raise RuntimeError(f"Codex exited with code {code}")
+            raise RuntimeError(f"{display_name} exited with code {code}")
         if state.test_setup_enabled:
             await prepare_tests(state, repo, "Preparing local test environment before final tests")
         state.status, state.step = RunStatus.testing, "Running tests"
@@ -778,27 +1014,27 @@ async def continue_task(message: str, state: TaskState) -> None:
 
 
 async def generate_commit_message(state: TaskState) -> str:
-    """Ask the task's existing Codex session for a concise commit message."""
+    """Ask the task's existing agent session for a concise commit message."""
     if state.status != RunStatus.passed or not state.changed_files:
         raise ValueError("A successful test run with changes is required")
     if state.committed:
         raise ValueError("The task has already been committed")
     if not state.codex_thread_id:
-        raise ValueError("This task does not have a resumable Codex session")
+        raise ValueError("This task does not have a resumable agent session")
     repo = repository(state.project_path)
-    codex = shutil.which("codex")
-    if not codex:
-        raise RuntimeError("Codex CLI was not found. Install it and sign in first.")
+    executable = agent_executable(state.agent_type)
+    display_name = agent_name(state.agent_type)
     prompt = """Review only the work completed in this task's current session and its uncommitted diff.
 Reply with exactly one concise, English Conventional Commit subject in this format: type(optional-scope): imperative summary
 Choose the type from build, chore, ci, docs, feat, fix, perf, refactor, revert, style, or test. Keep it to one line and 120 ASCII characters or fewer. Do not add a body, Markdown, translation, task commentary, or explanation. Do not edit files, run tests, commit, or push."""
-    code, output = await command([codex, "exec", "resume", "--json", state.codex_thread_id, prompt], repo, 600)
+    args = resume_agent_args(state.agent_type, executable, state.codex_thread_id, prompt)
+    code, output = await command(args, repo, 600)
     if code:
-        raise RuntimeError(f"Codex exited with code {code}")
-    _, response = codex_response(output)
+        raise RuntimeError(f"{display_name} exited with code {code}")
+    _, response = agent_response(state.agent_type, output)
     message = response.splitlines()[0].strip().strip("`") if response else ""
     if not COMMIT_MESSAGE_PATTERN.fullmatch(message):
-        raise RuntimeError("Codex did not return a concise English Conventional Commit message")
+        raise RuntimeError(f"{display_name} did not return a concise English Conventional Commit message")
     return message
 
 

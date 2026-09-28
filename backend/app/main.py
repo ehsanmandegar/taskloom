@@ -12,8 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RunStatus, TaskRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
-from .services import codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch
+from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RunStatus, TaskRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
+from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch
 
 scheduler_worker: asyncio.Task | None = None
 
@@ -81,7 +81,8 @@ def load_tasks() -> dict[str, TaskState]:
         if state.status in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
             state.status = RunStatus.failed
             state.step = "Interrupted by Taskloom restart"
-            state.error = "Taskloom was restarted before Codex finished responding."
+            agent = "Claude" if state.agent_type == AgentType.claude else "Codex"
+            state.error = f"Taskloom was restarted before {agent} finished responding."
             restarted = True
     if restarted or migrated:
         try:
@@ -200,6 +201,8 @@ def project_defaults() -> ProjectDefaults:
     )
     configured_base = os.getenv("TASKLOOM_DEFAULT_BASE_BRANCH")
     base_branch = valid_branch_name(configured_base) if configured_base else ("sandbox" if is_dws else "main")
+    configured_agent = os.getenv("TASKLOOM_DEFAULT_AGENT_TYPE", AgentType.codex.value)
+    agent_type = AgentType(configured_agent.strip().lower())
 
     return ProjectDefaults(
         project_path=str(project_path),
@@ -211,6 +214,7 @@ def project_defaults() -> ProjectDefaults:
         mcp_server_name=mcp_server_name,
         mcp_failure_mode=mcp_failure_mode,
         git_provider=GitProvider.gitlab,
+        agent_type=agent_type,
     )
 
 
@@ -265,6 +269,14 @@ async def codex_status():
         raise HTTPException(503, str(exc)) from exc
 
 
+@app.get("/api/agents/{agent_type}/status")
+async def selected_agent_status(agent_type: AgentType):
+    try:
+        return await agent_account_status(agent_type)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @app.get("/api/defaults", response_model=ProjectDefaults)
 async def defaults():
     return project_defaults()
@@ -299,7 +311,7 @@ async def switch_branch(request: BranchSwitchRequest):
         state.status in active_states and Path(state.project_path).expanduser().resolve() == repo
         for state in tasks.values()
     ):
-        raise HTTPException(409, "Stop the active Codex task for this project before switching branches")
+        raise HTTPException(409, "Stop the active agent task for this project before switching branches")
     try:
         return await switch_git_branch(repo, request.branch, request.base_branch)
     except RuntimeError as exc:
@@ -359,6 +371,7 @@ async def create_task(request: TaskRequest):
         mcp_server_name=request.mcp_server_name,
         mcp_failure_mode=request.mcp_failure_mode,
         git_provider=request.git_provider,
+        agent_type=request.agent_type,
         status=RunStatus.queued,
         step="Queued",
         messages=[ChatMessage(role="user", content=request.request)],
@@ -423,9 +436,9 @@ async def complete_automatic_delivery(state: TaskState) -> bool:
 
 def queue_follow_up(state: TaskState, message: str) -> None:
     if state.status in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
-        raise HTTPException(409, "Wait for the current Codex response before sending another message")
+        raise HTTPException(409, "Wait for the current agent response before sending another message")
     if not state.codex_thread_id:
-        raise HTTPException(409, "This task does not have a resumable Codex session")
+        raise HTTPException(409, "This task does not have a resumable agent session")
     state.messages.append(ChatMessage(role="user", content=message))
     state.status, state.step, state.error = RunStatus.queued, "Queued follow-up", None
     save_tasks(tasks)
@@ -507,6 +520,7 @@ def start_todo_task(owner: TaskState, todo: TodoItem) -> None:
         mcp_server_name=owner.mcp_server_name,
         mcp_failure_mode=owner.mcp_failure_mode,
         git_provider=owner.git_provider,
+        agent_type=owner.agent_type,
     )
     repo = repository(request.project_path)
     run_id = uuid.uuid4().hex[:12]
@@ -528,6 +542,7 @@ def start_todo_task(owner: TaskState, todo: TodoItem) -> None:
         mcp_server_name=request.mcp_server_name,
         mcp_failure_mode=request.mcp_failure_mode,
         git_provider=request.git_provider,
+        agent_type=request.agent_type,
         status=RunStatus.queued,
         step="Queued Todo",
         messages=[ChatMessage(role="user", content=request.request)],
@@ -712,7 +727,7 @@ async def stop_task(run_id: str):
     if state.status not in {RunStatus.queued, RunStatus.running, RunStatus.testing}:
         raise HTTPException(409, "This task is not currently running")
 
-    state.step = "Stopping Codex"
+    state.step = "Stopping agent"
     worker = task_workers.get(run_id)
     if worker is not None and not worker.done():
         worker.cancel()
