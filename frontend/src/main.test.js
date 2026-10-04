@@ -16,7 +16,7 @@ test('offers merge request creation only after push and links the result', () =>
   assert.match(source, /href=\{task\.merge_request_url\}/);
 });
 
-test('restores a saved Codex session and lets the user switch recent conversations', () => {
+test('restores a saved agent session and lets the user switch recent conversations', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 
   assert.match(source, /taskloom-active-session/);
@@ -55,6 +55,34 @@ test('lets each project profile choose its task base branch', () => {
   assert.match(source, /برنچ مبنا/);
 });
 
+test('provides a project explorer and Git before/after viewer', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /function WorkspaceSidebar/);
+  assert.match(source, /\/api\/workspace\/tree/);
+  assert.match(source, /\/api\/workspace\/changes/);
+  assert.match(source, /\/api\/workspace\/diff/);
+  assert.match(source, /قبل · HEAD/);
+  assert.match(source, /بعد · Working tree/);
+  assert.match(styles, /\.project-sidebar/);
+  assert.match(styles, /\.syntax-keyword\{color:#569cd6\}/);
+  assert.match(styles, /\.diff-editor\{[^}]*grid-template-columns:1fr 1fr/);
+});
+
+test('places a persisted agent selector beside Git hosting and locks it during a run', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /<div className="provider-controls">\{gitProviderControl\}\{agentTypeControl\}<\/div>/);
+  assert.match(source, /name="agent_type" value=\{form\.agent_type\}/);
+  assert.match(source, /<option value="codex">Codex<\/option><option value="claude">Claude Code<\/option>/);
+  assert.match(source, /disabled=\{!!running\}/);
+  assert.match(source, /agent_type:profile\.agent_type\|\|'codex'/);
+  assert.match(source, /agent_type:form\.agent_type/);
+  assert.match(styles, /\.provider-controls\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+});
+
 test('keeps the project profile controls aligned in one row', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
@@ -82,15 +110,15 @@ test('offers a follow-up chat that resumes the task session', () => {
 
   assert.match(source, /\/api\/tasks\/\$\{task\.id\}\/messages/);
   assert.match(source, /task\.codex_thread_id/);
-  assert.match(source, /گفت‌وگو با Codex/);
+  assert.match(source, /گفت‌وگو با \{taskAgentLabel\}/);
 });
 
-test('can request an automatic commit message from the task Codex session', () => {
+test('can request an automatic commit message from the task agent session', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
   assert.match(source, /\/api\/tasks\/\$\{task\.id\}\/commit-message/);
-  assert.match(source, /Generate commit message with Codex/);
+  assert.match(source, /Generate commit message with \$\{taskAgentLabel\}/);
   assert.match(source, /onClick=\{generateCommitMessage\}/);
   assert.match(source, /<Sparkles size=\{14\}\/>AutoGenerate/);
   assert.match(source, /<GitCommit size=\{16\}\/>commit/);
@@ -108,9 +136,15 @@ test('keeps multiple browser-style workspaces mounted with independent persisted
   assert.match(source, /workspaces\.map\(item=><div className="workspace-pane"/);
   assert.match(source, /hidden=\{activeWorkspace!==item\.id\}/);
   assert.match(source, /className="workspace-tab-add"/);
-  assert.match(source, /window\.location\.host\|\|'Codex محلی'/);
+  assert.match(source, /window\.location\.host\|\|`\$\{selectedAgentLabel\} محلی`/);
   assert.match(styles, /\.workspace-tabbar\{/);
   assert.match(styles, /\.workspace-pane\[hidden\]\{display:none\}/);
+});
+
+test('does not read task output before a workspace session has loaded', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+
+  assert.match(source, /outputText=!task\?'':tab==='changes'/);
 });
 
 test('can opt into generating a commit message during automatic delivery', () => {
@@ -118,7 +152,7 @@ test('can opt into generating a commit message during automatic delivery', () =>
 
   assert.match(source, /auto_generate_commit_message:false/);
   assert.match(source, /checked=\{form\.auto_generate_commit_message\}/);
-  assert.match(source, /پیش از commit، پیام را با Codex خودکار تولید کن/);
+  assert.match(source, /پیش از commit، پیام را با agent انتخاب‌شده خودکار تولید کن/);
   assert.match(source, /auto_generate_commit_message:form\.auto_generate_commit_message/);
 });
 
@@ -140,23 +174,23 @@ test('sends chat messages with Enter while preserving Shift+Enter for a new line
   assert.match(source, /onKeyDown=\{submitChatOnEnter\}/);
 });
 
-test('distinguishes Codex replies and shows a typing indicator while Codex responds', () => {
+test('distinguishes agent replies and shows a typing indicator while the agent responds', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
-  assert.match(source, /codexTyping=task&&\['queued','running'\]\.includes\(task\.status\)/);
+  assert.match(source, /agentTyping=task&&\['queued','running'\]\.includes\(task\.status\)/);
   assert.match(source, /chat-typing/);
-  assert.match(source, /Codex در حال پاسخ است/);
+  assert.match(source, /\$\{taskAgentLabel\} در حال پاسخ است/);
   assert.match(styles, /\.chat-message\.assistant\{[^}]*background:#eef1fb/);
   assert.match(styles, /@keyframes typing-dot/);
 });
 
-test('streams Codex activity into changes and the in-progress reply', () => {
+test('streams agent activity into changes and the in-progress reply', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
   assert.match(source, /new EventSource\(`\$\{API\}\/api\/tasks\/\$\{task\.id\}\/events`\)/);
-  assert.match(source, /codexTyping&&task\.live_output\?task\.live_output/);
+  assert.match(source, /agentTyping&&task\.live_output\?task\.live_output/);
   assert.match(source, /task\.live_response/);
   assert.match(source, /className="chat-message assistant live-response"/);
   assert.match(styles, /\.live-console/);
@@ -201,7 +235,7 @@ test('renders mixed Persian and English output with per-line direction', () => {
   assert.match(styles, /\.output-line\{display:block;min-height:1\.7em;unicode-bidi:plaintext;text-align:start\}/);
 });
 
-test('can stop an active Codex run and resume its conversation', () => {
+test('can stop an active agent run and resume its conversation', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
@@ -210,21 +244,21 @@ test('can stop an active Codex run and resume its conversation', () => {
   assert.match(source, /onClick=\{stopTask\}/);
   assert.match(source, /> توقف<\/button>/);
   assert.match(source, /task\?\.status==='stopped'&&task\.live_response/);
-  assert.match(source, /پاسخ Codex متوقف شد/);
+  assert.match(source, /پاسخ \$\{taskAgentLabel\} متوقف شد/);
   assert.match(styles, /\.stop-run\{/);
   assert.match(styles, /\.status mark\.stopped/);
 });
 
-test('copies individual user and Codex messages from the chat history', () => {
+test('copies individual user and agent messages from the chat history', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
   assert.match(source, /function copyMessage\(content,key\)/);
   assert.match(source, /navigator\.clipboard\?\.writeText/);
   assert.match(source, /className="chat-copy"/);
-  assert.match(source, /کپی پیام \$\{message\.role==='user'\?'شما':'Codex'\}/);
+  assert.match(source, /کپی پیام \$\{message\.role==='user'\?'شما':taskAgentLabel\}/);
   assert.match(source, /copyMessage\(task\.live_response,`live-\$\{task\.id\}`\)/);
-  assert.match(source, /aria-label="کپی پاسخ Codex"/);
+  assert.match(source, /aria-label=\{`کپی پاسخ \$\{taskAgentLabel\}`\}/);
   assert.match(styles, /\.chat-copy\{position:absolute/);
 });
 
@@ -250,29 +284,29 @@ test('scrolls chat history to the newest message and streamed reply', () => {
   assert.match(source, /\[task\?\.id,task\?\.messages\?\.length,task\?\.live_response,task\?\.status\]/);
 });
 
-test('shows real Codex account status, usage windows, and available models', () => {
+test('shows status for the selected agent and keeps Codex usage details', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
-  assert.match(source, /\/api\/codex\/status/);
-  assert.match(source, /function refreshCodexStatus/);
-  assert.match(source, /codexRateLimits=Object\.values/);
-  assert.match(source, /codexUsage\.slice\(-7\)/);
+  assert.match(source, /\/api\/agents\/\$\{selected\}\/status/);
+  assert.match(source, /function refreshAgentStatus/);
+  assert.match(source, /agentRateLimits=Object\.values/);
+  assert.match(source, /agentUsage\.slice\(-7\)/);
   assert.match(source, /className="codex-rate-limits"/);
   assert.match(styles, /\.codex-status-overview\{display:grid/);
 });
 
-test('keeps the Codex status section closed until the user opens it', () => {
+test('keeps the selected agent status section closed until the user opens it', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
-  assert.match(source, /<details className="codex-cli" aria-label="Codex CLI">/);
+  assert.match(source, /<details className="codex-cli" aria-label=\{`\$\{selectedAgentLabel\} CLI`\}>/);
   assert.match(source, /<summary className="codex-cli-title">/);
   assert.doesNotMatch(source, /<details className="codex-cli"[^>]*\bopen\b/);
   assert.match(styles, /\.codex-cli\[open\] \.codex-cli-title:before/);
 });
 
-test('can notify Windows when a Codex reply is ready', () => {
+test('can notify Windows when an agent reply is ready', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 

@@ -288,6 +288,121 @@ def repository(path: str) -> Path:
     return repo
 
 
+WORKSPACE_IGNORED_DIRECTORIES = {
+    ".git", ".idea", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".venv", "venv", "node_modules", "__pycache__", "dist", "build",
+}
+WORKSPACE_MAX_FILE_SIZE = 1_000_000
+WORKSPACE_MAX_NODES = 4_000
+
+
+def workspace_path(repo: Path, relative_path: str) -> Path:
+    """Resolve a user-selected workspace path without allowing repository escape."""
+    if not relative_path or Path(relative_path).is_absolute():
+        raise ValueError("File path must be relative to the project")
+    candidate = (repo / relative_path).resolve()
+    try:
+        candidate.relative_to(repo.resolve())
+    except ValueError as exc:
+        raise ValueError("File path must stay inside the project repository") from exc
+    return candidate
+
+
+def workspace_tree(repo: Path) -> list[dict]:
+    """Build a bounded, editor-friendly directory tree for the project sidebar."""
+    node_count = 0
+
+    def visit(directory: Path, depth: int = 0) -> list[dict]:
+        nonlocal node_count
+        if depth > 18 or node_count >= WORKSPACE_MAX_NODES:
+            return []
+        try:
+            entries = sorted(
+                directory.iterdir(),
+                key=lambda item: (not item.is_dir(), item.name.casefold()),
+            )
+        except OSError:
+            return []
+        nodes = []
+        for entry in entries:
+            if node_count >= WORKSPACE_MAX_NODES:
+                break
+            if entry.is_symlink() or (entry.is_dir() and entry.name in WORKSPACE_IGNORED_DIRECTORIES):
+                continue
+            node_count += 1
+            relative = entry.relative_to(repo).as_posix()
+            if entry.is_dir():
+                nodes.append({"name": entry.name, "path": relative, "type": "directory", "children": visit(entry, depth + 1)})
+            elif entry.is_file():
+                nodes.append({"name": entry.name, "path": relative, "type": "file"})
+        return nodes
+
+    return visit(repo)
+
+
+def read_workspace_text(path: Path) -> str:
+    """Read a reasonably-sized text file for display in the browser editor."""
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"Could not read file: {exc}") from exc
+    if size > WORKSPACE_MAX_FILE_SIZE:
+        raise ValueError("File is too large to preview (maximum 1 MB)")
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"Could not read file: {exc}") from exc
+    if b"\0" in raw[:8192]:
+        raise ValueError("Binary files cannot be previewed")
+    return raw.decode("utf-8", errors="replace")
+
+
+async def workspace_changes(repo: Path) -> list[dict]:
+    """Return uncommitted paths, including staged and untracked changes."""
+    code, output = await command(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], repo)
+    if code:
+        raise RuntimeError(output.strip() or "Could not read Git changes")
+    records, fields, index = [], output.split("\0"), 0
+    while index < len(fields) and fields[index]:
+        field = fields[index]
+        if len(field) < 4:
+            index += 1
+            continue
+        status, path = field[:2], field[3:]
+        previous_path = None
+        if status[0] in "RC" or status[1] in "RC":
+            index += 1
+            if index < len(fields):
+                previous_path = fields[index]
+        records.append({"path": path, "previous_path": previous_path, "status": status})
+        index += 1
+    return records
+
+
+async def workspace_file(repo: Path, relative_path: str) -> dict:
+    path = workspace_path(repo, relative_path)
+    if not path.is_file():
+        raise ValueError("File was not found")
+    return {"path": relative_path.replace("\\", "/"), "content": read_workspace_text(path)}
+
+
+async def workspace_diff(repo: Path, relative_path: str, previous_path: str | None = None) -> dict:
+    """Return HEAD and working-tree contents for a side-by-side diff viewer."""
+    path = workspace_path(repo, relative_path)
+    after = read_workspace_text(path) if path.is_file() else ""
+    git_path = (previous_path or relative_path).replace("\\", "/")
+    # Validate renamed paths too, even though Git reads the revision rather than disk.
+    workspace_path(repo, git_path)
+    code, before = await command(["git", "show", f"HEAD:{git_path}"], repo, timeout=30)
+    if code:
+        before = ""
+    if "\0" in before[:8192]:
+        raise ValueError("Binary files cannot be previewed")
+    if len(before.encode("utf-8")) > WORKSPACE_MAX_FILE_SIZE:
+        raise ValueError("Previous file is too large to preview (maximum 1 MB)")
+    return {"path": relative_path.replace("\\", "/"), "before": before, "after": after}
+
+
 async def git_branches(repo: Path) -> dict:
     """List local branches and origin-only branches without changing Git state."""
     code, output = await command(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"], repo)
@@ -853,6 +968,31 @@ def agent_response(agent_type: AgentType, output: str) -> tuple[str, str]:
     return claude_response(output) if agent_type == AgentType.claude else codex_response(output)
 
 
+def agent_error_detail(output: str) -> str:
+    """Extract a concise CLI failure without dumping the full event stream."""
+    diagnostics: list[str] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            diagnostics.append(stripped)
+            continue
+        if event.get("type") in {"error", "turn.failed"}:
+            error = event.get("error") or event.get("message")
+            if isinstance(error, dict):
+                error = error.get("message")
+            if isinstance(error, str) and error.strip():
+                diagnostics.append(error.strip())
+        elif event.get("type") == "result" and event.get("is_error"):
+            error = event.get("result") or event.get("subtype")
+            if isinstance(error, str) and error.strip():
+                diagnostics.append(error.strip())
+    return " ".join(diagnostics)[-2_000:]
+
+
 async def refresh_git(state: TaskState, repo: Path) -> None:
     _, state.diff = await command(["git", "diff", "--no-ext-diff", "--"], repo)
     _, staged = await command(["git", "diff", "--cached", "--no-ext-diff", "--"], repo)
@@ -927,6 +1067,9 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
             state.mcp_message = f"MCP `{active_mcp}` was available to the {display_name} session."
         thread_id, response = agent_response(req.agent_type, output)
         if not thread_id:
+            detail = agent_error_detail(output)
+            if detail:
+                raise RuntimeError(f"{display_name} failed before creating a resumable session: {detail}")
             raise RuntimeError(f"{display_name} did not return a resumable session ID")
         state.codex_thread_id = thread_id
         state.logs.append(output[-12000:])

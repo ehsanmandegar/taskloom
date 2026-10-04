@@ -1,10 +1,10 @@
 # قرارداد عملیاتی DWS Portal و Taskloom
 
-این سند قرارداد همکاری میان repository چندبخشی DWS Portal، عامل Codex و
+این سند قرارداد همکاری میان repository چندبخشی DWS Portal، عامل انتخابی Codex یا Claude Code و
 orchestrator محلی Taskloom است. هدف آن این است که هر نتیجهٔ «آمادهٔ commit» به
 یک نسخهٔ دقیق از کد، مجموعه‌ای معلوم از آزمون‌ها و شواهد قابل بازبینی متصل باشد.
 
-این سند هم راهنمای پروژه برای Codex است و هم specification مورد انتظار از
+این سند هم راهنمای پروژه برای عامل انتخابی است و هم specification مورد انتظار از
 Taskloom. واژه‌های «باید»، «نباید» و «بهتر است» به‌ترتیب معادل MUST، MUST NOT و
 SHOULD هستند.
 
@@ -47,9 +47,9 @@ DWS Portal یک repository چندبخشی است:
 
 ## ۳. مرز مسئولیت‌ها
 
-### مسئولیت Codex
+### مسئولیت عامل
 
-Codex باید اثر مستقیم و غیرمستقیم تغییر را تحلیل کند، کد و تست لازم را بنویسد،
+عامل انتخابی باید اثر مستقیم و غیرمستقیم تغییر را تحلیل کند، کد و تست لازم را بنویسد،
 مستندات مرتبط را بازبینی کند و نتیجهٔ واقعی کار خود را گزارش دهد. عامل نباید:
 
 - commit، push یا Merge Request ایجاد کند؛
@@ -84,10 +84,10 @@ Taskloom باید پیش از شروع:
    ذخیره کند.
 5. مسیر راهنماها را canonicalize کند و پس از resolve کردن symlink/junction نیز
    اجازه ندهد فایل از rootهای مجاز خارج شود.
-6. نسخه و capabilityهای Codex CLI را بررسی و command نهایی، sandbox و policyهای
+6. نسخه و capabilityهای CLI عامل انتخابی را بررسی و command نهایی، sandbox و policyهای
    مؤثر را بدون secret ثبت کند.
 
-Codex در ابتدای turn باید `git status`، فایل‌های راهنما، کد مرتبط، تست‌های موجود
+عامل در ابتدای turn باید `git status`، فایل‌های راهنما، کد مرتبط، تست‌های موجود
 و مصرف‌کننده‌های داخلی را بررسی کند. تغییر موجود متعلق به کاربر است مگر اینکه
 Taskloom صریحاً آن را به همان سشن نسبت داده باشد.
 
@@ -103,7 +103,7 @@ Taskloom صریحاً آن را به همان سشن نسبت داده باشد.
 
 Taskloom باید fingerprint را در این نقاط محاسبه کند:
 
-1. پیش از اجرای Codex؛
+1. پیش از اجرای عامل؛
 2. پس از پایان turn عامل؛
 3. بلافاصله پیش از شروع تست؛
 4. بلافاصله پس از پایان تست؛
@@ -168,7 +168,7 @@ python -m venv venv
   تست» آن را اجرا می‌کند، و پیش از اجرا hostname پارس‌شدهٔ `TEST_DATABASE_URL` باید
   یکی از `localhost`، `127.0.0.1` یا `::1` باشد.
 - `bootstrap_sso_tokens.py` ممکن است مرورگر تعاملی باز کند؛ Taskloom باید آن را
-  setup کاربر بداند، نه تستی که Codex پنهانی اجرا می‌کند.
+  setup کاربر بداند، نه تستی که عامل پنهانی اجرا می‌کند.
 - پیش از هر عملیات stateful، hostname دیتابیس مقصد باید پس از parse کامل یکی از
   `localhost`، `127.0.0.1` یا `::1` باشد. صرف جست‌وجوی متنی `localhost` در URL
   کافی نیست.
@@ -176,7 +176,7 @@ python -m venv venv
   redact شود. فقط نام متغیر و وضعیت configured/not-configured نمایش داده شود.
 - فایل‌های `.env` و `.test-artifacts/` نباید وارد diff، artifact اشتراکی، prompt
   یا commit شوند.
-- setup خودکار، reset را یک‌بار پیش از شروع Codex و بار دیگر بلافاصله پیش از gate
+- setup خودکار، reset را یک‌بار پیش از شروع عامل و بار دیگر بلافاصله پیش از gate
   تست نهایی انجام می‌دهد. `bootstrap_sso_tokens.py` در هر setup حداکثر سه بار اجرا
   می‌شود و `scripts/grant_local_test_admin.py` با interpreter محیط مجازی اجرا
   می‌شود؛ در صورت شکست، Taskloom تست را اجرا نمی‌کند و وضعیت خطا را گزارش می‌کند.
@@ -322,7 +322,7 @@ required، nullability، default، constraint یا error shape تغییر قرا
 .\venv\Scripts\python.exe scripts/update_openapi_contract_snapshot.py
 ```
 
-Codex و Taskloom نباید این فرمان را به‌عنوان autofix شکست تست اجرا کنند. پیش از
+عامل و Taskloom نباید این فرمان را به‌عنوان autofix شکست تست اجرا کنند. پیش از
 تأیید باید خلاصهٔ semantic diff شامل endpoint، request و response متأثر در UI
 نمایش داده شود. در صورت وجود consumer متناظر، فایل‌های `frontend/src/api/`، typeها
 و محل‌های استفاده نیز باید بررسی شوند.
@@ -331,7 +331,7 @@ Codex و Taskloom نباید این فرمان را به‌عنوان autofix ش
 با rule اختصاصی آن لازم است. حالت‌های مرتبط می‌توانند auth، permission، ورودی
 نامعتبر، not-found، conflict، مرز مقدار، ownership، retry یا concurrency باشند.
 
-## ۱۱. چرخهٔ کار Codex
+## ۱۱. چرخهٔ کار عامل
 
 عامل در هر turn باید این ترتیب را رعایت کند:
 
@@ -347,25 +347,24 @@ Codex و Taskloom نباید این فرمان را به‌عنوان autofix ش
    مستقل اجرا می‌کند.
 9. گزارش ساخت‌یافته و صادقانه تحویل دهد.
 
-تغییر ناگهانی فایلی که Codex ایجاد نکرده است باید حفظ و گزارش شود. اگر همان بخش
+تغییر ناگهانی فایلی که عامل ایجاد نکرده است باید حفظ و گزارش شود. اگر همان بخش
 با ویرایش عامل overlap دارد، عامل باید ویرایش آن بخش را متوقف و تعارض را اعلام
 کند.
 
-## ۱۲. قرارداد اجرای Codex در Taskloom
+## ۱۲. قرارداد اجرای عامل در Taskloom
 
-Taskloom باید خروجی machine-readable را مصرف و شناسهٔ دقیق thread را ذخیره کند.
-الگوی مورد انتظار:
+Taskloom باید خروجی machine-readable را مصرف، نوع عامل را همراه profile و task ذخیره و شناسهٔ دقیق سشن همان عامل را نگه‌داری کند. انتخاب عامل پس از شروع سشن ثابت است و session ID یک عامل نباید برای عامل دیگر استفاده شود. الگوهای مورد انتظار:
 
 ```text
 codex exec --json --sandbox workspace-write -C <repo-root> --output-schema <schema> <task>
 codex exec resume --json --output-schema <schema> <SESSION_ID> <follow-up>
+claude --print --output-format stream-json --verbose --permission-mode acceptEdits <task>
+claude --print --resume <SESSION_ID> --output-format stream-json --verbose --permission-mode acceptEdits <follow-up>
 ```
 
-- resume باید با `SESSION_ID` همان Taskloom session انجام شود، نه با `--last`.
-- `thread.started`، `turn.completed`، `turn.failed`، command execution و errorها
-  باید جدا از متن پاسخ ذخیره شوند.
-- Taskloom باید در startup با `codex exec --help` سازگاری flagهای نسخهٔ نصب‌شده
-  را بررسی کند و در صورت ناسازگاری fail closed باشد.
+- resume باید با `SESSION_ID` همان Taskloom session و همان عامل انجام شود، نه با `--last` یا `--continue`.
+- رویدادهای lifecycle عامل (`thread.started` در Codex و `system/init` در Claude)، command execution و errorها باید جدا از متن پاسخ ذخیره شوند. اگر CLI پیش از ساخت session ID شکست خورد، Taskloom باید diagnostic واقعی و redacted آن را به‌جای خطای مبهم نبودن session ID نمایش دهد.
+- Taskloom باید با help/version عامل انتخابی سازگاری flagهای نسخهٔ نصب‌شده را بررسی کند و در صورت ناسازگاری fail closed باشد.
 - final response بهتر است با `--output-schema` ساخت‌یافته شود، اما این JSON فقط
   گزارش عامل است و جای fingerprint و exit code را نمی‌گیرد.
 - sandbox و policyهای هر resume باید همان محدودیت‌های مورد انتظار profile را
@@ -376,25 +375,25 @@ codex exec resume --json --output-schema <schema> <SESSION_ID> <follow-up>
 
 ### MCP دانش پروژه
 
-سرور STDIO این repository در Codex با نام `dws_project` ثبت می‌شود. Taskloom باید
-پیش از اولین turn این preflight را اجرا و enabled بودن entry را بررسی کند:
+سرور STDIO این repository باید برای عامل انتخابی با نام `dws_project` ثبت شود. Taskloom باید پیش از اولین turn preflight متناظر را اجرا و در دسترس‌بودن entry را بررسی کند:
 
 ```powershell
 codex mcp get dws_project --json
+claude mcp get dws_project
 ```
 
-- Taskloom نباید `--ignore-user-config` را استفاده کند، مگر اینکه تنظیم معادل
-  `dws_project` را از راه دیگری به همان اجرای Codex تزریق کرده باشد.
+- Taskloom نباید تنظیم MCP کاربر را نادیده بگیرد، مگر اینکه تنظیم معادل
+  `dws_project` را از راه دیگری به همان اجرای عامل تزریق کرده باشد.
 - در صورت نبود یا initialize نشدن MCP، وضعیت باید با دلیل روشن در UI نمایش داده
   شود. profile می‌تواند تعیین کند این وضعیت `BLOCKED` یا warning است.
-- Codex باید برای شناخت معماری و ruleهای پروژه ابتدا از ابزارهای read-only این
+- عامل باید برای شناخت معماری و ruleهای پروژه ابتدا از ابزارهای read-only این
   MCP مانند `search_docs`، `read_doc`، `search_code` و `read_file` استفاده کند.
 - پاسخ MCP شواهد context است، نه شاهد سبزبودن gateهای Taskloom.
 - ابزار `run_tests` فعلی MCP فقط مسیرهای suite قدیمی `backend/tests/` را قبول
   می‌کند. Taskloom باید gate اصلی `pytest.ini` را با test runner خودش اجرا
   کند و نباید اجرای MCP را جایگزین آن بداند.
 - session فعال پیش از اضافه‌شدن MCP ممکن است tool جدید را نبیند؛ Taskloom باید
-  برای اولین استفاده یک Codex process/session تازه ایجاد کند.
+  برای اولین استفاده یک process/session تازه با همان عامل ایجاد کند.
 
 فیلدهای حداقلی گزارش عامل:
 
@@ -422,7 +421,7 @@ Taskloom باید نتیجهٔ نهایی commandهای خودش را جداگا
 حداقل stateهای قابل مشاهده:
 
 ```text
-DRAFT → CODEX_RUNNING → CHANGED → TESTING → TESTED → READY_TO_COMMIT
+DRAFT → AGENT_RUNNING → CHANGED → TESTING → TESTED → READY_TO_COMMIT
       → COMMITTED → PUSHED → MR_CREATED
 
 FAILED | STALE | PARTIAL | BLOCKED | CANCELLED
@@ -431,7 +430,7 @@ FAILED | STALE | PARTIAL | BLOCKED | CANCELLED
 دکمهٔ commit فقط وقتی فعال است که:
 
 - همهٔ gateهای اجباری برای `tested_fingerprint` پاس شده باشند؛
-- هیچ command یا Codex turn فعال نباشد؛
+- هیچ command یا turn عامل فعال نباشد؛
 - fingerprint فعلی با `tested_fingerprint` برابر باشد؛
 - تغییر قرارداد یا migration نیازمند تأیید حل‌نشده وجود نداشته باشد.
 
@@ -461,7 +460,7 @@ UI باید حداقل این شواهد را نشان دهد:
 2. fingerprint شامل tracked، staged، unstaged و untracked و invalidation خودکار؛
 3. اتصال نتیجهٔ هر gate به fingerprint دقیق؛
 4. test plan چندفرمانی با `cwd`، timeout، required/optional و exit code مستقل؛
-5. ذخیرهٔ session ID دقیق Codex و مصرف stream JSONL؛
+5. ذخیرهٔ نوع عامل و session ID دقیق Codex/Claude و مصرف stream JSONL متناظر؛
 6. process manager برای server/test و termination کل process tree متعلق به run؛
 7. تشخیص setup تعاملی و عملیات مخرب و گرفتن تأیید صریح کاربر؛
 8. redaction مرکزی secretها در prompt، log، history و artifact؛
@@ -480,7 +479,7 @@ UI باید حداقل این شواهد را نشان دهد:
 3. نگه‌داری evidence bundle شامل metadata و logهای redacted برای هر fingerprint؛
 4. تشخیص تغییر فایل در لحظه با filesystem watcher، در کنار fingerprint قطعی؛
 5. تفکیک خطای regression، infrastructure، environment، legacy و cancellation؛
-6. pin یا allow-list نسخه‌های آزموده‌شدهٔ Codex CLI؛
+6. pin یا allow-list نسخه‌های آزموده‌شدهٔ Codex CLI و Claude Code CLI؛
 7. امکان تعریف setup gateهای دستی مانند SSO login بدون سبز نشان‌دادن خودکار آن‌ها.
 
 ## ۱۵. معیار پایان موفق

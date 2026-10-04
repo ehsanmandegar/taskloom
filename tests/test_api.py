@@ -13,8 +13,8 @@ from backend.app import services
 from backend.app import main as main_module
 from backend.app.main import app, load_tasks, project_defaults, save_tasks, tasks
 from backend.app.guide_mcp import GuideCatalog
-from backend.app.models import McpFailureMode, RunStatus, TaskRequest, TaskState, TodoItem
-from backend.app.services import CodexEventStream, build_prompt, codex_response, continue_task, execute_task, generate_commit_message, mcp_runtime_issue, preflight_project_mcp, resolve_guides, run_test_setup, test_setup_commands as setup_commands
+from backend.app.models import AgentType, McpFailureMode, RunStatus, TaskRequest, TaskState, TodoItem
+from backend.app.services import ClaudeEventStream, CodexEventStream, agent_error_detail, build_prompt, claude_response, codex_response, continue_task, execute_task, generate_commit_message, initial_agent_args, mcp_runtime_issue, preflight_project_mcp, resolve_guides, resume_agent_args, run_test_setup, test_setup_commands as setup_commands
 
 client = TestClient(app)
 
@@ -92,6 +92,39 @@ def test_detect_tests_uses_pytest_when_package_has_no_test_script(monkeypatch, t
 
 def test_health():
     assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_workspace_tree_is_bounded_to_useful_project_files(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hello')", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "index").write_bytes(b"binary")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "package.js").write_text("ignored", encoding="utf-8")
+
+    tree = services.workspace_tree(tmp_path)
+
+    assert [node["name"] for node in tree] == ["src"]
+    assert tree[0]["children"][0]["path"] == "src/app.py"
+
+
+def test_workspace_file_preview_rejects_paths_outside_repository(tmp_path: Path):
+    with pytest.raises(ValueError, match="inside the project"):
+        asyncio.run(services.workspace_file(tmp_path, "../secret.txt"))
+
+
+def test_workspace_changes_parses_renames_and_untracked_files(monkeypatch, tmp_path: Path):
+    async def fake_command(args, cwd, timeout=900, env=None):
+        assert args[:3] == ["git", "status", "--porcelain=v1"]
+        return 0, " M src/app.py\0R  src/new.py\0src/old.py\0?? notes.txt\0"
+
+    monkeypatch.setattr(services, "command", fake_command)
+
+    assert asyncio.run(services.workspace_changes(tmp_path)) == [
+        {"path": "src/app.py", "previous_path": None, "status": " M"},
+        {"path": "src/new.py", "previous_path": "src/old.py", "status": "R "},
+        {"path": "notes.txt", "previous_path": None, "status": "??"},
+    ]
 
 
 def test_branch_list_exposes_local_and_origin_branches(monkeypatch, tmp_path: Path):
@@ -204,6 +237,56 @@ def test_codex_status_exposes_account_limits_usage_and_models(monkeypatch):
     assert response.json()["account"] == {"type": "chatgpt", "planType": "pro"}
 
 
+def test_selected_agent_status_exposes_claude_auth_without_sensitive_fields(monkeypatch):
+    async def fake_status(agent_type):
+        assert agent_type == AgentType.claude
+        return {
+            "agent": "claude",
+            "account": {"type": "oauth", "planType": "pro", "apiProvider": "firstParty"},
+            "rate_limits": {},
+            "usage": {},
+            "models": [],
+        }
+
+    monkeypatch.setattr(main_module, "agent_account_status", fake_status)
+
+    response = client.get("/api/agents/claude/status")
+
+    assert response.status_code == 200
+    assert response.json()["agent"] == "claude"
+    assert response.json()["account"] == {"type": "oauth", "planType": "pro", "apiProvider": "firstParty"}
+    assert client.get("/api/agents/unknown/status").status_code == 422
+
+
+def test_claude_account_status_uses_cli_json_and_omits_identity(monkeypatch):
+    calls = []
+
+    async def fake_command(args, cwd, timeout):
+        calls.append((args, cwd, timeout))
+        return 0, json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "subscriptionType": "max",
+                "apiProvider": "firstParty",
+                "email": "private@example.com",
+            }
+        )
+
+    monkeypatch.setattr(services.shutil, "which", lambda name: "claude.exe" if name == "claude" else None)
+    monkeypatch.setattr(services, "command", fake_command)
+
+    payload = asyncio.run(services.agent_account_status(AgentType.claude, timeout=7))
+
+    assert calls == [(["claude.exe", "auth", "status"], Path.cwd(), 7)]
+    assert payload["account"] == {
+        "type": "claude.ai",
+        "planType": "max",
+        "apiProvider": "firstParty",
+    }
+    assert "email" not in payload["account"]
+
+
 def test_codex_account_status_payload_omits_account_email_and_keeps_usage_data():
     payload = services.codex_account_status_payload(
         {
@@ -294,6 +377,7 @@ def test_defaults_point_to_taskloom_and_its_contract(monkeypatch):
     monkeypatch.delenv("TASKLOOM_DEFAULT_GUIDE_PATHS", raising=False)
     monkeypatch.delenv("TASKLOOM_DEFAULT_TEST_COMMAND", raising=False)
     monkeypatch.delenv("TASKLOOM_DEFAULT_BASE_BRANCH", raising=False)
+    monkeypatch.delenv("TASKLOOM_DEFAULT_AGENT_TYPE", raising=False)
 
     response = client.get("/api/defaults")
 
@@ -308,6 +392,7 @@ def test_defaults_point_to_taskloom_and_its_contract(monkeypatch):
     assert response.json()["mcp_server_name"] == "dws_project"
     assert response.json()["mcp_failure_mode"] == "blocked"
     assert response.json()["base_branch"] == "main"
+    assert response.json()["agent_type"] == "codex"
 
 
 def test_defaults_can_be_overridden_for_another_project(monkeypatch, tmp_path: Path):
@@ -317,6 +402,7 @@ def test_defaults_can_be_overridden_for_another_project(monkeypatch, tmp_path: P
     monkeypatch.setenv("TASKLOOM_DEFAULT_MCP_SERVER", "other_project")
     monkeypatch.setenv("TASKLOOM_DEFAULT_MCP_FAILURE_MODE", "warning")
     monkeypatch.setenv("TASKLOOM_DEFAULT_BASE_BRANCH", "release/next")
+    monkeypatch.setenv("TASKLOOM_DEFAULT_AGENT_TYPE", "claude")
 
     defaults = project_defaults()
 
@@ -326,6 +412,7 @@ def test_defaults_can_be_overridden_for_another_project(monkeypatch, tmp_path: P
     assert defaults.mcp_server_name == "other_project"
     assert defaults.mcp_failure_mode == McpFailureMode.warning
     assert defaults.base_branch == "release/next"
+    assert defaults.agent_type == AgentType.claude
 
 
 def test_dws_defaults_include_the_documentation_directory(monkeypatch, tmp_path: Path):
@@ -744,7 +831,7 @@ def test_profiles_are_persisted(monkeypatch, tmp_path: Path):
 
     assert client.put("/api/profiles/project%201", json=profile).status_code == 200
     assert client.get("/api/profiles").json() == [
-        {**profile, "base_branch": "main", "test_working_directory": None, "test_setup_enabled": False, "auto_commit": False, "auto_generate_commit_message": False, "auto_push": False, "auto_merge_request": False, "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto"}
+        {**profile, "base_branch": "main", "test_working_directory": None, "test_setup_enabled": False, "auto_commit": False, "auto_generate_commit_message": False, "auto_push": False, "auto_merge_request": False, "mcp_server_name": None, "mcp_failure_mode": "warning", "git_provider": "auto", "agent_type": "codex"}
     ]
     assert profile_file.exists()
 
@@ -807,6 +894,24 @@ def test_mcp_preflight_requires_configured_and_enabled_entry(monkeypatch):
     assert ready is True
     assert "configured and enabled" in message
     assert calls == [(["codex", "mcp", "get", "dws_project", "--json"], Path("repo"), 30)]
+
+
+def test_claude_mcp_preflight_uses_its_native_command_and_rejects_unavailable_entries(monkeypatch):
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append((args, cwd, timeout))
+        return 0, "dws_project: pending approval"
+
+    monkeypatch.setattr(services, "command", fake_command)
+
+    ready, message = asyncio.run(
+        preflight_project_mcp("claude", Path("repo"), "dws_project", AgentType.claude)
+    )
+
+    assert ready is False
+    assert "unavailable to Claude Code" in message
+    assert calls == [(["claude", "mcp", "get", "dws_project"], Path("repo"), 30)]
 
 
 @pytest.mark.parametrize(
@@ -924,6 +1029,97 @@ def test_codex_response_reads_thread_and_final_message_from_jsonl():
     )
 
     assert codex_response(output) == ("thread-123", "First response\n\nFinal response")
+
+
+def test_claude_commands_start_and_resume_the_exact_session_with_safe_edit_permissions():
+    initial = initial_agent_args(AgentType.claude, "claude.exe", "implement this")
+    resumed = resume_agent_args(AgentType.claude, "claude.exe", "session-123", "continue this")
+
+    assert initial == [
+        "claude.exe",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "acceptEdits",
+        "implement this",
+    ]
+    assert resumed == [
+        "claude.exe",
+        "--print",
+        "--resume",
+        "session-123",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "acceptEdits",
+        "continue this",
+    ]
+    assert "--dangerously-skip-permissions" not in initial + resumed
+
+
+def test_claude_stream_json_preserves_session_final_response_and_live_activity():
+    output = "\n".join(
+        [
+            json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": "claude-session",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "در حال اصلاح"},
+                            {"type": "tool_use", "name": "Edit", "input": {"file_path": "app.py"}},
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "session_id": "claude-session",
+                    "is_error": False,
+                    "result": "Implemented and tested.",
+                }
+            ),
+        ]
+    )
+    state = TaskState(
+        id="claude-live",
+        task_id="podw-100",
+        project_path="unused",
+        branch="tasks/podw-100",
+        agent_type=AgentType.claude,
+        status=RunStatus.running,
+        step="running",
+    )
+    stream = ClaudeEventStream(state)
+
+    stream.feed(output[:35])
+    stream.feed(output[35:] + "\n")
+    stream.finish()
+
+    assert claude_response(output) == ("claude-session", "Implemented and tested.")
+    assert state.codex_thread_id == "claude-session"
+    assert state.live_response == "در حال اصلاح"
+    assert "Claude session started." in state.live_output
+    assert "Edit: app.py" in state.live_output
+
+
+def test_agent_error_detail_surfaces_cli_install_and_structured_failures():
+    output = "\n".join(
+        [
+            "Error: claude native binary not installed.",
+            json.dumps({"type": "result", "is_error": True, "result": "Authentication required"}),
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "ignored"}]}}),
+        ]
+    )
+
+    assert agent_error_detail(output) == (
+        "Error: claude native binary not installed. Authentication required"
+    )
 
 
 def test_codex_jsonl_events_update_live_output_incrementally():

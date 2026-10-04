@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RunStatus, TaskRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
-from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch
+from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, workspace_changes, workspace_diff, workspace_file, workspace_tree
 
 scheduler_worker: asyncio.Task | None = None
 
@@ -298,6 +298,41 @@ async def list_branches(project_path: str):
         return await git_branches(repository(project_path))
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/workspace/tree")
+async def project_file_tree(project_path: str):
+    try:
+        repo = repository(project_path)
+        return {"root": repo.name, "tree": await asyncio.to_thread(workspace_tree, repo)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/workspace/file")
+async def project_file(project_path: str, path: str):
+    try:
+        return await workspace_file(repository(project_path), path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/workspace/changes")
+async def project_git_changes(project_path: str):
+    try:
+        return {"changes": await workspace_changes(repository(project_path))}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/workspace/diff")
+async def project_file_diff(project_path: str, path: str, previous_path: str | None = None):
+    try:
+        return await workspace_diff(repository(project_path), path, previous_path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/branches/switch")
