@@ -1,6 +1,7 @@
 import asyncio
 import codecs
 from contextvars import ContextVar
+from difflib import SequenceMatcher
 import json
 import os
 import queue
@@ -400,7 +401,26 @@ async def workspace_diff(repo: Path, relative_path: str, previous_path: str | No
         raise ValueError("Binary files cannot be previewed")
     if len(before.encode("utf-8")) > WORKSPACE_MAX_FILE_SIZE:
         raise ValueError("Previous file is too large to preview (maximum 1 MB)")
-    return {"path": relative_path.replace("\\", "/"), "before": before, "after": after}
+    # Git emits LF while Windows working-tree files are commonly CRLF. Comparing
+    # logical lines avoids painting the entire file for line-ending differences.
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    before_changes: list[list[int]] = []
+    after_changes: list[list[int]] = []
+    for tag, before_start, before_end, after_start, after_end in SequenceMatcher(
+        None, before_lines, after_lines, autojunk=False
+    ).get_opcodes():
+        if tag in {"replace", "delete"} and before_start < before_end:
+            before_changes.append([before_start, before_end])
+        if tag in {"replace", "insert"} and after_start < after_end:
+            after_changes.append([after_start, after_end])
+    return {
+        "path": relative_path.replace("\\", "/"),
+        "before": before,
+        "after": after,
+        "before_changes": before_changes,
+        "after_changes": after_changes,
+    }
 
 
 async def git_branches(repo: Path) -> dict:

@@ -127,6 +127,22 @@ def test_workspace_changes_parses_renames_and_untracked_files(monkeypatch, tmp_p
     ]
 
 
+def test_workspace_diff_marks_only_the_exact_changed_line_ranges(monkeypatch, tmp_path: Path):
+    path = tmp_path / "example.py"
+    path.write_text("same\nadded\nmiddle\nnew\nend\n", encoding="utf-8")
+
+    async def fake_command(args, cwd, timeout=900, env=None):
+        assert args == ["git", "show", "HEAD:example.py"]
+        return 0, "same\nremoved\nmiddle\nold\nend\n"
+
+    monkeypatch.setattr(services, "command", fake_command)
+
+    result = asyncio.run(services.workspace_diff(tmp_path, "example.py"))
+
+    assert result["before_changes"] == [[1, 2], [3, 4]]
+    assert result["after_changes"] == [[1, 2], [3, 4]]
+
+
 def test_branch_list_exposes_local_and_origin_branches(monkeypatch, tmp_path: Path):
     (tmp_path / ".git").mkdir()
 

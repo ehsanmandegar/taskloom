@@ -375,3 +375,38 @@ test('shows the complete failed-test output from a dedicated details control', (
   assert.match(source, /<DirectionalOutput text=\{task\.test_output\}\/>/);
   assert.match(styles, /\.test-error-details\{margin-top:10px/);
 });
+
+test('keeps long chat and execution output within proportional workspace widths', () => {
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(styles, /grid-template-columns:minmax\(0,36%\) minmax\(0,1fr\)/);
+  assert.match(styles, /html\[data-theme="dark"\] \.card\{\s*width:100%;\s*min-width:0;\s*max-width:100%/);
+  assert.match(styles, /\.chat-message\{\s*width:90%;\s*min-width:0;\s*max-width:90%/);
+  assert.match(styles, /\.chat-message p,[\s\S]*?overflow-wrap:anywhere;[\s\S]*?word-break:break-word/);
+  assert.match(styles, /pre\{\s*min-width:0;\s*max-width:100%;[\s\S]*?overflow-wrap:anywhere/);
+});
+
+test('positions the main workspace and colors only exact Git diff lines', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(styles, /\.app>main\{\s*position:absolute;\s*right:0;\s*left:0;\s*width:100%;\s*margin-inline:auto/);
+  assert.match(source, /const lineIsChanged=/);
+  assert.match(source, /changedRanges=\{beforeChanges\}/);
+  assert.match(source, /changedRanges=\{afterChanges\}/);
+  assert.match(source, /beforeChanges:data\.before_changes\|\|\[\]/);
+  assert.doesNotMatch(source, /changedRange=\{\[prefix/);
+});
+
+test('lets the Git preview width be resized by dragging its edge', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /className="preview-resizer"/);
+  assert.match(source, /onPointerDown=\{beginPreviewResize\}/);
+  assert.match(source, /onPointerMove=\{dragPreviewResize\}/);
+  assert.match(source, /setPointerCapture\(event\.pointerId\)/);
+  assert.match(source, /style=\{selection&&!collapsed&&previewWidth\?\{width:`\$\{previewWidth\}px`\}/);
+  assert.match(styles, /\.preview-resizer\{[\s\S]*?cursor:col-resize;[\s\S]*?touch-action:none/);
+  assert.match(styles, /\.project-sidebar\.preview-open\{\s*max-width:calc\(100vw - 8px\)/);
+});
