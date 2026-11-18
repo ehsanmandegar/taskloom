@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
+import {resolveMarkdownAsset} from './preview.js';
 
 test('does not show the removed delivery heading', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
@@ -134,6 +135,7 @@ test('keeps multiple browser-style workspaces mounted with independent persisted
   assert.match(source, /taskloom-workspaces-v1/);
   assert.match(source, /taskloom-workspace-\$\{workspaceId\}-state/);
   assert.match(source, /workspaces\.map\(item=><div className="workspace-pane"/);
+  assert.match(source, /className="tasks-shell" hidden=\{view!=='tasks'\}/);
   assert.match(source, /hidden=\{activeWorkspace!==item\.id\}/);
   assert.match(source, /className="workspace-tab-add"/);
   assert.match(source, /window\.location\.host\|\|`\$\{selectedAgentLabel\} محلی`/);
@@ -276,6 +278,21 @@ test('creates separately named sessions and lets the user rename them', () => {
   assert.match(styles, /\.session-controls\{display:grid;grid-template-columns:minmax\(0,1fr\) auto auto auto;align-items:center/);
 });
 
+test('allows a confirmed new session to reuse dirty changes on the current task branch', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /confirm_dirty_worktree:false/);
+  assert.match(source, /branchData\.dirty&&branchData\.current===taskBranchFor\(form\.task_id\)/);
+  assert.match(source, /name="confirm_dirty_worktree"/);
+  assert.match(source, /می‌دانم این Git repository تغییرات commit‌نشده دارد/);
+  assert.match(source, /dirty_worktree_confirmation_required/);
+  assert.match(source, /await loadBranches\(form\.project_path,true\)/);
+  assert.match(source, /reusingDirtyBranch&&!form\.confirm_dirty_worktree/);
+  assert.match(source, /branchData\.current\.startsWith\('tasks\/'\)\?taskIdForBranch\(branchData\.current\):''/);
+  assert.match(styles, /\.dirty-worktree-confirm\{/);
+});
+
 test('scrolls chat history to the newest message and streamed reply', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
 
@@ -409,4 +426,26 @@ test('lets the Git preview width be resized by dragging its edge', () => {
   assert.match(source, /style=\{selection&&!collapsed&&previewWidth\?\{width:`\$\{previewWidth\}px`\}/);
   assert.match(styles, /\.preview-resizer\{[\s\S]*?cursor:col-resize;[\s\S]*?touch-action:none/);
   assert.match(styles, /\.project-sidebar\.preview-open\{\s*max-width:calc\(100vw - 8px\)/);
+});
+
+test('previews Markdown, images, PDF and Word files in the workspace viewer', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8');
+  const markdown = readFileSync(new URL('./markdown.jsx', import.meta.url), 'utf8');
+  const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+
+  assert.match(source, /<Eye size=\{16\}\/>/);
+  assert.match(source, /<Code2 size=\{16\}\/>/);
+  assert.match(source, /selection\.kind==='image'/);
+  assert.match(source, /selection\.kind==='pdf'/);
+  assert.match(source, /selection\.kind==='word'/);
+  assert.match(source, /<MarkdownPreview content=\{selection\.content\}/);
+  assert.match(markdown, /className="markdown-preview"/);
+  assert.match(styles, /\.pdf-preview iframe\{/);
+});
+
+test('resolves Markdown image paths inside the selected repository', () => {
+  assert.equal(resolveMarkdownAsset('docs/guide/readme.md', '../images/demo.png'), 'docs/images/demo.png');
+  assert.equal(resolveMarkdownAsset('README.md', '/assets/logo.svg?raw=1'), 'assets/logo.svg');
+  assert.equal(resolveMarkdownAsset('README.md', '../../secret.png'), null);
+  assert.equal(resolveMarkdownAsset('README.md', 'https://example.com/image.png'), null);
 });

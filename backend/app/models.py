@@ -39,6 +39,25 @@ class AgentType(str, Enum):
     claude = "claude"
 
 
+class TaskRole(str, Enum):
+    analyst = "analyst"
+    developer = "developer"
+    tester = "tester"
+    product_owner = "product_owner"
+
+
+class RoleKnowledgeSettings(BaseModel):
+    analyst: str = Field(default="", max_length=2000)
+    developer: str = Field(default="", max_length=2000)
+    tester: str = Field(default="", max_length=2000)
+    product_owner: str = Field(default="", max_length=2000)
+
+    @field_validator("analyst", "developer", "tester", "product_owner")
+    @classmethod
+    def clean_path(cls, value: str) -> str:
+        return value.strip()
+
+
 def valid_branch_name(value: str) -> str:
     value = value.strip()
     invalid_part = any(part in {"", ".", ".."} for part in value.split("/"))
@@ -62,6 +81,7 @@ class TaskRequest(BaseModel):
     test_command: str | None = Field(default=None, max_length=500)
     test_working_directory: str | None = Field(default=None, max_length=500)
     test_setup_enabled: bool = False
+    confirm_dirty_worktree: bool = False
     auto_commit: bool = False
     auto_generate_commit_message: bool = False
     auto_push: bool = False
@@ -70,6 +90,7 @@ class TaskRequest(BaseModel):
     mcp_failure_mode: McpFailureMode = McpFailureMode.warning
     git_provider: GitProvider = GitProvider.auto
     agent_type: AgentType = AgentType.codex
+    role: TaskRole = TaskRole.analyst
 
     @field_validator("task_id")
     @classmethod
@@ -207,6 +228,10 @@ class RenameTaskRequest(BaseModel):
         return value
 
 
+class TaskRoleRequest(BaseModel):
+    role: TaskRole
+
+
 class TestSetupRequest(BaseModel):
     project_path: str = Field(min_length=1)
     confirm_test_database: bool = False
@@ -257,6 +282,8 @@ class TaskState(BaseModel):
     branch: str
     base_branch: str = "main"
     guide_paths: list[str] = Field(default_factory=list)
+    role: TaskRole = TaskRole.analyst
+    role_knowledge_path: str = ""
     test_command: str | None = None
     test_working_directory: str | None = None
     test_setup_enabled: bool = False

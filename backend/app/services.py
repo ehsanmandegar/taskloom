@@ -1,8 +1,10 @@
 import asyncio
 import codecs
+from contextlib import ExitStack
 from contextvars import ContextVar
 from difflib import SequenceMatcher
 import json
+import mimetypes
 import os
 import queue
 import re
@@ -10,10 +12,13 @@ import shlex
 import shutil
 import subprocess
 import threading
+import tempfile
 import time
+from xml.etree import ElementTree
 from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Callable
+from zipfile import BadZipFile, ZipFile
 
 from .models import AgentType, ChatMessage, GitProvider, McpFailureMode, McpStatus, RunStatus, TaskRequest, TaskState
 
@@ -29,6 +34,7 @@ def _command_sync(
     env: dict[str, str] | None,
     handler: Callable[[str], None] | None,
     cancelled: threading.Event,
+    stdin_text: str | None = None,
 ) -> tuple[int, str]:
     """Run a command without depending on the server's asyncio event-loop policy."""
     executable = args[0]
@@ -41,14 +47,23 @@ def _command_sync(
         executable = shutil.which(executable) or executable
 
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    process = subprocess.Popen(
-        [executable, *args[1:]],
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env or os.environ.copy(),
-        creationflags=creationflags,
-    )
+    # A file-backed stdin avoids both command-line limits and blocking pipe writes
+    # before the output reader and cancellation loop have started.
+    with ExitStack() as stack:
+        input_file = None
+        if stdin_text is not None:
+            input_file = stack.enter_context(tempfile.TemporaryFile())
+            input_file.write(stdin_text.encode("utf-8"))
+            input_file.seek(0)
+        process = subprocess.Popen(
+            [executable, *args[1:]],
+            cwd=str(cwd),
+            stdin=input_file,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env or os.environ.copy(),
+            creationflags=creationflags,
+        )
     assert process.stdout is not None
     output_queue: queue.Queue[bytes | None] = queue.Queue()
 
@@ -93,11 +108,14 @@ def _command_sync(
     return process.returncode or 0, output
 
 
-async def command(args: list[str], cwd: Path, timeout: int = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
+async def command(
+    args: list[str], cwd: Path, timeout: int = 900,
+    env: dict[str, str] | None = None, stdin_text: str | None = None,
+) -> tuple[int, str]:
     """Run a subprocess portably while preserving streaming, timeout, and cancellation."""
     cancelled = threading.Event()
     worker = asyncio.create_task(
-        asyncio.to_thread(_command_sync, args, cwd, timeout, env, _command_output_handler.get(), cancelled)
+        asyncio.to_thread(_command_sync, args, cwd, timeout, env, _command_output_handler.get(), cancelled, stdin_text)
     )
     try:
         return await asyncio.shield(worker)
@@ -294,7 +312,13 @@ WORKSPACE_IGNORED_DIRECTORIES = {
     ".venv", "venv", "node_modules", "__pycache__", "dist", "build",
 }
 WORKSPACE_MAX_FILE_SIZE = 1_000_000
+WORKSPACE_MAX_DOCX_FILE_SIZE = 20_000_000
+WORKSPACE_MAX_DOCX_XML_SIZE = 5_000_000
 WORKSPACE_MAX_NODES = 4_000
+WORKSPACE_IMAGE_EXTENSIONS = {
+    ".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp",
+}
+WORKSPACE_WORD_EXTENSIONS = {".docx", ".docm", ".dotx"}
 
 
 def workspace_path(repo: Path, relative_path: str) -> Path:
@@ -358,6 +382,50 @@ def read_workspace_text(path: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def read_workspace_docx(path: Path) -> str:
+    """Extract readable paragraphs from an OOXML Word document without executing embedded content."""
+    try:
+        if path.stat().st_size > WORKSPACE_MAX_DOCX_FILE_SIZE:
+            raise ValueError("Word file is too large to preview (maximum 20 MB)")
+        with ZipFile(path) as archive:
+            document = archive.getinfo("word/document.xml")
+            if document.file_size > WORKSPACE_MAX_DOCX_XML_SIZE:
+                raise ValueError("Word document content is too large to preview")
+            root = ElementTree.fromstring(archive.read(document))
+    except (OSError, BadZipFile, KeyError, ElementTree.ParseError) as exc:
+        raise ValueError("Word file could not be read as a DOCX document") from exc
+
+    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    paragraphs = []
+    for paragraph in root.iter(f"{namespace}p"):
+        chunks = []
+        for node in paragraph.iter():
+            if node.tag == f"{namespace}t" and node.text:
+                chunks.append(node.text)
+            elif node.tag == f"{namespace}tab":
+                chunks.append("\t")
+            elif node.tag in {f"{namespace}br", f"{namespace}cr"}:
+                chunks.append("\n")
+        text = "".join(chunks).strip()
+        if text:
+            paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def workspace_preview_path(repo: Path, relative_path: str) -> tuple[Path, str]:
+    """Return a browser-previewable image or PDF while preserving repository confinement."""
+    path = workspace_path(repo, relative_path)
+    if not path.is_file():
+        raise ValueError("File was not found")
+    suffix = path.suffix.casefold()
+    if suffix not in WORKSPACE_IMAGE_EXTENSIONS and suffix != ".pdf":
+        raise ValueError("This file type cannot be opened as browser media")
+    media_type = mimetypes.guess_type(path.name)[0]
+    if suffix == ".pdf":
+        media_type = "application/pdf"
+    return path, media_type or "application/octet-stream"
+
+
 async def workspace_changes(repo: Path) -> list[dict]:
     """Return uncommitted paths, including staged and untracked changes."""
     code, output = await command(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], repo)
@@ -384,7 +452,15 @@ async def workspace_file(repo: Path, relative_path: str) -> dict:
     path = workspace_path(repo, relative_path)
     if not path.is_file():
         raise ValueError("File was not found")
-    return {"path": relative_path.replace("\\", "/"), "content": read_workspace_text(path)}
+    normalized_path = relative_path.replace("\\", "/")
+    suffix = path.suffix.casefold()
+    if suffix in WORKSPACE_IMAGE_EXTENSIONS:
+        return {"path": normalized_path, "kind": "image", "mime_type": mimetypes.guess_type(path.name)[0]}
+    if suffix == ".pdf":
+        return {"path": normalized_path, "kind": "pdf", "mime_type": "application/pdf"}
+    if suffix in WORKSPACE_WORD_EXTENSIONS:
+        return {"path": normalized_path, "kind": "word", "content": read_workspace_docx(path)}
+    return {"path": normalized_path, "kind": "text", "content": read_workspace_text(path)}
 
 
 async def workspace_diff(repo: Path, relative_path: str, previous_path: str | None = None) -> dict:
@@ -442,13 +518,37 @@ async def git_branches(repo: Path) -> dict:
     code, current = await command(["git", "branch", "--show-current"], repo)
     if code:
         raise RuntimeError(current.strip() or "Could not determine the current Git branch")
+    code, status = await command(["git", "status", "--porcelain"], repo)
+    if code:
+        raise RuntimeError(status.strip() or "Could not determine the Git working tree status")
     return {
         "current": current.strip(),
+        "dirty": bool(status.strip()),
         "branches": [
             {"name": name, "local": name in local, "remote": name in remote}
             for name in sorted(local | remote, key=str.casefold)
         ],
     }
+
+
+async def task_branch_preflight(repo: Path, branch: str, confirmed_dirty_worktree: bool) -> tuple[str, bool]:
+    """Allow a dirty worktree only when the user keeps its current branch and confirms it."""
+    code, status = await command(["git", "status", "--porcelain"], repo)
+    if code:
+        raise RuntimeError(status.strip() or "Could not determine the Git working tree status")
+    code, current = await command(["git", "branch", "--show-current"], repo)
+    if code:
+        raise RuntimeError(current.strip() or "Could not determine the current Git branch")
+    current = current.strip()
+    dirty = bool(status.strip())
+    if dirty and current != branch:
+        raise RuntimeError(
+            f"Repository has uncommitted changes on `{current or 'detached HEAD'}`. "
+            f"A task can keep those changes only on the current branch; requested branch is `{branch}`."
+        )
+    if dirty and not confirmed_dirty_worktree:
+        raise RuntimeError("Confirm that you know the Git working tree has uncommitted changes before starting this session")
+    return current, dirty
 
 
 async def base_branch_ref(repo: Path, base_branch: str) -> str:
@@ -901,7 +1001,7 @@ async def codex_command(args: list[str], repo: Path, state: TaskState, timeout: 
     stream = CodexEventStream(state)
     token = _command_output_handler.set(stream.feed)
     try:
-        code, output = await command(args, repo, timeout)
+        code, output = await command([*args[:-1], "-"], repo, timeout, stdin_text=args[-1])
     finally:
         _command_output_handler.reset(token)
     # Test doubles and alternative command runners may return buffered output.
@@ -1023,7 +1123,8 @@ async def refresh_git(state: TaskState, repo: Path) -> None:
 
 async def execute_task(req: TaskRequest, state: TaskState) -> None:
     try:
-        repo, guides = repository(req.project_path), resolve_guides(repository(req.project_path), req.guide_paths)
+        repo = repository(req.project_path)
+        guides = resolve_guides(repo, [*req.guide_paths, *([state.role_knowledge_path] if state.role_knowledge_path else [])])
         state.status, state.step = RunStatus.running, "Checking project prerequisites"
         executable = agent_executable(req.agent_type)
         display_name = agent_name(req.agent_type)
@@ -1050,23 +1151,30 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
             await prepare_tests(state, repo, "Preparing local test environment")
 
         state.step = "Preparing task branch"
-        code, output = await command(["git", "status", "--porcelain"], repo)
-        if code or output.strip():
-            raise RuntimeError("Repository must be clean before starting a task")
+        current_branch, dirty_worktree = await task_branch_preflight(
+            repo, state.branch, req.confirm_dirty_worktree
+        )
         state.base_branch = req.base_branch
-        code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{state.branch}"], repo)
-        if not code:
-            args, message = ["git", "switch", state.branch], f"Checked out existing task branch {state.branch}"
+        if current_branch == state.branch:
+            args = None
+            message = f"Using current task branch {state.branch}"
+            if dirty_worktree:
+                message += " with the user's confirmed uncommitted changes"
         else:
+            code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{state.branch}"], repo)
+        if current_branch != state.branch and not code:
+            args, message = ["git", "switch", state.branch], f"Checked out existing task branch {state.branch}"
+        elif current_branch != state.branch:
             code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{state.branch}"], repo)
             if not code:
                 args, message = ["git", "switch", "--track", "-c", state.branch, f"origin/{state.branch}"], f"Checked out existing remote task branch {state.branch}"
             else:
                 source_branch = await base_branch_ref(repo, req.base_branch)
                 args, message = ["git", "switch", "-c", state.branch, source_branch], f"Created {state.branch} from {source_branch}"
-        code, output = await command(args, repo)
-        if code:
-            raise RuntimeError(output.strip() or "Could not prepare task branch")
+        if args:
+            code, output = await command(args, repo)
+            if code:
+                raise RuntimeError(output.strip() or "Could not prepare task branch")
         state.logs.append(message)
         state.step = f"{display_name} is implementing the request"
         args = initial_agent_args(req.agent_type, executable, build_prompt(req, guides, active_mcp))
@@ -1135,7 +1243,9 @@ async def continue_task(message: str, state: TaskState) -> None:
         executable = agent_executable(state.agent_type)
         display_name = agent_name(state.agent_type)
         state.status, state.step, state.error = RunStatus.running, f"{display_name} is responding", None
-        prompt = f"""User follow-up:\n{message}\n\nContinue this conversation. Make edits when they help answer the request, but do not commit, push, switch branches, or modify files outside this repository. Summarize what you did or recommend next."""
+        role_guides = resolve_guides(repo, [state.role_knowledge_path]) if state.role_knowledge_path else []
+        role_instruction = f"Current role: {state.role.value}. Read these role knowledge files before responding:\n" + "\n".join(f"- {path}" for path in role_guides) + "\n\n" if role_guides else ""
+        prompt = f"""{role_instruction}User follow-up:\n{message}\n\nContinue this conversation. Make edits when they help answer the request, but do not commit, push, switch branches, or modify files outside this repository. Summarize what you did or recommend next."""
         args = resume_agent_args(state.agent_type, executable, state.codex_thread_id, prompt)
         code, output = await run_agent_command(state.agent_type, args, repo, state, 3600)
         _, response = agent_response(state.agent_type, output)
@@ -1191,7 +1301,10 @@ async def generate_commit_message(state: TaskState) -> str:
 Reply with exactly one concise, English Conventional Commit subject in this format: type(optional-scope): imperative summary
 Choose the type from build, chore, ci, docs, feat, fix, perf, refactor, revert, style, or test. Keep it to one line and 120 ASCII characters or fewer. Do not add a body, Markdown, translation, task commentary, or explanation. Do not edit files, run tests, commit, or push."""
     args = resume_agent_args(state.agent_type, executable, state.codex_thread_id, prompt)
-    code, output = await command(args, repo, 600)
+    if state.agent_type == AgentType.codex:
+        code, output = await command([*args[:-1], "-"], repo, 600, stdin_text=prompt)
+    else:
+        code, output = await command(args, repo, 600)
     if code:
         raise RuntimeError(f"{display_name} exited with code {code}")
     _, response = agent_response(state.agent_type, output)

@@ -1,0 +1,14 @@
+import React, {useEffect, useState} from 'react';
+import {GitBranch, RefreshCw} from 'lucide-react';
+import {gitTaskRows} from './git_tasks.js';
+
+export default function GitTaskList({api,projectPath,refreshKey,onSelect}){
+  const [branches,setBranches]=useState(null),[loading,setLoading]=useState(false),[error,setError]=useState('');
+  const project=projectPath.trim();
+  useEffect(()=>{if(!project){setBranches(null);setError('');return}let cancelled=false;const timer=setTimeout(async()=>{setLoading(true);setBranches(null);setError('');try{const response=await fetch(`${api}/api/branches?project_path=${encodeURIComponent(project)}`);const data=await response.json();if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'خواندن برنچ‌های Git ناموفق بود');if(!cancelled)setBranches(data)}catch(err){if(!cancelled)setError(err.message)}finally{if(!cancelled)setLoading(false)}},300);return()=>{cancelled=true;clearTimeout(timer)}},[api,project,refreshKey]);
+  async function refresh(){if(!project)return;setLoading(true);setError('');try{const response=await fetch(`${api}/api/branches?project_path=${encodeURIComponent(project)}`);const data=await response.json();if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'خواندن برنچ‌های Git ناموفق بود');setBranches(data)}catch(err){setError(err.message)}finally{setLoading(false)}}
+  const rows=gitTaskRows(branches);
+  return <section className="git-task-list card" aria-label="تسک‌های Git"><div className="git-task-list-heading"><div><span className="git-task-list-icon"><GitBranch size={17}/></span><div><h2>تسک‌های Git</h2><p>تسک‌های دارای برنچ <code dir="ltr">tasks/*</code> در پروژهٔ انتخاب‌شده</p></div></div><button type="button" onClick={refresh} disabled={!project||loading} aria-label="به‌روزرسانی تسک‌های Git"><RefreshCw size={15} className={loading?'spin':''}/> به‌روزرسانی</button></div>
+    {!project?<p className="git-task-list-empty">برای دیدن تسک‌ها، آدرس پروژه را در فرم زیر وارد کنید.</p>:error?<p className="git-task-list-error" role="alert">{error}</p>:loading&&!branches?<p className="git-task-list-empty">در حال خواندن برنچ‌ها…</p>:rows.length?<div className="git-task-table-wrap"><table className="git-task-table"><thead><tr><th>شناسهٔ تسک</th><th>برنچ</th><th>محل برنچ</th><th>وضعیت</th><th></th></tr></thead><tbody>{rows.map(row=><tr key={row.branch}><td dir="ltr">{row.taskId}</td><td dir="ltr"><code>{row.branch}</code></td><td>{row.local&&row.remote?'محلی و origin':row.local?'محلی':'origin'}</td><td>{row.current?<span className="git-task-current">فعال</span>:'—'}</td><td><button type="button" onClick={()=>onSelect(row.taskId)}>انتخاب تسک</button></td></tr>)}</tbody></table></div>:<p className="git-task-list-empty">در این پروژه برنچی با الگوی <code dir="ltr">tasks/*</code> پیدا نشد.</p>}
+  </section>;
+}

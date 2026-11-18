@@ -12,8 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RunStatus, TaskRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
-from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, workspace_changes, workspace_diff, workspace_file, workspace_tree
+from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RoleKnowledgeSettings, RunStatus, TaskRequest, TaskRoleRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
+from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
 
 scheduler_worker: asyncio.Task | None = None
 
@@ -223,6 +223,45 @@ def profiles_path() -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".taskloom" / "profiles.json"
 
 
+def role_knowledge_path() -> Path:
+    configured = os.getenv("TASKLOOM_ROLE_KNOWLEDGE_PATH")
+    return Path(configured).expanduser() if configured else Path.home() / ".taskloom" / "role-knowledge.json"
+
+
+def load_role_knowledge() -> RoleKnowledgeSettings:
+    path = role_knowledge_path()
+    if not path.exists():
+        return RoleKnowledgeSettings()
+    try:
+        return RoleKnowledgeSettings.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, f"Could not read role knowledge settings: {exc}") from exc
+
+
+@app.get("/api/role-knowledge", response_model=RoleKnowledgeSettings)
+async def get_role_knowledge():
+    return load_role_knowledge()
+
+
+@app.put("/api/role-knowledge", response_model=RoleKnowledgeSettings)
+async def put_role_knowledge(settings: RoleKnowledgeSettings):
+    for role, raw in settings.model_dump().items():
+        if raw and not Path(raw).expanduser().is_dir():
+            raise HTTPException(422, f"Knowledge root for {role} must be an existing directory: {raw}")
+    path = role_knowledge_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        raise HTTPException(500, f"Could not save role knowledge settings: {exc}") from exc
+    for state in tasks.values():
+        state.role_knowledge_path = getattr(settings, state.role.value)
+    save_tasks(tasks)
+    return settings
+
+
 def load_profiles() -> dict[str, ProjectProfile]:
     path = profiles_path()
     if not path.exists():
@@ -317,6 +356,18 @@ async def project_file(project_path: str, path: str):
         raise HTTPException(422, str(exc)) from exc
 
 
+@app.get("/api/workspace/raw")
+async def project_raw_file(project_path: str, path: str):
+    try:
+        file_path, media_type = workspace_preview_path(repository(project_path), path)
+        response = FileResponse(file_path, media_type=media_type, filename=file_path.name, content_disposition_type="inline")
+        response.headers["Content-Security-Policy"] = "sandbox"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.get("/api/workspace/changes")
 async def project_git_changes(project_path: str):
     try:
@@ -387,15 +438,28 @@ async def create_task(request: TaskRequest):
             409,
             "Another task is already running in this project path. Use a separate Git worktree path for parallel tasks.",
         )
+    task_branch = f"tasks/{request.task_id}"
+    try:
+        await task_branch_preflight(repo, task_branch, request.confirm_dirty_worktree)
+    except RuntimeError as exc:
+        message = str(exc)
+        detail = (
+            {"code": "dirty_worktree_confirmation_required", "message": message}
+            if message.startswith("Confirm that you know")
+            else message
+        )
+        raise HTTPException(409, detail) from exc
     run_id = uuid.uuid4().hex[:12]
     state = TaskState(
         id=run_id,
         task_id=request.task_id,
         session_name=request.session_name or request.task_id,
         project_path=str(repo),
-        branch=f"tasks/{request.task_id}",
+        branch=task_branch,
         base_branch=request.base_branch,
         guide_paths=request.guide_paths,
+        role=request.role,
+        role_knowledge_path=getattr(load_role_knowledge(), request.role.value),
         test_command=request.test_command,
         test_working_directory=request.test_working_directory,
         test_setup_enabled=request.test_setup_enabled,
@@ -545,6 +609,7 @@ def start_todo_task(owner: TaskState, todo: TodoItem) -> None:
         request=todo.content,
         base_branch=owner.base_branch,
         guide_paths=owner.guide_paths,
+        role=owner.role,
         test_command=owner.test_command,
         test_working_directory=owner.test_working_directory,
         test_setup_enabled=owner.test_setup_enabled,
@@ -567,6 +632,8 @@ def start_todo_task(owner: TaskState, todo: TodoItem) -> None:
         branch=branch,
         base_branch=request.base_branch,
         guide_paths=request.guide_paths,
+        role=request.role,
+        role_knowledge_path=getattr(load_role_knowledge(), request.role.value),
         test_command=request.test_command,
         test_working_directory=request.test_working_directory,
         test_setup_enabled=request.test_setup_enabled,
@@ -663,6 +730,15 @@ async def rename_task(run_id: str, request: RenameTaskRequest):
     """Rename the user-facing session label without changing its branch or task ID."""
     state = get_state(run_id)
     state.session_name = request.session_name
+    save_tasks(tasks)
+    return state
+
+
+@app.patch("/api/tasks/{run_id}/role", response_model=TaskState)
+async def set_task_role(run_id: str, request: TaskRoleRequest):
+    state = get_state(run_id)
+    state.role = request.role
+    state.role_knowledge_path = getattr(load_role_knowledge(), request.role.value)
     save_tasks(tasks)
     return state
 

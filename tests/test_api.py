@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,35 @@ from backend.app.models import AgentType, McpFailureMode, RunStatus, TaskRequest
 from backend.app.services import ClaudeEventStream, CodexEventStream, agent_error_detail, build_prompt, claude_response, codex_response, continue_task, execute_task, generate_commit_message, initial_agent_args, mcp_runtime_issue, preflight_project_mcp, resolve_guides, resume_agent_args, run_test_setup, test_setup_commands as setup_commands
 
 client = TestClient(app)
+
+
+def test_role_knowledge_settings_persist_and_follow_task_role(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TASKLOOM_ROLE_KNOWLEDGE_PATH", str(tmp_path / "roles.json"))
+    monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("Role guidance", encoding="utf-8")
+    response = client.put("/api/role-knowledge", json={"developer": str(docs)})
+    assert response.status_code == 200
+    assert client.get("/api/role-knowledge").json()["developer"] == str(docs)
+
+    state = TaskState(id="role-example", task_id="role-example", project_path=str(tmp_path), branch="tasks/role-example", status=RunStatus.passed, step="Done")
+    tasks[state.id] = state
+    try:
+        moved = client.patch(f"/api/tasks/{state.id}/role", json={"role": "developer"})
+        assert moved.status_code == 200
+        assert moved.json()["role_knowledge_path"] == str(docs)
+        assert resolve_guides(tmp_path, [state.role_knowledge_path]) == [docs / "guide.md"]
+        assert json.loads((tmp_path / "sessions.json").read_text(encoding="utf-8"))[state.id]["role"] == "developer"
+    finally:
+        tasks.pop(state.id, None)
+
+
+def test_role_knowledge_rejects_missing_directory(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TASKLOOM_ROLE_KNOWLEDGE_PATH", str(tmp_path / "roles.json"))
+    response = client.put("/api/role-knowledge", json={"analyst": str(tmp_path / "missing")})
+    assert response.status_code == 422
+    assert not (tmp_path / "roles.json").exists()
 
 
 def test_command_resolves_relative_executable_from_working_directory(monkeypatch):
@@ -111,6 +141,52 @@ def test_workspace_tree_is_bounded_to_useful_project_files(tmp_path: Path):
 def test_workspace_file_preview_rejects_paths_outside_repository(tmp_path: Path):
     with pytest.raises(ValueError, match="inside the project"):
         asyncio.run(services.workspace_file(tmp_path, "../secret.txt"))
+
+
+def test_workspace_file_identifies_browser_media_and_extracts_word_text(tmp_path: Path):
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"not-needed-for-metadata")
+    document = tmp_path / "notes.docx"
+    with ZipFile(document, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:body><w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>Second</w:t><w:tab/><w:t>paragraph</w:t></w:r></w:p></w:body></w:document>',
+        )
+
+    assert asyncio.run(services.workspace_file(tmp_path, "diagram.png"))["kind"] == "image"
+    word = asyncio.run(services.workspace_file(tmp_path, "notes.docx"))
+    assert word == {"path": "notes.docx", "kind": "word", "content": "First paragraph\n\nSecond\tparagraph"}
+
+
+def test_workspace_raw_preview_allows_only_images_and_pdf(tmp_path: Path):
+    image = tmp_path / "diagram.webp"
+    image.write_bytes(b"image")
+    text = tmp_path / "page.html"
+    text.write_text("<script>alert(1)</script>", encoding="utf-8")
+
+    path, media_type = services.workspace_preview_path(tmp_path, "diagram.webp")
+
+    assert path == image
+    assert media_type == "image/webp"
+    with pytest.raises(ValueError, match="cannot be opened as browser media"):
+        services.workspace_preview_path(tmp_path, "page.html")
+
+
+def test_workspace_raw_endpoint_streams_preview_with_security_headers(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"png-content")
+
+    response = client.get("/api/workspace/raw", params={"project_path": str(tmp_path), "path": "diagram.png"})
+
+    assert response.status_code == 200
+    assert response.content == b"png-content"
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["content-security-policy"] == "sandbox"
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_workspace_changes_parses_renames_and_untracked_files(monkeypatch, tmp_path: Path):
@@ -513,6 +589,12 @@ def test_new_tasks_use_the_tasks_branch_prefix(monkeypatch, tmp_path: Path):
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(main_module, "save_tasks", lambda states: None)
 
+    async def clean_preflight(repo, branch, confirmed):
+        assert (repo, branch, confirmed) == (tmp_path.resolve(), "tasks/podw-225", False)
+        return "main", False
+
+    monkeypatch.setattr(main_module, "task_branch_preflight", clean_preflight)
+
     def discard_background_task(coroutine):
         coroutine.close()
 
@@ -529,6 +611,92 @@ def test_new_tasks_use_the_tasks_branch_prefix(monkeypatch, tmp_path: Path):
     assert state.branch == "tasks/podw-225"
     assert state.base_branch == "sandbox"
     tasks.pop(state.id)
+
+
+def test_dirty_current_task_branch_requires_explicit_confirmation(monkeypatch, tmp_path: Path):
+    async def fake_command(args, cwd, timeout=900):
+        if args == ["git", "status", "--porcelain"]:
+            return 0, " M existing.py\n"
+        if args == ["git", "branch", "--show-current"]:
+            return 0, "tasks/podw-225\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(services, "command", fake_command)
+
+    with pytest.raises(RuntimeError, match="Confirm that you know"):
+        asyncio.run(services.task_branch_preflight(tmp_path, "tasks/podw-225", False))
+
+    assert asyncio.run(services.task_branch_preflight(tmp_path, "tasks/podw-225", True)) == (
+        "tasks/podw-225",
+        True,
+    )
+
+
+def test_dirty_worktree_cannot_be_carried_to_a_different_task_branch(monkeypatch, tmp_path: Path):
+    async def fake_command(args, cwd, timeout=900):
+        if args == ["git", "status", "--porcelain"]:
+            return 0, "?? local-notes.txt\n"
+        if args == ["git", "branch", "--show-current"]:
+            return 0, "tasks/podw-current\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(services, "command", fake_command)
+
+    with pytest.raises(RuntimeError, match="only on the current branch"):
+        asyncio.run(services.task_branch_preflight(tmp_path, "tasks/podw-next", True))
+
+
+def test_create_task_returns_a_confirmation_code_for_a_dirty_current_branch(monkeypatch, tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+
+    async def confirmation_required(repo, branch, confirmed):
+        raise RuntimeError("Confirm that you know the Git working tree has uncommitted changes before starting this session")
+
+    monkeypatch.setattr(main_module, "task_branch_preflight", confirmation_required)
+    response = client.post(
+        "/api/tasks",
+        json={"project_path": str(tmp_path), "task_id": "podw-225", "request": "continue with existing changes"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "dirty_worktree_confirmation_required"
+
+
+def test_execute_task_reuses_confirmed_dirty_current_branch_without_switching(monkeypatch, tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    request = TaskRequest(
+        project_path=str(tmp_path),
+        task_id="podw-225",
+        request="continue with existing changes",
+        confirm_dirty_worktree=True,
+    )
+    state = TaskState(
+        id="dirty-current-branch",
+        task_id=request.task_id,
+        project_path=str(tmp_path),
+        branch="tasks/podw-225",
+        status=RunStatus.queued,
+        step="Queued",
+    )
+    calls = []
+
+    async def fake_command(args, cwd, timeout=900):
+        calls.append(args)
+        if args == ["git", "status", "--porcelain"]:
+            return 0, " M existing.py\n"
+        if args == ["git", "branch", "--show-current"]:
+            return 0, "tasks/podw-225\n"
+        if args[0] == "codex":
+            return 1, '{"type":"error","message":"stop after branch preflight"}'
+        raise AssertionError(args)
+
+    monkeypatch.setattr(services, "command", fake_command)
+    monkeypatch.setattr(services.shutil, "which", lambda name: "codex")
+
+    asyncio.run(execute_task(request, state))
+
+    assert not any(args[:2] == ["git", "switch"] for args in calls)
+    assert "confirmed uncommitted changes" in state.logs[0]
 
 
 def test_parallel_tasks_require_separate_project_or_worktree_paths(monkeypatch, tmp_path: Path):
@@ -1014,7 +1182,7 @@ def test_required_mcp_initialization_failure_blocks_without_thread_id(monkeypatc
         step="Queued",
     )
 
-    async def fake_command(args, cwd, timeout=900):
+    async def fake_command(args, cwd, timeout=900, stdin_text=None):
         if args[1:5] == ["mcp", "get", "dws_project", "--json"]:
             return 0, '{"name":"dws_project","enabled":true}'
         if args[:3] == ["git", "status", "--porcelain"] or args[:3] == ["git", "switch", "-c"]:
@@ -1719,8 +1887,8 @@ def test_generate_commit_message_uses_the_task_codex_session(monkeypatch):
     )
     calls = []
 
-    async def fake_command(args, cwd, timeout=900):
-        calls.append((args, cwd, timeout))
+    async def fake_command(args, cwd, timeout=900, stdin_text=None):
+        calls.append((args, cwd, timeout, stdin_text))
         return 0, "\n".join(
             [
                 json.dumps({"type": "thread.started", "thread_id": "thread-219"}),
@@ -1733,9 +1901,9 @@ def test_generate_commit_message_uses_the_task_codex_session(monkeypatch):
 
     assert asyncio.run(generate_commit_message(state)) == "fix(podw-219): recover sessions when storage is unavailable"
     assert calls[0][0][:5] == ["codex", "exec", "resume", "--json", "thread-219"]
-    assert "exactly one concise, English Conventional Commit subject" in calls[0][0][-1]
-    assert "English Conventional Commit subject" in calls[0][0][-1]
-    assert "work completed in this task's current session" in calls[0][0][-1]
+    assert calls[0][0][-1] == "-"
+    assert "exactly one concise, English Conventional Commit subject" in calls[0][3]
+    assert "work completed in this task's current session" in calls[0][3]
 
 
 def test_continue_task_resumes_same_codex_session_and_retests(monkeypatch):
@@ -1751,9 +1919,11 @@ def test_continue_task_resumes_same_codex_session_and_retests(monkeypatch):
     )
     calls = []
 
-    async def fake_command(args, cwd, timeout=900):
+    async def fake_command(args, cwd, timeout=900, stdin_text=None):
         calls.append(args)
         if args[:3] == ["codex", "exec", "resume"]:
+            assert args[-1] == "-"
+            assert "Improve it" in stdin_text
             return 0, "\n".join(
                 [
                     json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
@@ -1781,7 +1951,7 @@ def test_execute_task_keeps_the_complete_failed_test_output(monkeypatch):
     test_output = "first failure detail\n" + ("diagnostic line\n" * 2_000) + "final failure detail"
     codex_finished = False
 
-    async def fake_command(args, cwd, timeout=900):
+    async def fake_command(args, cwd, timeout=900, stdin_text=None):
         nonlocal codex_finished
         if args[:2] == ["codex", "exec"]:
             codex_finished = True
