@@ -315,3 +315,228 @@ class TaskState(BaseModel):
     codex_thread_id: str = ""
     messages: list[ChatMessage] = Field(default_factory=list)
     todos: list[TodoItem] = Field(default_factory=list)
+
+
+# ===== SDLC PLATFORM MODELS =====
+
+class SDLCStatus(str, Enum):
+    """Extended statuses for SDLC workflow"""
+    created = "created"
+    analyzing = "analyzing"
+    human_review = "human_review"
+    analysis_approved = "analysis_approved"
+    backend_running = "backend_running"
+    n8n_running = "n8n_running"
+    frontend_running = "frontend_running"
+    testing = "testing"  # Reusing existing
+    human_qa = "human_qa"
+    revision = "revision"
+    blocked = "blocked"  # Reusing existing
+    failed = "failed"    # Reusing existing
+    done = "done"
+
+
+class AgentConfig(BaseModel):
+    """Configuration for a specific agent type within a project"""
+    enabled: bool = True
+    knowledge_path: str = ""
+    project_path: str = ""
+    system_prompt: str = ""
+    test_instructions: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = 300
+    max_retries: int = 2
+
+
+class ProjectWorkflowConfig(BaseModel):
+    """Workflow configuration for a project"""
+    stages: list[str] = Field(default_factory=lambda: ["analysis", "backend", "n8n", "frontend", "qa"])
+    sequential: bool = True
+    allow_parallel: bool = False
+    max_revision_attempts: int = 3
+    require_analysis_approval: bool = False
+    require_final_human_approval: bool = False
+
+
+class SDLCProjectConfig(BaseModel):
+    """SDLC-specific project configuration"""
+    id: str
+    name: str
+    description: str = ""
+    enabled: bool = True
+    sdlc_enabled: bool = True
+    workflow: ProjectWorkflowConfig = Field(default_factory=ProjectWorkflowConfig)
+    agents: dict[str, AgentConfig] = Field(default_factory=dict)
+    
+    @field_validator("id")
+    @classmethod
+    def valid_id(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", value):
+            raise ValueError("Project ID may only contain letters, numbers, dot, dash and underscore")
+        return value
+
+
+class Change(BaseModel):
+    """File change information"""
+    file: str
+    description: str
+    kind: str = "modified"  # modified, created, deleted
+
+
+class TestResults(BaseModel):
+    """Structured test results"""
+    executed: bool = False
+    passed: bool = False
+    results: list[dict] = Field(default_factory=list)
+
+
+class RevisionRequest(BaseModel):
+    """Request for revision from one agent to another"""
+    requesting_agent: str
+    target_agent: str
+    reason: str
+    description: str
+    affected_files: list[str] = Field(default_factory=list)
+    expected_result: str = ""
+    priority: str = "normal"  # low, normal, high, critical
+
+
+class HumanIntervention(BaseModel):
+    """Request for human intervention"""
+    id: str
+    task_id: str
+    requesting_agent: str
+    reason: str
+    description: str
+    context: dict = Field(default_factory=dict)
+    expected_action: str = ""
+    response_options: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    responded_at: datetime | None = None
+    response: str = ""
+    status: str = "pending"  # pending, responded, expired
+
+
+class AgentResult(BaseModel):
+    """Structured output from SDLC agents"""
+    agent: str
+    status: str  # "completed", "needs_human", "needs_revision", "blocked", "failed"
+    summary: str = ""
+    changes: list[Change] = Field(default_factory=list)
+    tests: TestResults = Field(default_factory=TestResults)
+    recommendations: dict[str, list[str]] = Field(default_factory=dict)
+    issues: list[str] = Field(default_factory=list)
+    revision_request: RevisionRequest | None = None
+    human_intervention: HumanIntervention | None = None
+    raw_output: str = ""
+    
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, value: str) -> str:
+        valid_statuses = {"completed", "needs_human", "needs_revision", "blocked", "failed"}
+        if value not in valid_statuses:
+            raise ValueError(f"Status must be one of: {valid_statuses}")
+        return value
+
+
+class SDLCTaskContext(BaseModel):
+    """Complete context for SDLC agent execution"""
+    task_id: str
+    project_config: SDLCProjectConfig
+    task_request: str
+    previous_results: dict[str, AgentResult] = Field(default_factory=dict)
+    agent_specific_knowledge: dict = Field(default_factory=dict)
+    test_instructions: dict = Field(default_factory=dict)
+    system_prompt: str = ""
+
+
+class SDLCTask(BaseModel):
+    """SDLC-specific task model extending TaskState"""
+    # Inherit all TaskState fields
+    base_task: TaskState
+    
+    # Task metadata
+    title: str = ""
+    description: str = ""
+    priority: str = "medium"
+    tags: list[str] = Field(default_factory=list)
+    
+    # SDLC-specific fields
+    sdlc_status: SDLCStatus = SDLCStatus.created
+    current_stage: str = ""
+    current_agent: str = ""
+    execution_attempt: int = 0
+    revision_count: int = 0
+    previous_status: SDLCStatus | None = None
+    transition_reason: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # SDLC execution data
+    project_config_id: str = ""
+    agent_results: dict[str, AgentResult] = Field(default_factory=dict)
+    human_interventions: list[HumanIntervention] = Field(default_factory=list)
+    revisions: list[RevisionRequest] = Field(default_factory=list)
+    test_results: dict[str, TestResults] = Field(default_factory=dict)
+    
+    # Checkpoint and recovery
+    checkpoint_path: str = ""
+    last_checkpoint: datetime | None = None
+
+
+class SDLCTaskRequest(BaseModel):
+    """Request to create a new SDLC task"""
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=10000)
+    project_id: str = Field(min_length=1)
+    priority: str = Field(default="medium")
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Task title cannot be empty")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def clean_description(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("priority")
+    @classmethod
+    def valid_priority(cls, value: str) -> str:
+        if value not in {"low", "medium", "high", "critical"}:
+            return "medium"
+        return value
+
+
+class HumanInterventionResponse(BaseModel):
+    """Response to a human intervention request"""
+    intervention_id: str
+    response: str
+    
+    @field_validator("response")
+    @classmethod
+    def clean_response(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Response cannot be empty")
+        return value
+
+
+class StageTransitionRequest(BaseModel):
+    """Request to transition task to next stage"""
+    task_id: str
+    stage: str
+    force: bool = False
+    
+    @field_validator("stage")
+    @classmethod
+    def valid_stage(cls, value: str) -> str:
+        valid_stages = {"analysis", "backend", "n8n", "frontend", "qa"}
+        if value not in valid_stages:
+            raise ValueError(f"Stage must be one of: {valid_stages}")
+        return value

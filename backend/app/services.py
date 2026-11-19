@@ -1405,3 +1405,577 @@ async def create_merge_request(state: TaskState) -> str:
     state.merge_request_url = urls[-1].rstrip(".,;)")
     state.step = "Merge request ready"
     return output
+
+
+
+# ===== SDLC PLATFORM SERVICES =====
+
+import asyncio
+import json
+import uuid
+import urllib.request
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+from .models import (
+    SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig,
+    SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention,
+    RevisionRequest, SDLCTaskContext, TaskState, RunStatus
+)
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL    = "qwen3.5:0.8b"
+
+
+class OllamaAgentRunner:
+    """Calls ollama /v1/chat/completions to run an SDLC agent."""
+
+    def __init__(self, base_url: str = OLLAMA_BASE_URL, model: str = OLLAMA_MODEL):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+
+    def _chat(self, system: str, user: str, timeout: int = 240) -> str:
+        payload = json.dumps({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            "stream": False,
+            "think": False,
+            "options": {"num_predict": 500, "temperature": 0.3},
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{self.base_url}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read())
+                # Native ollama /api/chat returns {"message": {"content": "..."}}
+                if "message" in data:
+                    return data["message"].get("content", "") or ""
+                # OpenAI-compatible /v1/chat/completions fallback
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        except Exception as exc:
+            raise RuntimeError(f"Ollama call failed: {exc}") from exc
+
+    def run_analysis(self, task: SDLCTask, project: SDLCProjectConfig) -> AgentResult:
+        agent_cfg = project.agents.get("analysis", AgentConfig())
+        system = agent_cfg.system_prompt or (
+            "You are an expert software analyst. Analyse the task and produce a "
+            "structured JSON report with keys: summary, functional_requirements, "
+            "technical_requirements, affected_components, risks, open_questions."
+        )
+        user = (
+            f"Project: {project.name}\n"
+            f"Task title: {task.title}\n"
+            f"Task description: {task.description}\n\n"
+            "Produce only the JSON report, no extra text."
+        )
+        raw = self._chat(system, user, timeout=agent_cfg.timeout_seconds)
+        # Try to parse JSON; fall back to plain text summary
+        try:
+            parsed = json.loads(raw)
+            summary = parsed.get("summary", raw[:500])
+        except (json.JSONDecodeError, TypeError):
+            parsed = {}
+            summary = raw[:500]
+
+        return AgentResult(
+            agent="analysis",
+            status="completed",
+            summary=str(summary),
+            changes=[],
+            tests={"executed": False, "passed": False, "results": []},
+            recommendations=(parsed.get("recommendations", {}) if isinstance(parsed.get("recommendations", {}), dict) else {}),
+            issues=[str(i) for i in (parsed.get("open_questions", []) if isinstance(parsed.get("open_questions", []), list) else [])],
+            revision_request=None,
+            raw_output=raw,
+        )
+
+    def run_agent(self, agent_key: str, task: SDLCTask, project: SDLCProjectConfig,
+                  previous_results: dict) -> AgentResult:
+        """Generic agent runner for backend / n8n / frontend / qa."""
+        agent_cfg = project.agents.get(agent_key, AgentConfig())
+        agent_labels = {
+            "backend":  "backend developer",
+            "n8n":      "n8n workflow engineer",
+            "frontend": "frontend developer",
+            "qa":       "QA engineer",
+        }
+        label = agent_labels.get(agent_key, agent_key)
+        system = agent_cfg.system_prompt or (
+            f"You are an expert {label}. Review the task and previous agent results, "
+            "then produce a JSON report with keys: summary, changes (list of "
+            "{file, description}), issues, recommendations."
+        )
+        prev_summary = "\n".join(
+            f"- {k}: {v.get('summary','') if isinstance(v, dict) else str(v)[:200]}"
+            for k, v in previous_results.items()
+        )
+        user = (
+            f"Project: {project.name}\n"
+            f"Task: {task.title}\n"
+            f"Description: {task.description}\n"
+            f"Previous agent results:\n{prev_summary}\n\n"
+            "Produce only the JSON report."
+        )
+        raw = self._chat(system, user, timeout=agent_cfg.timeout_seconds)
+        try:
+            parsed = json.loads(raw)
+            summary = parsed.get("summary", raw[:500])
+            changes = parsed.get("changes", [])
+            issues  = parsed.get("issues", [])
+        except (json.JSONDecodeError, TypeError):
+            parsed, summary, changes, issues = {}, raw[:500], [], []
+
+        # Coerce recommendations to dict[str, list[str]] as required by AgentResult
+        recs_raw = parsed.get("recommendations", {})
+        if isinstance(recs_raw, dict):
+            recommendations = {k: (v if isinstance(v, list) else [str(v)]) for k, v in recs_raw.items()}
+        elif isinstance(recs_raw, list):
+            recommendations = {"general": recs_raw} if recs_raw else {}
+        else:
+            recommendations = {}
+
+        # Coerce changes to list[Change]
+        clean_changes = []
+        if isinstance(changes, list):
+            for c in changes:
+                if isinstance(c, dict) and "file" in c:
+                    clean_changes.append(c)
+                elif isinstance(c, str):
+                    clean_changes.append({"file": c, "description": ""})
+
+        return AgentResult(
+            agent=agent_key,
+            status="completed",
+            summary=str(summary),
+            changes=clean_changes,
+            tests={"executed": False, "passed": False, "results": []},
+            recommendations=recommendations,
+            issues=[str(i) for i in (issues if isinstance(issues, list) else [])],
+            revision_request=None,
+            raw_output=raw,
+        )
+
+
+_ollama_runner = OllamaAgentRunner()
+
+
+class SDLCProjectManager:
+    """Manages SDLC project configurations"""
+    
+    def __init__(self, data_dir: Path = Path("data/projects")):
+        self.data_dir = data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.projects: Dict[str, SDLCProjectConfig] = {}
+        self.load_projects()
+    
+    def load_projects(self) -> None:
+        """Load all project configurations from disk"""
+        self.projects = {}
+        if not self.data_dir.exists():
+            return
+            
+        for project_file in self.data_dir.glob("*.json"):
+            try:
+                with open(project_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    project = SDLCProjectConfig(**data)
+                    self.projects[project.id] = project
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"Error loading project {project_file}: {e}")
+    
+    def save_project(self, project: SDLCProjectConfig) -> None:
+        """Save project configuration to disk"""
+        project_file = self.data_dir / f"{project.id}.json"
+        temp_file = project_file.with_suffix(".json.tmp")
+        
+        try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(project.model_dump(), f, indent=2, ensure_ascii=False)
+            temp_file.replace(project_file)
+            self.projects[project.id] = project
+        except OSError as e:
+            raise RuntimeError(f"Could not save project {project.id}: {e}")
+    
+    def get_project(self, project_id: str) -> Optional[SDLCProjectConfig]:
+        """Get project configuration by ID"""
+        return self.projects.get(project_id)
+    
+    def list_projects(self) -> List[SDLCProjectConfig]:
+        """List all project configurations"""
+        return list(self.projects.values())
+    
+    def delete_project(self, project_id: str) -> bool:
+        """Delete project configuration"""
+        if project_id not in self.projects:
+            return False
+            
+        project_file = self.data_dir / f"{project_id}.json"
+        if project_file.exists():
+            project_file.unlink()
+        del self.projects[project_id]
+        return True
+
+
+class SDLCTaskManager:
+    """Manages SDLC tasks and their lifecycle"""
+    
+    def __init__(self, data_dir: Path = Path("data/tasks")):
+        self.data_dir = data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.active_tasks: Dict[str, SDLCTask] = {}
+        self.task_workers: Dict[str, asyncio.Task] = {}
+    
+    def generate_task_id(self) -> str:
+        """Generate a unique task ID"""
+        return f"TASK-{uuid.uuid4().hex[:8].upper()}"
+    
+    async def create_task(self, request: SDLCTaskRequest, 
+                         project_config: SDLCProjectConfig,
+                         base_task_state: TaskState) -> SDLCTask:
+        """Create a new SDLC task"""
+        
+        # Generate unique task ID
+        task_id = self.generate_task_id()
+        
+        # Create SDLC task
+        sdlc_task = SDLCTask(
+            base_task=base_task_state,
+            title=request.title,
+            description=request.description,
+            priority=request.priority,
+            tags=request.tags,
+            sdlc_status=SDLCStatus.created,
+            current_stage="analysis",
+            current_agent="analysis",
+            project_config_id=project_config.id,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
+        )
+        
+        # Save task to disk
+        await self.save_task(sdlc_task)
+        
+        # Enqueue for analysis
+        await self.enqueue_task(sdlc_task)
+        
+        return sdlc_task
+    
+    async def save_task(self, task: SDLCTask) -> None:
+        """Save task state to disk"""
+        task_dir = self.data_dir / task.base_task.task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        
+        task_file = task_dir / "task.json"
+        temp_file = task_file.with_suffix(".json.tmp")
+        
+        try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(task.model_dump(), f, indent=2, ensure_ascii=False, default=str)
+            temp_file.replace(task_file)
+            
+            # Update in-memory cache
+            self.active_tasks[task.base_task.task_id] = task
+        except OSError as e:
+            raise RuntimeError(f"Could not save task {task.base_task.task_id}: {e}")
+    
+    async def load_task(self, task_id: str) -> Optional[SDLCTask]:
+        """Load task from disk"""
+        task_dir = self.data_dir / task_id
+        task_file = task_dir / "task.json"
+        
+        if not task_file.exists():
+            return None
+            
+        try:
+            with open(task_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            # Convert string dates back to datetime objects
+            for date_field in ['created_at', 'updated_at', 'last_checkpoint']:
+                if date_field in data and data[date_field]:
+                    data[date_field] = datetime.fromisoformat(data[date_field].replace('Z', '+00:00'))
+            
+            # Load base task state
+            base_task_data = data.pop('base_task')
+            base_task = TaskState(**base_task_data)
+            
+            # Create SDLC task
+            task = SDLCTask(base_task=base_task, **data)
+            
+            # Update in-memory cache
+            self.active_tasks[task_id] = task
+            return task
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            print(f"Error loading task {task_id}: {e}")
+            return None
+    
+    async def enqueue_task(self, task: SDLCTask) -> None:
+        """Enqueue task for execution in appropriate stage queue"""
+        # For now, transition to analyzing status
+        task.sdlc_status = SDLCStatus.analyzing
+        task.updated_at = datetime.now(timezone.utc)
+        await self.save_task(task)
+        
+        # Start analysis (in real implementation, this would be queued)
+        await self.execute_stage(task.base_task.task_id, "analysis")
+    
+    async def execute_stage(self, task_id: str, stage: str) -> None:
+        """Execute a specific stage for a task using the ollama agent runner."""
+        task = await self.load_task(task_id)
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+
+        # Update task state
+        task.current_stage = stage
+        task.current_agent = stage
+        task.updated_at = datetime.now(timezone.utc)
+
+        status_map = {
+            "analysis": SDLCStatus.analyzing,
+            "backend":  SDLCStatus.backend_running,
+            "n8n":      SDLCStatus.n8n_running,
+            "frontend": SDLCStatus.frontend_running,
+            "qa":       SDLCStatus.testing,
+        }
+        if stage in status_map:
+            task.sdlc_status = status_map[stage]
+
+        await self.save_task(task)
+        print(f"[SDLC] Starting {stage} stage for task {task_id}", flush=True)
+
+        # Load project config for agent settings
+        project_manager = SDLCProjectManager()
+        project = project_manager.get_project(task.project_config_id)
+        if not project:
+            print(f"[SDLC] Project {task.project_config_id} not found, skipping agent run", flush=True)
+            return
+
+        # Run in background so we don't block the HTTP response
+        asyncio.create_task(self._run_agent_async(task_id, stage, project))
+
+    async def _run_agent_async(self, task_id: str, stage: str,
+                               project: SDLCProjectConfig) -> None:
+        """Background coroutine: runs the ollama agent and saves the result."""
+        task = await self.load_task(task_id)
+        if not task:
+            return
+
+        try:
+            loop = asyncio.get_event_loop()
+            previous = {k: v.model_dump() for k, v in task.agent_results.items()}
+            print(f"[SDLC] Calling ollama for {stage} (task {task_id})...", flush=True)
+
+            if stage == "analysis":
+                result = await loop.run_in_executor(
+                    None, _ollama_runner.run_analysis, task, project
+                )
+            else:
+                result = await loop.run_in_executor(
+                    None, _ollama_runner.run_agent, stage, task, project, previous
+                )
+
+            print(f"[SDLC] Ollama returned for {stage} (raw len {len(result.raw_output)})", flush=True)
+
+            # Persist result
+            task.agent_results[stage] = result
+            task.updated_at = datetime.now(timezone.utc)
+            print(f"[SDLC] {stage} completed for {task_id}: {result.summary[:120]}", flush=True)
+            await self.save_task(task)
+
+            # Determine next step — reload fresh task from disk
+            fresh_task = await self.load_task(task_id)
+            if not fresh_task:
+                return
+            fresh_task.agent_results[stage] = result
+            fresh_task.updated_at = datetime.now(timezone.utc)
+
+            if result.status == "completed":
+                await self._advance_or_complete(fresh_task, project)
+            elif result.status == "needs_human":
+                fresh_task.sdlc_status = SDLCStatus.human_review
+            elif result.status in ("blocked", "failed"):
+                fresh_task.sdlc_status = SDLCStatus.failed
+            await self.save_task(fresh_task)
+
+        except Exception as exc:
+            import traceback
+            print(f"[SDLC] Agent {stage} error for {task_id}: {exc}", flush=True)
+            traceback.print_exc()
+            task = await self.load_task(task_id)
+            if task:
+                task.sdlc_status = SDLCStatus.failed
+                task.transition_reason = str(exc)
+                task.updated_at = datetime.now(timezone.utc)
+                await self.save_task(task)
+
+    async def _advance_or_complete(self, task: SDLCTask,
+                                   project: SDLCProjectConfig) -> None:
+        """Move task to the next workflow stage, or mark as done."""
+        stages = project.workflow.stages if project.workflow.stages else \
+            ["analysis", "backend", "n8n", "frontend", "qa"]
+
+        try:
+            idx = stages.index(task.current_stage)
+        except ValueError:
+            idx = -1
+
+        print(f"[SDLC] _advance_or_complete: current_stage={task.current_stage} idx={idx} stages={stages}", flush=True)
+
+        # Check approval gate after analysis
+        if task.current_stage == "analysis" and project.workflow.require_analysis_approval:
+            task.sdlc_status = SDLCStatus.human_review
+            print(f"[SDLC] Analysis approval required, pausing at human_review", flush=True)
+            return
+
+        # Find next enabled stage (skip disabled agents)
+        next_idx = idx + 1
+        while next_idx < len(stages):
+            candidate = stages[next_idx]
+            agent_cfg = project.agents.get(candidate, AgentConfig())
+            print(f"[SDLC] Checking stage {candidate} (idx {next_idx}): enabled={agent_cfg.enabled}", flush=True)
+            if agent_cfg.enabled:
+                break
+            next_idx += 1
+
+        if next_idx < len(stages):
+            next_stage = stages[next_idx]
+            print(f"[SDLC] Advancing to next stage: {next_stage}", flush=True)
+            # Update current_stage BEFORE execute_stage so re-entrant calls see the right value
+            task.current_stage = next_stage
+            task.current_agent = next_stage
+            await self.save_task(task)
+            await self.execute_stage(task.base_task.task_id, next_stage)
+        else:
+            # All stages done
+            task.sdlc_status = SDLCStatus.done
+            task.updated_at = datetime.now(timezone.utc)
+            print(f"[SDLC] Task {task.base_task.task_id} completed!", flush=True)
+    
+    async def transition_to_next_stage(self, task_id: str) -> bool:
+        """Transition task to next stage in workflow"""
+        task = await self.load_task(task_id)
+        if not task:
+            return False
+
+        project_manager = SDLCProjectManager()
+        project = project_manager.get_project(task.project_config_id)
+        if not project:
+            return False
+
+        await self._advance_or_complete(task, project)
+        await self.save_task(task)
+        return True
+    
+    async def create_human_intervention(self, task_id: str, agent: str,
+                                      reason: str, description: str,
+                                      context: dict, response_options: List[str]) -> str:
+        """Create a human intervention request"""
+        intervention_id = f"INT-{uuid.uuid4().hex[:8].upper()}"
+        
+        intervention = HumanIntervention(
+            id=intervention_id,
+            task_id=task_id,
+            requesting_agent=agent,
+            reason=reason,
+            description=description,
+            context=context,
+            response_options=response_options,
+            created_at=datetime.now(timezone.utc)
+        )
+        
+        # Save intervention to inbox
+        inbox_dir = Path("data/human-inbox/pending")
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        
+        intervention_file = inbox_dir / f"{intervention_id}.json"
+        with open(intervention_file, 'w', encoding='utf-8') as f:
+            json.dump(intervention.model_dump(), f, indent=2, ensure_ascii=False, default=str)
+        
+        # Update task status
+        task = await self.load_task(task_id)
+        if task:
+            task.sdlc_status = SDLCStatus.human_review
+            task.human_interventions.append(intervention)
+            await self.save_task(task)
+        
+        return intervention_id
+    
+    async def submit_human_response(self, intervention_id: str, response: str) -> bool:
+        """Submit response to human intervention and resume workflow"""
+        # Load intervention
+        inbox_dir = Path("data/human-inbox/pending")
+        intervention_file = inbox_dir / f"{intervention_id}.json"
+        
+        if not intervention_file.exists():
+            return False
+        
+        try:
+            with open(intervention_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            intervention = HumanIntervention(**data)
+            intervention.response = response
+            intervention.responded_at = datetime.now(timezone.utc)
+            intervention.status = "responded"
+            
+            # Move to resolved
+            resolved_dir = Path("data/human-inbox/resolved")
+            resolved_dir.mkdir(parents=True, exist_ok=True)
+            
+            resolved_file = resolved_dir / f"{intervention_id}.json"
+            with open(resolved_file, 'w', encoding='utf-8') as f:
+                json.dump(intervention.model_dump(), f, indent=2, ensure_ascii=False, default=str)
+            
+            # Remove from pending
+            intervention_file.unlink()
+            
+            # Resume task workflow
+            task = await self.load_task(intervention.task_id)
+            if task:
+                # Transition back to appropriate status based on stage
+                stage_status_map = {
+                    "analysis": SDLCStatus.analysis_approved,
+                    "qa": SDLCStatus.human_qa
+                }
+                
+                if task.current_stage in stage_status_map:
+                    task.sdlc_status = stage_status_map[task.current_stage]
+                else:
+                    # For other stages, continue to next stage
+                    await self.transition_to_next_stage(intervention.task_id)
+                
+                await self.save_task(task)
+            
+            return True
+            
+        except (json.JSONDecodeError, ValueError, OSError) as e:
+            print(f"Error processing human response: {e}")
+            return False
+    
+    async def list_tasks(self, status_filter: Optional[str] = None,
+                        project_filter: Optional[str] = None) -> List[SDLCTask]:
+        """List tasks with optional filters"""
+        tasks = []
+        
+        for task_dir in self.data_dir.iterdir():
+            if task_dir.is_dir():
+                task = await self.load_task(task_dir.name)
+                if task:
+                    # Apply filters
+                    if status_filter and task.sdlc_status.value != status_filter:
+                        continue
+                    if project_filter and task.project_config_id != project_filter:
+                        continue
+                    tasks.append(task)
+        
+        # Sort by creation date (newest first)
+        tasks.sort(key=lambda t: t.created_at, reverse=True)
+        return tasks

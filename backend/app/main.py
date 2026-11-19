@@ -6,6 +6,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +14,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RoleKnowledgeSettings, RunStatus, TaskRequest, TaskRoleRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
+from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse
 from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
+from .services import SDLCProjectManager, SDLCTaskManager
 
 scheduler_worker: asyncio.Task | None = None
 
@@ -895,6 +898,234 @@ async def merge_request(run_id: str):
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
+
+# ===== SDLC PLATFORM API ENDPOINTS =====
+
+# Initialize SDLC managers
+sdlc_project_manager = SDLCProjectManager()
+sdlc_task_manager = SDLCTaskManager()
+
+
+@app.get("/api/sdlc/projects", response_model=list[SDLCProjectConfig])
+async def list_sdlc_projects():
+    """List all SDLC project configurations"""
+    return sdlc_project_manager.list_projects()
+
+
+@app.get("/api/sdlc/projects/{project_id}", response_model=SDLCProjectConfig)
+async def get_sdlc_project(project_id: str):
+    """Get SDLC project configuration by ID"""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"SDLC project {project_id} not found")
+    return project
+
+
+@app.post("/api/sdlc/projects", response_model=SDLCProjectConfig)
+async def create_sdlc_project(project: SDLCProjectConfig):
+    """Create new SDLC project configuration"""
+    # Check if project already exists
+    existing = sdlc_project_manager.get_project(project.id)
+    if existing:
+        raise HTTPException(409, f"Project {project.id} already exists. Use PUT to update.")
+    
+    try:
+        sdlc_project_manager.save_project(project)
+        return project
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@app.put("/api/sdlc/projects/{project_id}", response_model=SDLCProjectConfig)
+async def update_sdlc_project(project_id: str, project: SDLCProjectConfig):
+    """Update existing SDLC project configuration"""
+    # Verify project exists
+    existing = sdlc_project_manager.get_project(project_id)
+    if not existing:
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    # Ensure ID consistency
+    if project.id != project_id:
+        raise HTTPException(400, "Project ID cannot be changed")
+    
+    try:
+        sdlc_project_manager.save_project(project)
+        return project
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@app.delete("/api/sdlc/projects/{project_id}", status_code=204)
+async def delete_sdlc_project(project_id: str):
+    """Delete SDLC project configuration"""
+    if not sdlc_project_manager.delete_project(project_id):
+        raise HTTPException(404, f"SDLC project {project_id} not found")
+
+
+@app.get("/api/sdlc/tasks", response_model=list[SDLCTask])
+async def list_sdlc_tasks(
+    status: Optional[str] = None,
+    project: Optional[str] = None
+):
+    """List SDLC tasks with optional filters"""
+    tasks = await sdlc_task_manager.list_tasks(status_filter=status, project_filter=project)
+    return tasks
+
+
+@app.get("/api/sdlc/tasks/{task_id}", response_model=SDLCTask)
+async def get_sdlc_task(task_id: str):
+    """Get SDLC task by ID"""
+    task = await sdlc_task_manager.load_task(task_id)
+    if not task:
+        raise HTTPException(404, f"SDLC task {task_id} not found")
+    return task
+
+
+@app.post("/api/sdlc/tasks", response_model=SDLCTask, status_code=202)
+async def create_sdlc_task(request: SDLCTaskRequest):
+    """Create a new SDLC task and enqueue it for analysis"""
+    project = sdlc_project_manager.get_project(request.project_id)
+    if not project:
+        raise HTTPException(404, f"Project {request.project_id} not found")
+
+    if not project.sdlc_enabled:
+        raise HTTPException(400, f"Project {request.project_id} does not have SDLC enabled")
+
+    task_uuid = uuid.uuid4().hex
+    base_task_state = TaskState(
+        id=task_uuid[:12],
+        task_id=f"sdlc-{task_uuid[:8]}",
+        session_name=request.title[:100],
+        project_path=project.agents.get("backend", AgentConfig()).project_path or "",
+        branch="",
+        base_branch="main",
+        guide_paths=[],
+        role="analyst",
+        role_knowledge_path="",
+        test_command=None,
+        test_working_directory=None,
+        test_setup_enabled=False,
+        auto_commit=False,
+        auto_generate_commit_message=False,
+        auto_push=False,
+        auto_merge_request=False,
+        test_setup_output="",
+        mcp_server_name=None,
+        mcp_failure_mode=McpFailureMode.warning,
+        mcp_status="not_configured",
+        mcp_message="",
+        git_provider=GitProvider.auto,
+        agent_type=AgentType.codex,
+        status=RunStatus.queued,
+        step="SDLC task created",
+        logs=[],
+        live_output="",
+        live_response="",
+        summary=request.description[:1000],
+        diff="",
+        changed_files=[],
+        test_output="",
+        commit_message="",
+        error=None,
+        committed=False,
+        pushed=False,
+        merge_request_url="",
+        codex_thread_id="",
+        messages=[ChatMessage(role="user", content=request.description)],
+        todos=[]
+    )
+
+    try:
+        task = await sdlc_task_manager.create_task(request, project, base_task_state)
+        return task
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to create SDLC task: {exc}") from exc
+
+
+@app.post("/api/sdlc/tasks/{task_id}/transition", response_model=SDLCTask)
+async def transition_sdlc_task(task_id: str, transition: StageTransitionRequest):
+    """Transition SDLC task to next stage"""
+    if task_id != transition.task_id:
+        raise HTTPException(422, "Task ID in URL and body must match")
+    
+    task = await sdlc_task_manager.load_task(task_id)
+    if not task:
+        raise HTTPException(404, f"SDLC task {task_id} not found")
+    
+    try:
+        if transition.force:
+            # Force transition to specified stage
+            await sdlc_task_manager.execute_stage(task_id, transition.stage)
+        else:
+            # Transition to next stage in workflow
+            success = await sdlc_task_manager.transition_to_next_stage(task_id)
+            if not success:
+                raise HTTPException(400, "Cannot transition task to next stage")
+        
+        # Return updated task
+        updated_task = await sdlc_task_manager.load_task(task_id)
+        return updated_task
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to transition task: {exc}") from exc
+
+
+@app.post("/api/sdlc/human-intervention", response_model=dict)
+async def create_human_intervention_request(
+    task_id: str,
+    agent: str,
+    reason: str,
+    description: str,
+    context: dict = {},
+    response_options: list[str] = []
+):
+    """Create a human intervention request"""
+    try:
+        intervention_id = await sdlc_task_manager.create_human_intervention(
+            task_id, agent, reason, description, context, response_options
+        )
+        return {"intervention_id": intervention_id, "task_id": task_id}
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to create human intervention: {exc}") from exc
+
+
+@app.post("/api/sdlc/human-intervention/{intervention_id}/respond", response_model=dict)
+async def respond_to_human_intervention(
+    intervention_id: str,
+    response: HumanInterventionResponse
+):
+    """Submit response to human intervention"""
+    if intervention_id != response.intervention_id:
+        raise HTTPException(422, "Intervention ID in URL and body must match")
+    
+    success = await sdlc_task_manager.submit_human_response(intervention_id, response.response)
+    if not success:
+        raise HTTPException(404, f"Human intervention {intervention_id} not found or already resolved")
+    
+    return {"success": True, "intervention_id": intervention_id}
+
+
+@app.get("/api/sdlc/human-inbox/pending", response_model=list[HumanIntervention])
+async def list_pending_human_interventions():
+    """List pending human intervention requests"""
+    inbox_dir = Path("data/human-inbox/pending")
+    interventions = []
+    
+    if inbox_dir.exists():
+        for intervention_file in inbox_dir.glob("*.json"):
+            try:
+                with open(intervention_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    intervention = HumanIntervention(**data)
+                    interventions.append(intervention)
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"Error loading intervention {intervention_file}: {e}")
+    
+    # Sort by creation date (oldest first)
+    interventions.sort(key=lambda x: x.created_at)
+    return interventions
+
+
+# ===== END SDLC API ENDPOINTS =====
 
 dist = Path(__file__).parents[2] / "frontend" / "dist"
 if dist.exists():

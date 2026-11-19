@@ -1,0 +1,7 @@
+{
+  "apiKeyHelper": "cmd /c echo ollama",
+  "apiBaseUrl": "http://localhost:11434/v1",
+  "model": "qwen3.5:0.8b",
+  "modelContextWindow": 32768,
+  "modelOutputTokenLimit": 4096
+}
