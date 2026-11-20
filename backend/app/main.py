@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 import json
+import mimetypes
 import os
 import sys
 import uuid
@@ -1142,6 +1143,10 @@ async def list_pending_human_interventions():
 
 
 # ===== END SDLC API ENDPOINTS =====
+
+# The Windows registry often maps .js to text/plain, which browsers refuse to run as a module script.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 
 dist = Path(__file__).parents[2] / "frontend" / "dist"
 if dist.exists():

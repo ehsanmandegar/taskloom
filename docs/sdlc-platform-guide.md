@@ -157,7 +157,7 @@ python test_sdlc_integration.py
 
 3. Access the application:
    - Main interface: http://localhost:5173
-   - API documentation: http://localhost:8000/docs
+   - API documentation: http://localhost:8003/docs
 
 ## Future Enhancements (Stage 2+)
 
@@ -183,7 +183,7 @@ python test_sdlc_integration.py
 ### Common Issues
 
 1. **API Connection Failed**
-   - Check if backend server is running on port 8000
+   - Check if backend server is running on port 8003
    - Verify CORS configuration in backend
    - Check network connectivity
 
@@ -211,7 +211,7 @@ tail -f backend.log
 # Press F12 → Console tab
 
 # API debugging
-curl http://localhost:8000/api/sdlc/projects
+curl http://localhost:8003/api/sdlc/projects
 ```
 
 ## Support and Maintenance

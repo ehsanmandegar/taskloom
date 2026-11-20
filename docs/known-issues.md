@@ -13,7 +13,12 @@
 - BOM و کاراکترهای خراب در `services.py` حذف شد.
 - تست‌ها: ۱۰۴ تست بک‌اند سبز؛ تست‌های جدید در `tests/test_sdlc_approval.py`.
 
-باقی‌مانده از این بخش: #5 (launcher) — مرحلهٔ ۲.
+## ✅ رفع‌شده در مرحلهٔ ۲ (2026-11-20)
+
+- #5 `TASKLOOM.bat` بازنویسی شد: build + `python main.py` روی :8003 (حالت `dev` با Vite)؛ بدون `taskkill`؛ هشدار نبود Ollama.
+- علت اصلی «صفحهٔ سفید» پیدا شد: رجیستری ویندوز `.js` را `text/plain` معرفی می‌کرد و مرورگر ماژول را اجرا نمی‌کرد؛ MIME در `main.py` ثابت شد.
+- `frontend/.env` (اشاره به mock روی :8000) حذف شد؛ proxy `/api` → :8003 در `vite.config.js` برگشت؛ hack `forceSDLC` از `main.jsx` حذف شد (حلقهٔ بی‌نهایتی دیده نشد: ۴ درخواست polling در ۱۵ ثانیه).
+- #18 فایل‌های mock/backup/یادداشت‌ها: فایل‌های untracked به `C:\Users\vira\taskloom-archive-2026-11-20` منتقل شدند؛ فایل‌های tracked (`ARCHITECTURE.md` خراب، راهنماهای Docker/Render بی‌پشتوانه، `START_HERE.*`، اسکریپت‌های `test_sdlc_*.py`، `backend.log`) با `git rm` حذف شدند. `SDLC_PLATFORM_GUIDE.md` به `docs/sdlc-platform-guide.md` منتقل شد.
 
 ## 🔴 بحرانی — سیستم را از کار می‌اندازد
 

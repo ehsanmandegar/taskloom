@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
     UI["Frontend<br/>React + Vite :5173<br/>main.jsx / sdlc_dashboard.jsx"]
-    API["Backend API<br/>FastAPI :8000<br/>backend/app/main.py"]
+    API["Backend API<br/>FastAPI :8003<br/>backend/app/main.py"]
     SVC["services.py<br/>SDLCProjectManager<br/>SDLCTaskManager<br/>OllamaAgentRunner / BackendAgent"]
     OLL["Ollama<br/>:11434 /api/chat"]
     CLI["Codex / Claude Code CLI<br/>(حالت تسک کلاسیک)"]
@@ -32,12 +32,12 @@ flowchart LR
 
 | فایل | مسئولیت |
 |---|---|
+| `main.py` (ریشه) | نقطهٔ ورود: `python main.py [--port 8003] [--no-browser] [--data-dir]`؛ UI build‌شده را هم سرو می‌کند |
 | `backend/app/main.py` | تعریف FastAPI app، CORS و routeها |
 | `backend/app/models.py` | مدل‌های Pydantic: `TaskState`, `SDLCTask`, `SDLCProjectConfig`, `AgentResult`, `HumanIntervention`, ... |
 | `backend/app/services.py` | منطق اصلی: اجرای CLI عامل، git، workspace، event streamها، مدیریت پروژه/تسک SDLC، فراخوانی Ollama |
 | `backend/app/guide_mcp.py` | یک MCP server روی stdio که فایل‌های Markdown راهنما را به عامل ارائه می‌دهد |
 | `backend/app/config.py` | تنظیمات از متغیرهای محیطی: `OLLAMA_BASE_URL`، `OLLAMA_MODEL` (پیش‌فرض `qwen3.5:0.8b`) |
-| `backend/simple_backend.py` | بک‌اند **mock** کامل؛ همان چیزی که `TASKLOOM.bat` اجرا می‌کند |
 | `frontend/src/main.jsx` | UI تسک کلاسیک + workspace explorer |
 | `frontend/src/sdlc_dashboard.jsx` | داشبورد کانبان SDLC، پروژه‌ها، inbox انسانی، GitHub |
 

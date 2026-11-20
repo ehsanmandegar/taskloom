@@ -10,3 +10,5 @@ frontend/dist/
 dist/
 *.pyc
 .env
+*.log
+graphify-out/

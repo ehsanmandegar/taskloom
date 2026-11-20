@@ -1,6 +1,6 @@
 # API
 
-مستندات تعاملی هنگام اجرای سرور: `http://localhost:8000/docs`
+مستندات تعاملی هنگام اجرای سرور: `http://localhost:8003/docs`
 
 > **به‌روزرسانی مرحلهٔ ۱:** `main.py` به نسخهٔ HEAD بازگردانده شد، پس ستون «HEAD» اکنون وضعیت فعلی است؛
 > ستون «main.py فعلی» نسخهٔ mock قبلی را نشان می‌دهد که کنار گذاشته شد. `POST /api/sdlc/tasks/{id}/approve` هم اضافه شد.
@@ -50,7 +50,7 @@
 ## نمونه
 
 ```bash
-curl -X POST http://localhost:8000/api/sdlc/tasks \
+curl -X POST http://localhost:8003/api/sdlc/tasks \
   -H "Content-Type: application/json" \
   -d '{"title":"Add login","description":"JWT auth","project_id":"dwss","priority":"high"}'
 ```
