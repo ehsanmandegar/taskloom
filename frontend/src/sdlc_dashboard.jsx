@@ -1154,7 +1154,7 @@ export default function SDLCDashboard() {
               {selectedTask.description && (
                 <div className="sdlc-detail-section">
                   <h4>شرح تسک <UiTag id="M3-C" name="Description"/></h4>
-                  <p style={{fontSize:'13px', lineHeight:'1.6', color:'#384239', whiteSpace:'pre-wrap'}}>{selectedTask.description}</p>
+                  <p className="sdlc-detail-text" dir="auto">{selectedTask.description}</p>
                 </div>
               )}
 
@@ -1169,16 +1169,25 @@ export default function SDLCDashboard() {
                         <span className="sdlc-agent-result-status">{result.status}</span>
                       </div>
                       {result.summary && (
-                        <p style={{fontSize:'12px', margin:'8px 0', color:'#384239'}}>{result.summary.substring(0, 200)}{result.summary.length > 200 ? '…' : ''}</p>
+                        <p className="sdlc-agent-result-summary" dir="auto">{result.summary}</p>
                       )}
                       {result.changes && result.changes.length > 0 && (
                         <div className="sdlc-agent-changes">
                           <small>تغییرات ({result.changes.length}):</small>
                           <ul>
-                            {result.changes.slice(0, 5).map((c, i) => (
-                              <li key={i}><code>{c.file}</code> — {c.description}</li>
+                            {result.changes.map((c, i) => (
+                              <li key={i}>
+                                <div className="sdlc-change-file" dir="ltr"><code>{c.file}</code>{c.kind ? <em className="sdlc-change-kind">{c.kind}</em> : null}</div>
+                                {c.description ? <div className="sdlc-change-desc" dir="auto">{c.description}</div> : null}
+                              </li>
                             ))}
                           </ul>
+                        </div>
+                      )}
+                      {result.issues && result.issues.length > 0 && (
+                        <div className="sdlc-agent-issues">
+                          <small>مسائل باز ({result.issues.length}):</small>
+                          <ul>{result.issues.map((issue, i) => <li key={i} dir="auto">{issue}</li>)}</ul>
                         </div>
                       )}
                       {result.raw_output && result.raw_output.length > 10 && (
@@ -1218,9 +1227,9 @@ export default function SDLCDashboard() {
                       ))}
                     </div>
                   ) : (
-                    <p className="sdlc-intervention-hint">این تسک هنوز در هیچ پوشهٔ git کار نکرده است؛ برنچ sdlc/&lt;task-id&gt; هنگام اجرای اولین مرحله ساخته می‌شود.</p>
+                    <p className="sdlc-intervention-hint">این تسک هنوز در هیچ پوشهٔ git کار نکرده است؛ برنچ <code dir="ltr">sdlc/&lt;task-id&gt;</code> هنگام اجرای اولین مرحله ساخته می‌شود.</p>
                   )}
-                  <p className="sdlc-intervention-hint">اگر URL و Token را خالی بگذارید، github_config همان agent در پروژه یا متغیر محیطی GITHUB_TOKEN استفاده می‌شود. Token جایی ذخیره نمی‌شود.</p>
+                  <p className="sdlc-intervention-hint">اگر URL و Token را خالی بگذارید، <code dir="ltr">github_config</code> همان agent در پروژه یا متغیر محیطی <code dir="ltr">GITHUB_TOKEN</code> استفاده می‌شود. Token جایی ذخیره نمی‌شود.</p>
                   {['backend', 'n8n', 'frontend'].map(agent => (
                     <div key={agent} style={{marginBottom: '16px', borderBottom: '1px solid #e2e3dd', paddingBottom: '12px'}}>
                       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'}}>
@@ -1240,6 +1249,7 @@ export default function SDLCDashboard() {
                             <input
                               type="text"
                               placeholder="https://github.com/user/repo"
+                              dir="ltr"
                               value={githubCredentials[agent].url}
                               onChange={(e) => setGithubCredentials({
                                 ...githubCredentials,
@@ -1255,6 +1265,7 @@ export default function SDLCDashboard() {
                               <input
                                 type={githubCredentials[agent].showToken ? "text" : "password"}
                                 placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                                dir="ltr"
                                 value={githubCredentials[agent].token}
                                 onChange={(e) => setGithubCredentials({
                                   ...githubCredentials,

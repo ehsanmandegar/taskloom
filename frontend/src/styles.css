@@ -2868,3 +2868,56 @@ html[data-theme="dark"] .sdlc-intervention-hint {
 }
 .todo-modal > .ui-tag { position: absolute; top: 12px; left: 48px; }
 html[data-theme="dark"] .ui-tag { color: #b7c7b5; border-color: #5d6b5e; background: rgba(183, 199, 181, 0.08); }
+
+/* M3 TaskDetail: sections are flex items of a scrolling body; never let them shrink (that clipped
+   M3-C..M3-F because .sdlc-detail-section has overflow:hidden), let the body scroll instead. */
+.sdlc-task-detail-modal .sdlc-form-body > * { flex-shrink: 0; }
+.sdlc-task-detail-modal .sdlc-form-body { gap: 0; }
+.sdlc-detail-section h4 .ui-tag, .ui-tag { text-transform: none; letter-spacing: 0; }
+.sdlc-detail-text {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: #384239;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sdlc-agent-result-summary {
+  margin: 8px 0;
+  font-size: 12px;
+  line-height: 1.8;
+  color: #384239;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sdlc-agent-changes ul, .sdlc-agent-issues ul {
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding-inline-start: 18px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #384239;
+}
+.sdlc-agent-changes li, .sdlc-agent-issues li { overflow-wrap: anywhere; }
+.sdlc-agent-issues { margin-top: 8px; }
+.sdlc-agent-issues small, .sdlc-agent-changes small { font-size: 11px; color: #6b7a6c; }
+.sdlc-change-kind { font-style: normal; font-size: 10px; color: #899087; }
+.sdlc-task-detail-modal .sdlc-review-row > *:last-child { overflow-wrap: anywhere; min-width: 0; }
+.sdlc-task-detail-modal input { max-width: 100%; box-sizing: border-box; }
+html[data-theme="dark"] .sdlc-detail-text,
+html[data-theme="dark"] .sdlc-agent-result-summary,
+html[data-theme="dark"] .sdlc-agent-changes ul,
+html[data-theme="dark"] .sdlc-agent-issues ul { color: #cfe3cc; }
+.sdlc-agent-changes li { margin-bottom: 6px; }
+.sdlc-change-file { display: flex; gap: 6px; align-items: baseline; text-align: left; }
+.sdlc-change-file .sdlc-change-kind { margin-inline-start: auto; }
+.sdlc-change-desc { color: #6b7a6c; }
+html[data-theme="dark"] .sdlc-change-desc { color: #9fb79c; }
+.sdlc-agent-changes ul, .sdlc-agent-issues ul { overflow-x: hidden; overflow-y: auto; list-style-position: inside; padding-inline-start: 0; }
+.sdlc-agent-issues li { unicode-bidi: plaintext; }
+.sdlc-agent-changes ul { list-style: none; }
+.sdlc-agent-changes li { padding-bottom: 6px; border-bottom: 1px dashed #e2e3dd; }
+.sdlc-agent-changes li:last-child { border-bottom: none; }
+html[data-theme="dark"] .sdlc-agent-changes li { border-bottom-color: #0b3d27; }
