@@ -2176,6 +2176,45 @@ class SDLCTaskManager:
         return await self._ask_human(task, agent, context.get("kind", "manual"), reason, description,
                                      response_options, context)
 
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task's folder and its inbox items. Refuses while one of its stages is running."""
+        if self.is_running(task_id):
+            raise ValueError(f"Task {task_id} has a stage running; wait for it to finish before deleting")
+        task_dir = self.data_dir / task_id
+        if not (task_dir / "task.json").exists():
+            return False
+        for folder in ("pending", "resolved"):
+            for item in (self.inbox_dir / folder).glob("*.json"):
+                try:
+                    if json.loads(item.read_text(encoding="utf-8")).get("task_id") == task_id:
+                        item.unlink(missing_ok=True)
+                except (OSError, json.JSONDecodeError):
+                    continue
+        for attempt in range(20):  # Windows: a reader may briefly hold a file open
+            try:
+                shutil.rmtree(task_dir)
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                await asyncio.sleep(0.05)
+        self.active_tasks.pop(task_id, None)
+        self.live_states.pop(task_id, None)
+        return True
+
+    async def project_task_ids(self, project_id: str) -> List[str]:
+        return [task.base_task.task_id for task in await self.list_tasks(project_filter=project_id)]
+
+    async def delete_project_tasks(self, project_id: str) -> List[str]:
+        """Delete every task of a project; nothing is deleted if any of them is running."""
+        task_ids = await self.project_task_ids(project_id)
+        running = [task_id for task_id in task_ids if self.is_running(task_id)]
+        if running:
+            raise ValueError(f"Tasks still running: {', '.join(running)}; wait for them before deleting the project")
+        return [task_id for task_id in task_ids if await self.delete_task(task_id)]
+
     def list_pending_interventions(self) -> List[HumanIntervention]:
         interventions = []
         for path in (self.inbox_dir / "pending").glob("*.json"):

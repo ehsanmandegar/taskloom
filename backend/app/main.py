@@ -975,11 +975,37 @@ async def update_sdlc_project(project_id: str, project: SDLCProjectConfig):
         raise HTTPException(500, str(exc)) from exc
 
 
-@app.delete("/api/sdlc/projects/{project_id}", status_code=204)
+@app.get("/api/sdlc/projects/{project_id}/tasks/count")
+async def count_sdlc_project_tasks(project_id: str):
+    """How many tasks a project delete would remove (shown in the confirmation dialog)."""
+    return {"count": len(await sdlc_task_manager.project_task_ids(project_id))}
+
+
+@app.delete("/api/sdlc/projects/{project_id}")
 async def delete_sdlc_project(project_id: str):
-    """Delete SDLC project configuration"""
-    if not sdlc_project_manager.delete_project(project_id):
+    """Delete an SDLC project together with its tasks and their inbox items.
+
+    Nothing is deleted while one of the project's tasks is running. Git repositories and their
+    sdlc/<task-id> branches are left untouched."""
+    if not sdlc_project_manager.get_project(project_id):
         raise HTTPException(404, f"SDLC project {project_id} not found")
+    try:
+        deleted = await sdlc_task_manager.delete_project_tasks(project_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    sdlc_project_manager.delete_project(project_id)
+    return {"project_id": project_id, "deleted_tasks": deleted}
+
+
+@app.delete("/api/sdlc/tasks/{task_id}")
+async def delete_sdlc_task(task_id: str):
+    """Delete one SDLC task and its inbox items."""
+    try:
+        if not await sdlc_task_manager.delete_task(task_id):
+            raise HTTPException(404, f"SDLC task {task_id} not found")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"task_id": task_id, "deleted": True}
 
 
 @app.get("/api/sdlc/tasks", response_model=list[SDLCTask])

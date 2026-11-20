@@ -558,23 +558,24 @@ export default function SDLCDashboard() {
 
   // Handle delete project
   const handleDeleteProject = async (projectId) => {
-    const confirmDelete = confirm(`آیا مطمئن هستید که می‌خواهید پروژه "${projectId}" را حذف کنید؟\nاین عملیات غیرقابل بازگشت است.`);
-    
-    if (!confirmDelete) return;
-    
+    let taskCount = 0;
     try {
-      const response = await fetch(`${API}/api/sdlc/projects/${projectId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      
-      if (!response.ok) throw new Error('خطا در حذف پروژه');
-      
+      taskCount = (await readJsonOrThrow(await fetch(`${API}/api/sdlc/projects/${projectId}/tasks/count`))).count;
+    } catch (err) { /* the confirmation still works without the count */ }
+    const confirmDelete = confirm(
+      `آیا مطمئن هستید که می‌خواهید پروژه "${projectId}" را حذف کنید؟\n` +
+      (taskCount ? `${taskCount} تسک این پروژه و درخواست‌های inbox آن‌ها هم حذف می‌شوند.\n` : '') +
+      'ریپوهای git و برنچ‌های تسک‌ها دست نمی‌خورند.\nاین عملیات غیرقابل بازگشت است.'
+    );
+    if (!confirmDelete) return;
+
+    try {
+      const result = await readJsonOrThrow(await fetch(`${API}/api/sdlc/projects/${projectId}`, { method: 'DELETE' }));
       await loadSDLCData();
       setError('');
-      alert(`[A2 ProjectDeleted] پروژه "${projectId}" با موفقیت حذف شد`);
+      alert(`[A2 ProjectDeleted] پروژه "${projectId}" و ${result.deleted_tasks.length} تسک آن حذف شدند`);
     } catch (err) {
-      setError(err.message);
+      setError(`خطا در حذف پروژه: ${err.message}`);
     }
   };
   
