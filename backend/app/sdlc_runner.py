@@ -17,7 +17,7 @@ from .models import (
     AgentConfig, AgentResult, AgentType, Change, HumanIntervention, RevisionRequest,
     SDLCProjectConfig, SDLCTask, StageRunner, TestResults,
 )
-from .sdlc_git import prepare_task_branch
+from .sdlc_git import ensure_workspace, prepare_task_branch, resolve_token
 from .process_tools import process_image
 from .services import (
     _command_started_handler,
@@ -40,11 +40,12 @@ TEST_OUTPUT_TAIL = 4_000
 Snapshot = dict[str, tuple[int, int]]
 
 
-def resolve_runner(config: AgentConfig) -> StageRunner:
-    """Pick who runs a stage; `auto` prefers a CLI agent whenever the stage has a working folder."""
+def resolve_runner(config: AgentConfig, workdir: str | None = None) -> StageRunner:
+    """Pick who runs a stage; `auto` prefers a CLI agent whenever the stage has a working folder
+    (its own project_path, or the project repository passed as `workdir`)."""
     if config.runner != StageRunner.auto:
         return config.runner
-    if config.project_path:
+    if workdir if workdir is not None else config.project_path:
         for runner in (StageRunner.claude, StageRunner.codex):
             if shutil.which(runner.value):
                 return runner
@@ -218,19 +219,26 @@ def record_agent_process(pid_file: Path, stage: str):
 
 
 async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, runner: StageRunner,
-                        pid_file: Path | None = None) -> AgentResult:
-    """Run one SDLC stage with Claude Code or Codex inside the stage's project folder."""
+                        pid_file: Path | None = None, repo_token: str | None = None) -> AgentResult:
+    """Run one SDLC stage with Claude Code or Codex inside the stage's folder (or the project repository)."""
     agent_type = AgentType.claude if runner == StageRunner.claude else AgentType.codex
     display_name = agent_name(agent_type)
-    if not config.project_path:
-        raise RuntimeError(f"Stage '{stage}' needs a project_path to run {display_name}")
-    workdir = Path(config.project_path).expanduser().resolve()
+    uses_project_repo = project.repository.mode.value != "none" and not config.project_path
+    if project.repository.mode.value != "none":
+        # Clone (existing repo) or initialise (new project) the repository before the first stage.
+        await ensure_workspace(project, repo_token)
+    stage_path = project.stage_path(stage)
+    if not stage_path:
+        raise RuntimeError(f"Stage '{stage}' needs a project_path (or a project repository) to run {display_name}")
+    workdir = Path(stage_path).expanduser().resolve()
     if not workdir.is_dir():
         raise RuntimeError(f"Project folder for stage '{stage}' does not exist: {workdir}")
 
     executable = agent_executable(agent_type)
-    # In a Git repository every task works on its own branch (sdlc/<task-id>).
-    await prepare_task_branch(task, workdir, str(config.github_config.get("branch") or "main"))
+    # In a Git repository every task works on its own branch (sdlc/<task-id>), started from the
+    # freshly fetched remote base branch when the repository has an origin.
+    base_branch = project.repository.default_branch if uses_project_repo else str(config.github_config.get("branch") or "main")
+    await prepare_task_branch(task, workdir, base_branch, resolve_token(repo_token) if project.repository.mode.value != "none" else None)
     prompt = build_stage_prompt(stage, task, project, config, workdir)
     state = task.base_task
     state.step = f"{display_name} is running the {stage} stage"

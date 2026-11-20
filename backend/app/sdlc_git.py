@@ -8,6 +8,7 @@ GitHub tokens are used per request and never written to disk or to a Git remote.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -37,9 +38,12 @@ async def git_root(path: Path) -> Path | None:
     return Path(output.strip()).resolve() if code == 0 and output.strip() else None
 
 
-async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str) -> TaskRepo | None:
+async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str,
+                              token: str | None = None) -> TaskRepo | None:
     """Put the repository containing `workdir` on the task's branch, creating it from the base once.
 
+    When the task branch is new and the repository has an `origin`, fetch first and branch from the
+    latest `origin/<base>`, so every task starts from current remote code.
     Raises RuntimeError when the repository has uncommitted changes on another branch, so work from
     different tasks (or from the user) is never mixed into one branch.
     """
@@ -49,16 +53,24 @@ async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str) -
     branch = task_branch(task)
     key = str(root)
     current, _ = await task_branch_preflight(root, branch, confirmed_dirty_worktree=True)
-    # Branch from the configured base when it exists (locally or on origin), else from the current branch.
+    code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], root)
+    branch_exists = code == 0
+    if not branch_exists and await has_remote(root, "origin"):
+        await fetch_origin(root, token)
+    # Branch from the configured base: origin/<base> after a fetch, else local <base>, else the current branch.
     source, base = current or "HEAD", current or "main"
     if base_branch:
-        try:
-            source, base = await base_branch_ref(root, base_branch), base_branch
-        except RuntimeError:
-            pass
+        remote_ref = f"refs/remotes/origin/{base_branch}"
+        code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"{remote_ref}^{{commit}}"], root)
+        if code == 0:
+            source, base = f"origin/{base_branch}", base_branch
+        else:
+            try:
+                source, base = await base_branch_ref(root, base_branch), base_branch
+            except RuntimeError:
+                pass
     if current != branch:
-        code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], root)
-        args = ["git", "switch", branch] if code == 0 else ["git", "switch", "-c", branch, source]
+        args = ["git", "switch", branch] if branch_exists else ["git", "switch", "-c", branch, source]
         code, output = await command(args, root)
         if code:
             raise RuntimeError(output.strip() or f"Could not switch {root} to {branch}")
@@ -67,6 +79,130 @@ async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str) -
         recorded = TaskRepo(path=key, branch=branch, base_branch=base)
         task.repos[key] = recorded
     return recorded
+
+
+async def has_remote(root: Path, name: str) -> bool:
+    code, output = await command(["git", "remote"], root)
+    return code == 0 and name in output.split()
+
+
+def auth_args(token: str | None) -> list[str]:
+    """git -c options that send the token as an HTTP header for this one command only.
+
+    The token never lands in a URL, in .git/config, or in the remote's name."""
+    if not token:
+        return []
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}"]
+
+
+def redact_auth(text: str, token: str | None) -> str:
+    if not token:
+        return text
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return text.replace(token, "***").replace(basic, "***")
+
+
+async def fetch_origin(root: Path, token: str | None) -> None:
+    code, output = await command(["git", *auth_args(token), "fetch", "--prune", "origin"], root, 300)
+    if code:
+        raise RuntimeError("git fetch failed: " + redact_auth(output.strip(), token))
+
+
+def clean_github_url(repo_url: str) -> str:
+    owner, name = parse_github_url(repo_url)
+    return f"https://github.com/{owner}/{name}.git"
+
+
+async def ensure_workspace(project, token: str | None) -> Path:
+    """Make sure the project's repository exists locally before a stage runs.
+
+    existing: clone `repository.url` into the workspace once (later tasks fetch it).
+    create:   start a local repository with an initial commit; GitHub comes on the first push.
+    """
+    repository = project.repository
+    path = Path(project.workspace_path()).expanduser()
+    token = resolve_token(token)
+    is_repo = (path / ".git").exists()
+
+    if repository.mode.value == "existing":
+        if not repository.url:
+            raise RuntimeError("The project uses an existing repository but its URL is empty")
+        clean = clean_github_url(repository.url)
+        if not is_repo:
+            if path.exists() and any(path.iterdir()):
+                raise RuntimeError(f"{path} is not empty and is not a Git repository; choose an empty folder for the clone")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            code, output = await command(["git", *auth_args(token), "clone", clean, str(path)], path.parent, 1800)
+            if code:
+                raise RuntimeError("git clone failed: " + redact_auth(output.strip(), token))
+        else:
+            code, origin = await command(["git", "remote", "get-url", "origin"], path)
+            if code or parse_github_url(origin.strip()) != parse_github_url(repository.url):
+                raise RuntimeError(f"{path} is a Git repository whose origin is not {repository.url}")
+        return path
+
+    if repository.mode.value == "create" and not is_repo:
+        path.mkdir(parents=True, exist_ok=True)
+        branch = repository.default_branch or "main"
+        code, output = await command(["git", "init", "-q", "-b", branch], path)
+        if code:
+            raise RuntimeError(output.strip() or "git init failed")
+        if not any(child.name != ".git" for child in path.iterdir()):
+            (path / "README.md").write_text(f"# {project.name}\n\n{project.description}\n", encoding="utf-8")
+        await command(["git", "add", "-A"], path)
+        code, output = await command(["git", "commit", "-q", "-m", "Initial commit"], path)
+        if code:
+            raise RuntimeError("Initial commit failed (is git user.name/user.email configured?): " + output.strip())
+    if repository.url and (path / ".git").exists() and not await has_remote(path, "origin"):
+        await command(["git", "remote", "add", "origin", clean_github_url(repository.url)], path)
+    return path
+
+
+async def describe_new_repository(project, token: str | None) -> dict:
+    """Validate a token before the project's repository exists: who will own the new repo."""
+    token = resolve_token(token)
+    if not token:
+        raise GitHubError("A GitHub token is required (save one in the project, or set GITHUB_TOKEN)")
+    status, user = await github_api("GET", "/user", token)
+    if status != 200:
+        raise GitHubError("The GitHub token is invalid or expired" if status == 401 else _github_message(status, user))
+    name = (project.repository.name or project.id).strip()
+    return {"status": "valid", "owner": user["login"], "repo": name, "will_create": True,
+            "private": project.repository.private}
+
+
+async def create_github_repository(project, token: str | None) -> str:
+    """Create the project's private repo under the token's account, push the base branch, return its URL."""
+    token = resolve_token(token)
+    if not token:
+        raise GitHubError("A GitHub token is required to create the repository (save one in the project, or set GITHUB_TOKEN)")
+    repository = project.repository
+    name = (repository.name or project.id).strip()
+    status, user = await github_api("GET", "/user", token)
+    if status != 200:
+        raise GitHubError("The GitHub token is invalid or expired" if status == 401 else _github_message(status, user))
+    owner = user["login"]
+    status, payload = await github_api("POST", "/user/repos", token, {
+        "name": name, "private": repository.private, "auto_init": False,
+        "description": (project.description or f"{project.name} (managed by Taskloom SDLC)")[:350],
+    })
+    if status == 422 and "already exists" in json.dumps(payload):
+        raise GitHubError(f"{owner}/{name} already exists on GitHub. Use it as the project's existing repository, "
+                          "or set a different repository name.")
+    if status != 201:
+        raise GitHubError(_github_message(status, payload))
+    url = payload["html_url"]
+    root = Path(project.workspace_path())
+    if await has_remote(root, "origin"):
+        await command(["git", "remote", "set-url", "origin", clean_github_url(url)], root)
+    else:
+        await command(["git", "remote", "add", "origin", clean_github_url(url)], root)
+    base = repository.default_branch or "main"
+    code, output = await command(["git", *auth_args(token), "push", "origin", f"refs/heads/{base}:refs/heads/{base}"], root, 300)
+    if code:
+        raise GitHubError(f"Created {url}, but pushing `{base}` failed: " + redact_auth(output.strip(), token))
+    return url
 
 
 def redact(text: str, token: str | None) -> str:

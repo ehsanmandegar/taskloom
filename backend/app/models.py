@@ -1,4 +1,5 @@
 from enum import Enum
+from pathlib import Path
 from datetime import datetime, timezone
 import re
 
@@ -381,6 +382,25 @@ class ProjectWorkflowConfig(BaseModel):
     auto_resume_interrupted: bool = False  # re-run a stage cut off by a server restart without asking
 
 
+class RepositoryMode(str, Enum):
+    none = "none"          # stages use their own project_path; nothing is published automatically
+    create = "create"      # from scratch: Taskloom creates a private GitHub repo on the first push
+    existing = "existing"  # Taskloom clones `url` once and fetches it before every task
+
+
+class ProjectRepository(BaseModel):
+    """The single Git/GitHub repository an SDLC project works in (monorepo: backend/, frontend/, ...)."""
+    mode: RepositoryMode = RepositoryMode.none
+    url: str = ""                 # https://github.com/<owner>/<name>; filled in after creation in `create` mode
+    name: str = ""                # repo name to create; defaults to the project id
+    local_path: str = ""          # local clone; defaults to ~/taskloom-workspaces/<project-id>
+    default_branch: str = "main"
+    private: bool = True
+    github_token: str = ""        # write-only: moved into the encrypted secret store on save
+    token_saved: bool = False
+    clear_token: bool = False
+
+
 class SDLCProjectConfig(BaseModel):
     """SDLC-specific project configuration"""
     id: str
@@ -390,7 +410,19 @@ class SDLCProjectConfig(BaseModel):
     sdlc_enabled: bool = True
     workflow: ProjectWorkflowConfig = Field(default_factory=ProjectWorkflowConfig)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
-    
+    repository: ProjectRepository = Field(default_factory=ProjectRepository)
+
+    def workspace_path(self) -> str:
+        """Local folder of the project repository ("" when the project has none)."""
+        if self.repository.mode == RepositoryMode.none:
+            return self.repository.local_path
+        return self.repository.local_path or str(Path.home() / "taskloom-workspaces" / self.id)
+
+    def stage_path(self, stage: str) -> str:
+        """Where a stage works: its own project_path, else the project repository."""
+        config = self.agents.get(stage)
+        return (config.project_path if config else "") or self.workspace_path()
+
     @field_validator("id")
     @classmethod
     def valid_id(cls, value: str) -> str:

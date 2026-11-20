@@ -22,13 +22,14 @@
 | `M3-C` | Description — شرح تسک | `description` |
 | `M3-D` | AgentResults — نتیجهٔ هر مرحله | `agent_results` |
 | `M3-E` | RunInfo — اطلاعات اجرا | `revision_count`، `created_at`، ... |
-| `M3-F` | GitHub — برنچ، commit، push و PR | `repos`، endpointهای `github/*` |
+| `M3-F` | GitHub — برنچ، commit، push و PR؛ برای پروژه‌های دارای ریپو دکمه‌های یک‌کلیکی بالای بخش | `repos`، endpointهای `github/*` |
 
 ## مراحل M4 (فرم پروژه)
 
 | کد | مرحله |
 |---|---|
 | `M4-1` | ProjectInfo — شناسه، نام، توضیحات |
+| `M4-1R` | Repository — ریپوی پروژه: بدون ریپو / پروژهٔ جدید / ریپوی موجود، token، پوشهٔ محلی |
 | `M4-2` | Workflow — مراحل، دروازه‌های تأیید، سقف بازبینی |
 | `M4-3` | Agents — مسیرها، prompt، تست، GitHub و token هر agent |
 | `M4-4` | Review — تأیید نهایی |
@@ -42,5 +43,6 @@
 | `A3` | GitHubValidate — نتیجهٔ «بررسی دسترسی» در M3-F |
 | `A4` | CommitPush — نتیجهٔ «Commit و Push» در M3-F |
 | `A5` | PullRequest — نتیجهٔ «Pull Request» در M3-F |
+| `A6` | RepoPrepare — نتیجهٔ «آماده‌سازی ریپو» در M4-1R |
 
 اگر مودال یا بخش جدیدی اضافه شد، یک کد تازه (`M5`، `M3-G`، ...) به آن بدهید و این جدول را به‌روز کنید.

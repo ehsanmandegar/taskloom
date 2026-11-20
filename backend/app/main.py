@@ -17,8 +17,11 @@ from fastapi.staticfiles import StaticFiles
 from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RoleKnowledgeSettings, RunStatus, TaskRequest, TaskRoleRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
 from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse
 from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
-from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError
-from .sdlc_git import GitHubError, commit_and_push, create_pull_request, git_root, validate_repository
+from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError, command
+from .sdlc_git import (
+    GitHubError, commit_and_push, create_github_repository, create_pull_request, describe_new_repository,
+    ensure_workspace, git_root, validate_repository,
+)
 from pydantic import BaseModel
 
 scheduler_worker: asyncio.Task | None = None
@@ -1111,7 +1114,8 @@ async def approve_sdlc_task(task_id: str):
 
 
 class GitHubActionRequest(BaseModel):
-    """Body of the dashboard's GitHub buttons; empty fields fall back to the agent's github_config / GITHUB_TOKEN."""
+    """Body of the dashboard's GitHub buttons. Empty fields fall back to the project repository
+    (or the agent's github_config for per-agent repos), then to GITHUB_TOKEN."""
     agent: str = ""
     repo_url: str = ""
     github_token: str = ""
@@ -1120,34 +1124,51 @@ class GitHubActionRequest(BaseModel):
 
 
 async def _github_context(task_id: str, request: GitHubActionRequest, need_repo: bool = True):
-    """Resolve the task, the agent's repository record, and the repo URL/token to use."""
+    """Resolve the task, its project, the repository record and the repo URL/token to use."""
     task = await sdlc_task_manager.load_task(task_id)
     if not task:
         raise HTTPException(404, f"SDLC task {task_id} not found")
     project = sdlc_project_manager.get_project(task.project_config_id)
-    config = project.agents.get(request.agent) if project and request.agent else None
-    github = config.github_config if config else {}
-    repo_url = request.repo_url.strip() or str(github.get("repository_url") or "")
-    stored = sdlc_project_manager.github_token(project.id, request.agent) if config else ""
-    token = request.github_token.strip() or stored  # GITHUB_TOKEN is the last fallback (sdlc_git.resolve_token)
-    if not repo_url:
-        raise HTTPException(400, "Repository URL is required")
+    if not project:
+        raise HTTPException(404, f"Project {task.project_config_id} not found")
+    config = project.agents.get(request.agent) if request.agent else None
+    use_project_repo = project.repository.mode.value != "none" and not (config and config.project_path)
+    if use_project_repo:
+        repo_url = request.repo_url.strip() or project.repository.url
+        token = request.github_token.strip() or sdlc_project_manager.repository_token(project.id)
+        folder = project.workspace_path()
+    elif config:
+        github = config.github_config
+        repo_url = request.repo_url.strip() or str(github.get("repository_url") or "")
+        token = request.github_token.strip() or sdlc_project_manager.github_token(project.id, request.agent)
+        folder = config.project_path
+    elif not need_repo:  # e.g. validating a URL/token typed into the dashboard
+        repo_url, token, folder = request.repo_url.strip(), request.github_token.strip(), ""
+    else:
+        raise HTTPException(400, "agent is required when the project has no repository")
     repo = None
-    if need_repo and config and config.project_path:
-        root = await git_root(Path(config.project_path))
+    if need_repo:
+        if not folder:
+            raise HTTPException(400, f"Agent {request.agent} has no project folder")
+        root = await git_root(Path(folder))
         if root is None:
-            raise HTTPException(400, f"The {request.agent} folder is not a Git repository: {config.project_path}")
+            raise HTTPException(400, f"Not a Git repository: {folder}")
         repo = task.repos.get(str(root))
         if repo is None:
             raise HTTPException(400, f"No stage of this task has worked in {root} yet")
-    return task, repo, repo_url, token
+    return task, project, repo, repo_url, token, use_project_repo
 
 
 @app.post("/api/sdlc/tasks/{task_id}/github/validate")
 async def validate_github(task_id: str, request: GitHubActionRequest):
-    """Check that the repository exists and the token can access it."""
-    _, _, repo_url, token = await _github_context(task_id, request, need_repo=False)
+    """Check that the repository exists and the token can access it (or, before the project's repo is
+    created, that the token works and which account will own the new repo)."""
+    _, project, _, repo_url, token, use_project_repo = await _github_context(task_id, request, need_repo=False)
     try:
+        if use_project_repo and not repo_url:
+            return await describe_new_repository(project, token)
+        if not repo_url:
+            return {"status": "invalid", "message": "Repository URL is required"}
         return await validate_repository(repo_url, token)
     except GitHubError as exc:
         return {"status": "invalid", "message": str(exc)}
@@ -1155,37 +1176,53 @@ async def validate_github(task_id: str, request: GitHubActionRequest):
 
 @app.post("/api/sdlc/tasks/{task_id}/github/commit-push")
 async def github_commit_push(task_id: str, request: GitHubActionRequest):
-    """Commit the agent's changes on the task branch and push the branch."""
-    if not request.agent:
-        raise HTTPException(400, "agent is required")
-    task, repo, repo_url, token = await _github_context(task_id, request)
-    if repo is None:
-        raise HTTPException(400, f"Agent {request.agent} has no project folder")
+    """Commit the task's changes on its branch and push it; creates the project's GitHub repo first
+    when a from-scratch project has none yet."""
+    task, project, repo, repo_url, token, use_project_repo = await _github_context(task_id, request)
     try:
+        if not repo_url and use_project_repo and project.repository.mode.value == "create":
+            repo_url = await create_github_repository(project, token)
+            project.repository.url = repo_url
+            sdlc_project_manager.save_project(project)
+        if not repo_url:
+            raise GitHubError("Repository URL is required")
         result = await commit_and_push(task, repo, repo_url, token)
     except (GitHubError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     # Git/GitHub took a while; merge only the repository record into the latest task.
     await sdlc_task_manager.update_task(task_id, lambda latest: latest.repos.__setitem__(repo.path, repo))
-    return result
+    return {**result, "repository_url": repo_url}
 
 
 @app.post("/api/sdlc/tasks/{task_id}/github/create-pr")
 async def github_create_pr(task_id: str, request: GitHubActionRequest):
     """Open (or find) the pull request for the task branch."""
-    if not request.agent:
-        raise HTTPException(400, "agent is required")
-    task, repo, repo_url, token = await _github_context(task_id, request)
-    if repo is None:
-        raise HTTPException(400, f"Agent {request.agent} has no project folder")
+    task, _, repo, repo_url, token, _ = await _github_context(task_id, request)
     try:
-        result = await create_pull_request(task, repo, repo_url, token, request.title,
-                                           None)  # body is generated from the task's stage results
+        if not repo_url:
+            raise GitHubError("Push the task first: the repository does not exist on GitHub yet")
+        result = await create_pull_request(task, repo, repo_url, token, request.title, None)
     except GitHubError as exc:
         raise HTTPException(400, str(exc)) from exc
     # Git/GitHub took a while; merge only the repository record into the latest task.
     await sdlc_task_manager.update_task(task_id, lambda latest: latest.repos.__setitem__(repo.path, repo))
     return result
+
+
+@app.post("/api/sdlc/projects/{project_id}/repository/prepare")
+async def prepare_project_repository(project_id: str):
+    """Clone (existing repo) or initialise (new project) the project's local repository now."""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found")
+    if project.repository.mode.value == "none":
+        raise HTTPException(400, "This project has no repository configured")
+    try:
+        path = await ensure_workspace(project, sdlc_project_manager.repository_token(project_id))
+    except (GitHubError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    code, branch = await command(["git", "branch", "--show-current"], path)
+    return {"path": str(path), "url": project.repository.url, "branch": branch.strip() if code == 0 else ""}
 
 
 @app.post("/api/sdlc/human-intervention", response_model=dict)

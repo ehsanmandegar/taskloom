@@ -176,6 +176,23 @@ flowchart TD
 
 - token به این ترتیب پیدا می‌شود: فیلد درخواست ← token ذخیره‌شدهٔ همان agent ← `GITHUB_TOKEN`. در remote گیت ذخیره نمی‌شود و در پیام خطا با `***` پوشانده می‌شود.
 
+### ریپوی پروژه (`SDLCProjectConfig.repository`)
+
+هر پروژه می‌تواند یک ریپوی واحد (monorepo: `backend/`، `frontend/`، `analysis/`، ...) داشته باشد؛ مرحله‌ای که `project_path` جدا ندارد در `local_path` آن کار می‌کند
+(پیش‌فرض `~/taskloom-workspaces/<project-id>`).
+
+| `mode` | قبل از اولین مرحله | قبل از هر تسک | اولین «Commit و Push» |
+|---|---|---|---|
+| `none` | — | — | ریپوی هر agent (رفتار قبلی) |
+| `create` (پروژهٔ از صفر) | `git init` + commit اولیه در پوشهٔ محلی | اگر origin دارد: fetch | ساخت ریپوی **private** زیر حساب صاحب token (`POST /user/repos`)، push برنچ پایه، سپس push برنچ تسک |
+| `existing` | `git clone` آدرس داده‌شده (یک بار) | `git fetch` و ساخت `sdlc/<task-id>` از آخرین `origin/<base>` | push برنچ تسک |
+
+- token ریپو مثل tokenهای agent با DPAPI در `data/secrets.json` (`github:<project>:repo`) نگه داشته می‌شود؛ git آن را فقط به‌صورت header همان یک فرمان
+  (`http.extraheader`) می‌گیرد، نه در URL یا `.git/config`، و در پیام‌های خطا پوشانده می‌شود.
+- `POST /api/sdlc/projects/{id}/repository/prepare` clone یا ساخت ریپوی محلی را همین حالا انجام می‌دهد (دکمهٔ «آماده‌سازی ریپو» در M4-1R).
+- `github/validate` پیش از ساخت ریپو، صاحب و نام ریپوی آینده را برمی‌گرداند.
+- دسترسی token: classic با scope `repo`، یا fine-grained با Contents و Pull requests (و Administration برای ساخت ریپو).
+
 ### نگهداری token (`backend/app/secret_store.py`)
 
 - token هرگز در `data/projects/*.json` نمی‌ماند: هنگام ذخیرهٔ پروژه (و هنگام بارگذاری فایل‌های قدیمی) به `data/secrets.json` منتقل

@@ -1629,7 +1629,21 @@ class SDLCProjectManager:
                 moved = True
             github["github_token"] = ""
             github["token_saved"] = self.secrets.has(name)
+        repository = project.repository
+        name = self._token_name(project.id, "repo")
+        if repository.clear_token:
+            self.secrets.delete(name)
+        if repository.github_token.strip():
+            self.secrets.set(name, repository.github_token.strip())
+            moved = True
+        repository.github_token = ""
+        repository.clear_token = False
+        repository.token_saved = self.secrets.has(name)
         return moved
+
+    def repository_token(self, project_id: str) -> str:
+        """Token for the project repository; falls back to GITHUB_TOKEN later (sdlc_git.resolve_token)."""
+        return self.secrets.get(self._token_name(project_id, "repo")) or ""
 
     def github_token(self, project_id: str, agent: str) -> str:
         return self.secrets.get(self._token_name(project_id, agent)) or ""
@@ -1683,7 +1697,7 @@ class SDLCProjectManager:
         project_file = self.data_dir / f"{project_id}.json"
         if project_file.exists():
             project_file.unlink()
-        for agent in self.projects[project_id].agents:
+        for agent in [*self.projects[project_id].agents, "repo"]:
             self.secrets.delete(self._token_name(project_id, agent))
         del self.projects[project_id]
         return True
@@ -1871,6 +1885,9 @@ class SDLCTaskManager:
         if self._instance_lock is not None:
             self._instance_lock.release()
 
+    def repository_token(self, project_id: str) -> str:
+        return SDLCProjectManager(self.data_dir.parent / "projects").repository_token(project_id)
+
     def agent_pid_file(self, task_id: str) -> Path:
 
         return self.data_dir / task_id / "agent.pid"
@@ -1971,7 +1988,7 @@ class SDLCTaskManager:
 
         try:
             agent_cfg = project.agents.get(stage, AgentConfig())
-            runner = resolve_runner(agent_cfg)
+            runner = resolve_runner(agent_cfg, project.stage_path(stage))
             print(f"[SDLC] Running {stage} for {task_id} with {runner.value}", flush=True)
             self.live_states[task_id] = task.base_task
 
@@ -1983,7 +2000,8 @@ class SDLCTaskManager:
                     previous = {k: v.model_dump() for k, v in task.agent_results.items()}
                     result = await loop.run_in_executor(None, _ollama_runner.run_agent, stage, task, project, previous)
             else:
-                result = await run_cli_stage(stage, task, project, agent_cfg, runner, self.agent_pid_file(task_id))
+                result = await run_cli_stage(stage, task, project, agent_cfg, runner, self.agent_pid_file(task_id),
+                                             self.repository_token(project.id))
 
             print(f"[SDLC] {stage} finished for {task_id}: {result.status} - {result.summary[:120]}", flush=True)
 

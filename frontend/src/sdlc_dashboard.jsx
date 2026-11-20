@@ -33,6 +33,8 @@ async function readJsonOrThrow(response) {
   return data;
 }
 
+const DEFAULT_REPOSITORY = { mode: 'none', url: '', name: '', local_path: '', default_branch: 'main', private: true, github_token: '', token_saved: false, clear_token: false };
+
 const responseOptionLabels = { approve: 'تأیید', stop: 'توقف تسک', resume: 'ادامه (اجرای دوبارهٔ مرحله)' };
 
 // What a free-text answer does for each kind of inbox item (see SDLCTaskManager.submit_human_response)
@@ -505,6 +507,7 @@ export default function SDLCDashboard() {
       id: project.id,
       name: project.name,
       description: project.description,
+      repository: { ...DEFAULT_REPOSITORY, ...(project.repository || {}), github_token: '', clear_token: false },
       enabled: project.enabled ?? true,
       sdlc_enabled: project.sdlc_enabled ?? true,
       workflow: project.workflow || {
@@ -1229,6 +1232,7 @@ export default function SDLCDashboard() {
                   ) : (
                     <p className="sdlc-intervention-hint">این تسک هنوز در هیچ پوشهٔ git کار نکرده است؛ برنچ <code dir="ltr">sdlc/&lt;task-id&gt;</code> هنگام اجرای اولین مرحله ساخته می‌شود.</p>
                   )}
+                  <ProjectRepoActions task={selectedTask} project={projects.find(p => p.id === selectedTask.project_config_id)} onDone={loadSDLCData} />
                   <p className="sdlc-intervention-hint">اگر URL و Token را خالی بگذارید، <code dir="ltr">github_config</code> همان agent در پروژه یا متغیر محیطی <code dir="ltr">GITHUB_TOKEN</code> استفاده می‌شود. Token جایی ذخیره نمی‌شود.</p>
                   {['backend', 'n8n', 'frontend'].map(agent => (
                     <div key={agent} style={{marginBottom: '16px', borderBottom: '1px solid #e2e3dd', paddingBottom: '12px'}}>
@@ -1558,6 +1562,11 @@ export default function SDLCDashboard() {
                         <span>SDLC فعال</span>
                       </label>
                     </div>
+                    <RepositorySettings
+                      project={newProject}
+                      onChange={patch => setNewProject(current => ({ ...current, repository: { ...DEFAULT_REPOSITORY, ...(current.repository || {}), ...patch } }))}
+                      canPrepare={isEditingProject}
+                    />
                   </>
                 )}
 
@@ -2032,6 +2041,116 @@ export default function SDLCDashboard() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// M4-1R: where the project's code lives on GitHub and on disk.
+function RepositorySettings({ project, onChange, canPrepare }) {
+  const repo = { ...DEFAULT_REPOSITORY, ...(project.repository || {}) };
+  const workspace = repo.local_path || `~/taskloom-workspaces/${project.id || '<project-id>'}`;
+  const prepare = () => {
+    fetch(`${API}/api/sdlc/projects/${project.id}/repository/prepare`, { method: 'POST' })
+      .then(readJsonOrThrow)
+      .then(data => alert(`[A6 RepoPrepare] ✅ ریپو آماده است\n\nپوشه: ${data.path}\nبرنچ: ${data.branch}${data.url ? `\nGitHub: ${data.url}` : ''}`))
+      .catch(err => alert(`[A6 RepoPrepare] ❌ ${err.message}`));
+  };
+  return (
+    <div className="sdlc-repo-settings">
+      <h4>ریپوی پروژه <UiTag id="M4-1R" name="Repository" /></h4>
+      <div className="sdlc-repo-modes">
+        {[
+          ['none', 'بدون ریپوی پروژه', 'هر agent در پوشهٔ خودش (project_path) کار می‌کند.'],
+          ['create', 'پروژهٔ جدید', 'Taskloom یک ریپوی محلی می‌سازد و در اولین «Commit و Push» ریپوی private روی GitHub شما ایجاد می‌کند.'],
+          ['existing', 'ریپوی موجود', 'یک بار clone می‌شود و قبل از هر تسک pull می‌شود؛ برنچ هر تسک از آخرین نسخهٔ origin ساخته می‌شود.'],
+        ].map(([mode, label, help]) => (
+          <label key={mode} className={`sdlc-repo-mode ${repo.mode === mode ? 'active' : ''}`}>
+            <input type="radio" name="repo-mode" checked={repo.mode === mode} onChange={() => onChange({ mode })} />
+            <span><b>{label}</b><small>{help}</small></span>
+          </label>
+        ))}
+      </div>
+      {repo.mode !== 'none' && (
+        <div className="sdlc-repo-fields">
+          {repo.mode === 'existing' && (
+            <div className="sdlc-form-group">
+              <label>آدرس ریپو در GitHub</label>
+              <input dir="ltr" value={repo.url} onChange={e => onChange({ url: e.target.value })} placeholder="https://github.com/owner/repo" />
+            </div>
+          )}
+          {repo.mode === 'create' && (
+            <>
+              <div className="sdlc-form-group">
+                <label>نام ریپو روی GitHub</label>
+                <input dir="ltr" value={repo.name} onChange={e => onChange({ name: e.target.value })} placeholder={project.id || 'project-id'} />
+                {repo.url && <small className="sdlc-intervention-hint">ساخته شده: <a href={repo.url} target="_blank" rel="noreferrer" dir="ltr">{repo.url}</a></small>}
+              </div>
+              <label className="sdlc-checkbox-label">
+                <input type="checkbox" checked={repo.private} onChange={e => onChange({ private: e.target.checked })} /> ریپوی private
+              </label>
+            </>
+          )}
+          <div className="sdlc-form-group">
+            <label>GitHub Token</label>
+            <input
+              type="password" dir="ltr" autoComplete="off" value={repo.github_token}
+              onChange={e => onChange({ github_token: e.target.value })}
+              placeholder={repo.token_saved ? 'ذخیره شده — برای تعویض، توکن جدید وارد کنید' : 'ghp_... یا github_pat_...'}
+            />
+            <small className="sdlc-intervention-hint">
+              رمزنگاری‌شده جدا از فایل پروژه ذخیره می‌شود. دسترسی لازم: توکن classic با scope <code dir="ltr">repo</code>، یا fine-grained با
+              Contents و Pull requests (Read/Write){repo.mode === 'create' ? ' و Administration (Read/Write) برای ساخت ریپو' : ''}.
+            </small>
+            {repo.token_saved && (
+              <label className="sdlc-checkbox-label">
+                <input type="checkbox" checked={!!repo.clear_token} onChange={e => onChange({ clear_token: e.target.checked })} /> حذف توکن ذخیره‌شده
+              </label>
+            )}
+          </div>
+          <div className="sdlc-form-group">
+            <label>پوشهٔ محلی</label>
+            <input dir="ltr" value={repo.local_path} onChange={e => onChange({ local_path: e.target.value })} placeholder={workspace} />
+            <small className="sdlc-intervention-hint">agentهایی که پوشهٔ جداگانه (project_path) ندارند در این پوشه کار می‌کنند.</small>
+          </div>
+          <div className="sdlc-form-group">
+            <label>برنچ پایه</label>
+            <input dir="ltr" value={repo.default_branch} onChange={e => onChange({ default_branch: e.target.value })} placeholder="main" />
+          </div>
+          {canPrepare && (
+            <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={prepare}>
+              آماده‌سازی ریپو اکنون ({repo.mode === 'existing' ? 'clone / بررسی' : 'ساخت ریپوی محلی'})
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Top of M3-F: one-click publish for projects with a project repository.
+function ProjectRepoActions({ task, project, onDone }) {
+  const repo = project?.repository;
+  if (!repo || repo.mode === 'none') return null;
+  const call = (action, label, show) => {
+    fetch(`${API}/api/sdlc/tasks/${task.base_task.task_id}/github/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+    })
+      .then(readJsonOrThrow)
+      .then(data => { alert(`[${label}] ${show(data)}`); onDone && onDone(); })
+      .catch(err => alert(`[${label}] ❌ ${err.message}`));
+  };
+  return (
+    <div className="sdlc-project-repo-actions">
+      <div dir="ltr" className="sdlc-project-repo-target">
+        {repo.url ? <a href={repo.url} target="_blank" rel="noreferrer">{repo.url}</a> : <span>GitHub repo will be created on the first push{repo.private ? ' (private)' : ''}</span>}
+      </div>
+      <div className="sdlc-project-repo-buttons">
+        <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => call('validate', 'A3 GitHubValidate', d => d.status === 'valid'
+          ? `✅ دسترسی تأیید شد: ${d.owner}/${d.repo}${d.will_create ? ' (در اولین push ساخته می‌شود)' : ''}`
+          : `❌ ${d.message}`)}>بررسی دسترسی</button>
+        <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => call('commit-push', 'A4 CommitPush', d => `✅ ${d.message}\n\nCommit: ${d.commit_sha}\nBranch: ${d.branch}\nRepo: ${d.repository_url}`)}>Commit و Push</button>
+        <button type="button" className="sdlc-btn sdlc-btn-primary" onClick={() => call('create-pr', 'A5 PullRequest', d => `✅ ${d.message}\n\nPR #${d.pr_number}\nURL: ${d.pr_url}`)}>Pull Request</button>
+      </div>
     </div>
   );
 }

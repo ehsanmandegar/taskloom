@@ -2921,3 +2921,26 @@ html[data-theme="dark"] .sdlc-change-desc { color: #9fb79c; }
 .sdlc-agent-changes li { padding-bottom: 6px; border-bottom: 1px dashed #e2e3dd; }
 .sdlc-agent-changes li:last-child { border-bottom: none; }
 html[data-theme="dark"] .sdlc-agent-changes li { border-bottom-color: #0b3d27; }
+
+/* M4-1R repository settings and M3-F project repo actions */
+.sdlc-repo-settings { margin-top: 8px; padding-top: 14px; border-top: 1px solid #e2e3dd; }
+.sdlc-repo-settings h4 { margin: 0 0 10px; font-size: 13px; color: #173f2b; }
+.sdlc-repo-modes { display: grid; gap: 8px; }
+.sdlc-repo-mode { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid #e2e3dd; border-radius: 10px; cursor: pointer; }
+.sdlc-repo-mode.active { border-color: #6b8d72; background: #f3f7f1; }
+.sdlc-repo-mode input { margin-top: 3px; }
+.sdlc-repo-mode span { display: grid; gap: 2px; }
+.sdlc-repo-mode b { font-size: 12px; color: #173f2b; }
+.sdlc-repo-mode small { font-size: 11px; color: #6b7a6c; line-height: 1.7; }
+.sdlc-repo-fields { display: grid; gap: 10px; margin-top: 12px; }
+.sdlc-project-repo-actions { display: grid; gap: 8px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid #e2e3dd; border-radius: 8px; background: #f7f9f5; }
+.sdlc-project-repo-target { font-size: 12px; overflow-wrap: anywhere; text-align: left; }
+.sdlc-project-repo-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+html[data-theme="dark"] .sdlc-repo-settings { border-top-color: #0b3d27; }
+html[data-theme="dark"] .sdlc-repo-settings h4, html[data-theme="dark"] .sdlc-repo-mode b { color: #cfe3cc; }
+html[data-theme="dark"] .sdlc-repo-mode { border-color: #0b3d27; }
+html[data-theme="dark"] .sdlc-repo-mode.active { background: #04180f; border-color: #1f7a4c; }
+html[data-theme="dark"] .sdlc-project-repo-actions { background: #03110b; border-color: #0b3d27; }
+.sdlc-repo-mode input[type="radio"], .sdlc-repo-settings input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 3px 0 0; }
+.sdlc-repo-mode span { flex: 1; text-align: start; }
+.sdlc-repo-settings .sdlc-checkbox-label { display: flex; gap: 8px; align-items: center; font-size: 12px; }
