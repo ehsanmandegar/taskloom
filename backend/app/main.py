@@ -11,13 +11,13 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RoleKnowledgeSettings, RunStatus, TaskRequest, TaskRoleRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
 from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse
 from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
-from .services import SDLCProjectManager, SDLCTaskManager
+from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError
 from .sdlc_git import GitHubError, commit_and_push, create_pull_request, git_root, validate_repository
 from pydantic import BaseModel
 
@@ -29,13 +29,18 @@ async def lifespan(_: FastAPI):
     """Keep scheduled Todos moving while the Taskloom server is running."""
     global scheduler_worker
     scheduler_worker = asyncio.create_task(todo_scheduler())
-    try:
-        await sdlc_task_manager.recover_interrupted_tasks()
-    except Exception as exc:  # recovery must never keep the server from starting
-        print(f"[SDLC] Recovery after restart failed: {exc}", flush=True)
+    manager = sdlc_task_manager
+    if manager.claim_data_dir():
+        try:
+            await manager.recover_interrupted_tasks()
+        except Exception as exc:  # recovery must never keep the server from starting
+            print(f"[SDLC] Recovery after restart failed: {exc}", flush=True)
+    else:
+        print(f"[SDLC] Another Taskloom server is using {manager.data_dir}; this one will not run SDLC stages.", flush=True)
     try:
         yield
     finally:
+        manager.release_data_dir()
         scheduler_worker.cancel()
         with suppress(asyncio.CancelledError):
             await scheduler_worker
@@ -43,6 +48,11 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Taskloom", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(TaskConflictError)
+async def task_conflict_handler(_: Request, exc: TaskConflictError):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -1083,16 +1093,20 @@ async def transition_sdlc_task(task_id: str, transition: StageTransitionRequest)
 @app.post("/api/sdlc/tasks/{task_id}/approve", response_model=SDLCTask)
 async def approve_sdlc_task(task_id: str):
     """Human sign-off: move a task that finished every stage from pending_approval to done."""
-    task = await sdlc_task_manager.load_task(task_id)
+    def approve(task: SDLCTask) -> None:
+        if task.sdlc_status != SDLCStatus.pending_approval:
+            raise ValueError(f"Task status is {task.sdlc_status.value}, not pending_approval")
+        task.previous_status = task.sdlc_status
+        task.sdlc_status = SDLCStatus.done
+        task.transition_reason = "Approved by human"
+        task.updated_at = datetime.now(timezone.utc)
+
+    try:
+        task = await sdlc_task_manager.update_task(task_id, approve)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if not task:
         raise HTTPException(404, f"SDLC task {task_id} not found")
-    if task.sdlc_status != SDLCStatus.pending_approval:
-        raise HTTPException(409, f"Task status is {task.sdlc_status.value}, not pending_approval")
-    task.previous_status = task.sdlc_status
-    task.sdlc_status = SDLCStatus.done
-    task.transition_reason = "Approved by human"
-    task.updated_at = datetime.now(timezone.utc)
-    await sdlc_task_manager.save_task(task)
     return task
 
 
@@ -1150,7 +1164,8 @@ async def github_commit_push(task_id: str, request: GitHubActionRequest):
         result = await commit_and_push(task, repo, repo_url, token)
     except (GitHubError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    await sdlc_task_manager.save_task(task)
+    # Git/GitHub took a while; merge only the repository record into the latest task.
+    await sdlc_task_manager.update_task(task_id, lambda latest: latest.repos.__setitem__(repo.path, repo))
     return result
 
 
@@ -1167,7 +1182,8 @@ async def github_create_pr(task_id: str, request: GitHubActionRequest):
                                            None)  # body is generated from the task's stage results
     except GitHubError as exc:
         raise HTTPException(400, str(exc)) from exc
-    await sdlc_task_manager.save_task(task)
+    # Git/GitHub took a while; merge only the repository record into the latest task.
+    await sdlc_task_manager.update_task(task_id, lambda latest: latest.repos.__setitem__(repo.path, repo))
     return result
 
 

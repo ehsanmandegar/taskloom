@@ -1432,6 +1432,7 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
+from .file_lock import FileLock, LockTimeout, replace_with_retry
 from .models import (
     SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig,
     SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention,
@@ -1652,6 +1653,22 @@ class SDLCProjectManager:
         return True
 
 
+class TaskConflictError(RuntimeError):
+    """Raised when saving a task that another writer changed since it was loaded."""
+
+
+def _read_text_with_retry(path: Path, attempts: int = 20, delay: float = 0.025) -> str:
+    """Read a file, tolerating Windows' transient PermissionError while it is being replaced."""
+    for attempt in range(attempts):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+    return ""
+
+
 class SDLCTaskManager:
     """Manages SDLC tasks and their lifecycle"""
     
@@ -1661,6 +1678,8 @@ class SDLCTaskManager:
         self.active_tasks: Dict[str, SDLCTask] = {}
         self.task_workers: Dict[str, asyncio.Task] = {}
         self.live_states: Dict[str, TaskState] = {}
+        self.read_only = False  # True when another server process owns data_dir
+        self._instance_lock: Optional[FileLock] = None
     
     def generate_task_id(self) -> str:
         """Generate a unique task ID"""
@@ -1697,24 +1716,60 @@ class SDLCTaskManager:
         
         return sdlc_task
     
+    def _task_file(self, task_id: str) -> Path:
+        return self.data_dir / task_id / "task.json"
+
     async def save_task(self, task: SDLCTask) -> None:
-        """Save task state to disk"""
-        task_dir = self.data_dir / task.base_task.task_id
-        task_dir.mkdir(parents=True, exist_ok=True)
-        
-        task_file = task_dir / "task.json"
-        temp_file = task_file.with_suffix(".json.tmp")
-        
+        """Write the task atomically, refusing to overwrite a newer version (TaskConflictError).
+
+        `task.version` must equal the version on disk; it is incremented on success. The check and
+        the write happen under a per-task file lock, so this also holds across server processes.
+        """
+        task_id = task.base_task.task_id
+        task_file = self._task_file(task_id)
+        task_file.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(task.model_dump(), f, indent=2, ensure_ascii=False, default=str)
-            temp_file.replace(task_file)
-            
-            # Update in-memory cache
-            self.active_tasks[task.base_task.task_id] = task
-        except OSError as e:
-            raise RuntimeError(f"Could not save task {task.base_task.task_id}: {e}")
-    
+            with FileLock(task_file.parent / ".lock"):
+                if task_file.exists():
+                    on_disk = json.loads(_read_text_with_retry(task_file)).get("version", 0)
+                    if on_disk != task.version:
+                        raise TaskConflictError(
+                            f"Task {task_id} changed on disk (version {on_disk}, this copy {task.version}); reload and retry"
+                        )
+                task.version += 1
+                temp_file = task_file.with_name(f"task.{uuid.uuid4().hex}.tmp")
+                try:
+                    temp_file.write_text(
+                        json.dumps(task.model_dump(), indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+                    )
+                    replace_with_retry(temp_file, task_file)
+                except BaseException:
+                    task.version -= 1
+                    temp_file.unlink(missing_ok=True)
+                    raise
+        except (OSError, LockTimeout) as e:
+            raise RuntimeError(f"Could not save task {task_id}: {e}") from e
+        self.active_tasks[task_id] = task
+
+    async def update_task(self, task_id: str, mutate: Callable[[SDLCTask], None],
+                          attempts: int = 5) -> Optional[SDLCTask]:
+        """Read the latest task, apply `mutate`, and save; retry when another writer got there first.
+
+        Keep long-running work (git, agents) outside `mutate` and apply only its result here.
+        """
+        for attempt in range(attempts):
+            task = await self.load_task(task_id)
+            if task is None:
+                return None
+            mutate(task)
+            try:
+                await self.save_task(task)
+                return task
+            except TaskConflictError:
+                if attempt == attempts - 1:
+                    raise
+        return None
+
     async def load_task(self, task_id: str) -> Optional[SDLCTask]:
         """Load task from disk"""
         task_dir = self.data_dir / task_id
@@ -1724,9 +1779,8 @@ class SDLCTaskManager:
             return None
             
         try:
-            with open(task_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                
+            data = json.loads(_read_text_with_retry(task_file))
+
             # Convert string dates back to datetime objects
             for date_field in ['created_at', 'updated_at', 'last_checkpoint']:
                 if date_field in data and data[date_field]:
@@ -1742,7 +1796,7 @@ class SDLCTaskManager:
             # Update in-memory cache
             self.active_tasks[task_id] = task
             return task
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
+        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
             print(f"Error loading task {task_id}: {e}")
             return None
     
@@ -1770,7 +1824,19 @@ class SDLCTaskManager:
     def inbox_dir(self) -> Path:
         return self.data_dir.parent / "human-inbox"
 
+    def claim_data_dir(self) -> bool:
+        """Become the only server that runs agents for this data directory (held until release)."""
+        if self._instance_lock is None or not self._instance_lock.held:
+            self._instance_lock = FileLock(self.data_dir / ".server.lock")
+            self.read_only = not self._instance_lock.try_acquire()
+        return not self.read_only
+
+    def release_data_dir(self) -> None:
+        if self._instance_lock is not None:
+            self._instance_lock.release()
+
     def agent_pid_file(self, task_id: str) -> Path:
+
         return self.data_dir / task_id / "agent.pid"
 
     async def recover_interrupted_tasks(self) -> List[str]:
@@ -1832,6 +1898,8 @@ class SDLCTaskManager:
     async def execute_stage(self, task_id: str, stage: str,
                             project: Optional[SDLCProjectConfig] = None) -> None:
         """Mark the task as running `stage` and start that stage's agent in the background."""
+        if self.read_only:
+            raise ValueError(f"Another Taskloom server owns {self.data_dir}; run SDLC stages from that server")
         if self.is_running(task_id):
             raise ValueError(f"Task {task_id} already has a stage running")
         task = await self.load_task(task_id)
@@ -1883,45 +1951,54 @@ class SDLCTaskManager:
 
             print(f"[SDLC] {stage} finished for {task_id}: {result.status} - {result.summary[:120]}", flush=True)
 
-            # Reload: the task file may have changed while the agent was running.
-            fresh_task = await self.load_task(task_id) or task
-            fresh_task.agent_results[stage] = result
-            fresh_task.base_task.codex_thread_id = task.base_task.codex_thread_id
-            for key, repo in task.repos.items():
-                fresh_task.repos.setdefault(key, repo)
-            fresh_task.updated_at = datetime.now(timezone.utc)
             # The worker must not count as "running" while it schedules the next stage.
             self.task_workers.pop(task_id, None)
             self.live_states.pop(task_id, None)
-
-            if result.status == "completed":
-                await self.save_task(fresh_task)
-                await self._advance_or_complete(fresh_task, project)
-            elif result.status == "needs_human":
-                question = result.human_intervention.description if result.human_intervention else result.summary
-                await self._ask_human(
-                    fresh_task, stage, "agent_question", f"{stage} needs a human decision", question, ["stop"],
-                )
-            elif result.status == "needs_revision" and result.revision_request:
-                await self._request_revision(fresh_task, stage, result.revision_request, project)
-            else:  # blocked / failed / needs_revision without details
-                fresh_task.sdlc_status = SDLCStatus.failed
-                fresh_task.transition_reason = f"{stage} {result.status}: " + ("; ".join(result.issues) or result.summary)
-                await self.save_task(fresh_task)
+            for attempt in range(5):
+                # Reload: the task may have changed (e.g. a GitHub action) while the agent ran.
+                fresh_task = await self.load_task(task_id) or task
+                fresh_task.agent_results[stage] = result
+                fresh_task.base_task.codex_thread_id = task.base_task.codex_thread_id
+                for key, repo in task.repos.items():
+                    fresh_task.repos.setdefault(key, repo)
+                fresh_task.updated_at = datetime.now(timezone.utc)
+                try:
+                    await self._route_result(fresh_task, stage, result, project)
+                    break
+                except TaskConflictError:
+                    if attempt == 4:
+                        raise
 
         except Exception as exc:
             import traceback
             print(f"[SDLC] Agent {stage} error for {task_id}: {exc}", flush=True)
             traceback.print_exc()
-            task = await self.load_task(task_id)
-            if task:
-                task.sdlc_status = SDLCStatus.failed
-                task.transition_reason = f"{stage} error: {exc}"
-                task.updated_at = datetime.now(timezone.utc)
-                await self.save_task(task)
+
+            def mark_failed(failed: SDLCTask) -> None:
+                failed.sdlc_status = SDLCStatus.failed
+                failed.transition_reason = f"{stage} error: {exc}"
+                failed.updated_at = datetime.now(timezone.utc)
+
+            await self.update_task(task_id, mark_failed)
         finally:
             if self.live_states.get(task_id) is task.base_task:
                 self.live_states.pop(task_id, None)
+
+    async def _route_result(self, task: SDLCTask, stage: str, result: AgentResult,
+                            project: SDLCProjectConfig) -> None:
+        """Save a finished stage's result and move the workflow on accordingly."""
+        if result.status == "completed":
+            await self.save_task(task)
+            await self._advance_or_complete(task, project)
+        elif result.status == "needs_human":
+            question = result.human_intervention.description if result.human_intervention else result.summary
+            await self._ask_human(task, stage, "agent_question", f"{stage} needs a human decision", question, ["stop"])
+        elif result.status == "needs_revision" and result.revision_request:
+            await self._request_revision(task, stage, result.revision_request, project)
+        else:  # blocked / failed / needs_revision without details
+            task.sdlc_status = SDLCStatus.failed
+            task.transition_reason = f"{stage} {result.status}: " + ("; ".join(result.issues) or result.summary)
+            await self.save_task(task)
 
     @staticmethod
     def enabled_stages(project: SDLCProjectConfig) -> List[str]:
@@ -2018,17 +2095,18 @@ class SDLCTaskManager:
             context={**(context or {}), "kind": kind, "stage": agent},
             response_options=response_options,
         )
-        pending = self.inbox_dir / "pending"
-        pending.mkdir(parents=True, exist_ok=True)
-        (pending / f"{intervention.id}.json").write_text(
-            json.dumps(intervention.model_dump(), indent=2, ensure_ascii=False, default=str), encoding="utf-8"
-        )
         task.human_interventions.append(intervention)
         task.previous_status = task.sdlc_status
         task.sdlc_status = SDLCStatus.human_review
         task.transition_reason = reason
         task.updated_at = datetime.now(timezone.utc)
+        # Save first: if this conflicts, the caller retries and no orphan inbox item is left behind.
         await self.save_task(task)
+        pending = self.inbox_dir / "pending"
+        pending.mkdir(parents=True, exist_ok=True)
+        (pending / f"{intervention.id}.json").write_text(
+            json.dumps(intervention.model_dump(), indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+        )
         return intervention.id
 
     async def create_human_intervention(self, task_id: str, agent: str,
@@ -2054,12 +2132,17 @@ class SDLCTaskManager:
     async def submit_human_response(self, intervention_id: str, response: str) -> bool:
         """Record a human answer and resume the workflow accordingly."""
         pending_file = self.inbox_dir / "pending" / f"{intervention_id}.json"
-        if not pending_file.exists():
+        # Claim the item atomically so a double click (or a second server) cannot answer it twice.
+        claimed = pending_file.with_name(f"{intervention_id}.{uuid.uuid4().hex}.claimed")
+        try:
+            os.rename(pending_file, claimed)
+        except OSError:
             return False
         try:
-            intervention = HumanIntervention(**json.loads(pending_file.read_text(encoding="utf-8")))
+            intervention = HumanIntervention(**json.loads(claimed.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             print(f"Error reading intervention {intervention_id}: {exc}")
+            os.rename(claimed, pending_file)
             return False
 
         intervention.response = response.strip()
@@ -2070,7 +2153,7 @@ class SDLCTaskManager:
         (resolved / f"{intervention_id}.json").write_text(
             json.dumps(intervention.model_dump(), indent=2, ensure_ascii=False, default=str), encoding="utf-8"
         )
-        pending_file.unlink()
+        claimed.unlink()
 
         task = await self.load_task(intervention.task_id)
         if not task:

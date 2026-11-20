@@ -514,6 +514,7 @@ class SDLCTask(BaseModel):
     revisions: list[RevisionRequest] = Field(default_factory=list)
     test_results: dict[str, TestResults] = Field(default_factory=dict)
     repos: dict[str, TaskRepo] = Field(default_factory=dict)  # keyed by repository root path
+    version: int = 0  # optimistic-concurrency counter, bumped on every save
     
     # Checkpoint and recovery
     checkpoint_path: str = ""
