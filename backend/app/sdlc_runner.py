@@ -17,6 +17,7 @@ from .models import (
     AgentConfig, AgentResult, AgentType, Change, HumanIntervention, RevisionRequest,
     SDLCProjectConfig, SDLCTask, StageRunner, TestResults,
 )
+from .sdlc_git import prepare_task_branch
 from .services import (
     WORKSPACE_IGNORED_DIRECTORIES, agent_error_detail, agent_executable, agent_name,
     agent_response, command, initial_agent_args, run_agent_command, test_plan,
@@ -216,6 +217,8 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
         raise RuntimeError(f"Project folder for stage '{stage}' does not exist: {workdir}")
 
     executable = agent_executable(agent_type)
+    # In a Git repository every task works on its own branch (sdlc/<task-id>).
+    await prepare_task_branch(task, workdir, str(config.github_config.get("branch") or "main"))
     prompt = build_stage_prompt(stage, task, project, config, workdir)
     state = task.base_task
     state.step = f"{display_name} is running the {stage} stage"

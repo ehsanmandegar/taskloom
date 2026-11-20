@@ -4,7 +4,7 @@
 
 > **به‌روزرسانی مرحلهٔ ۱:** `main.py` به نسخهٔ HEAD بازگردانده شد، پس ستون «HEAD» اکنون وضعیت فعلی است؛
 > ستون «main.py فعلی» نسخهٔ mock قبلی را نشان می‌دهد که کنار گذاشته شد. `POST /api/sdlc/tasks/{id}/approve` هم اضافه شد.
-> endpointهای `github/*` که داشبورد صدا می‌زند هنوز در بک‌اند وجود ندارند.
+> endpointهای `github/*` در مرحلهٔ ۵ اضافه شدند؛ بدنه: `{agent, repo_url, github_token}` (فیلدهای خالی از `github_config` آن agent یا `GITHUB_TOKEN` پر می‌شوند).
 
 ✅ واقعی · 🟡 mock / ساختگی · ❌ وجود ندارد
 
@@ -24,9 +24,9 @@
 | `POST /api/sdlc/tasks/{id}/transition` | ✅ | ❌ متد `transition_task` وجود ندارد → 500 | ✅ |
 | `POST /api/sdlc/human-intervention/{id}/respond` | ✅ | ❌ | ✅ |
 | `GET /api/sdlc/human-inbox/pending` | ✅ | ❌ | ✅ |
-| `POST /api/sdlc/tasks/{id}/github/validate` | ✅ | ❌ | ❌ |
-| `POST /api/sdlc/tasks/{id}/github/commit-push` | ✅ | ❌ | ❌ |
-| `POST /api/sdlc/tasks/{id}/github/create-pr` | ✅ | ❌ | ❌ |
+| `POST /api/sdlc/tasks/{id}/github/validate` | ✅ | ❌ | ✅ (مرحلهٔ ۵) |
+| `POST /api/sdlc/tasks/{id}/github/commit-push` | ✅ | ❌ | ✅ (مرحلهٔ ۵) |
+| `POST /api/sdlc/tasks/{id}/github/create-pr` | ✅ | ❌ | ✅ (مرحلهٔ ۵) |
 
 ## تسک کلاسیک (Codex / Claude Code)
 

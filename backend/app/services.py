@@ -1839,6 +1839,8 @@ class SDLCTaskManager:
             fresh_task = await self.load_task(task_id) or task
             fresh_task.agent_results[stage] = result
             fresh_task.base_task.codex_thread_id = task.base_task.codex_thread_id
+            for key, repo in task.repos.items():
+                fresh_task.repos.setdefault(key, repo)
             fresh_task.updated_at = datetime.now(timezone.utc)
             # The worker must not count as "running" while it schedules the next stage.
             self.task_workers.pop(task_id, None)

@@ -2847,3 +2847,7 @@ html[data-theme="dark"] .sdlc-detail-status p,
 html[data-theme="dark"] .sdlc-intervention-hint {
   color: #b7c7b5;
 }
+
+.sdlc-task-repos { display: grid; gap: 6px; margin-bottom: 10px; }
+.sdlc-task-repo { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 12px; }
+.sdlc-task-repo code { font-size: 11px; word-break: break-all; }

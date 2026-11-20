@@ -20,6 +20,16 @@
 - `frontend/.env` (اشاره به mock روی :8000) حذف شد؛ proxy `/api` → :8003 در `vite.config.js` برگشت؛ hack `forceSDLC` از `main.jsx` حذف شد (حلقهٔ بی‌نهایتی دیده نشد: ۴ درخواست polling در ۱۵ ثانیه).
 - #18 فایل‌های mock/backup/یادداشت‌ها: فایل‌های untracked به `C:\Users\vira\taskloom-archive-2026-11-20` منتقل شدند؛ فایل‌های tracked (`ARCHITECTURE.md` خراب، راهنماهای Docker/Render بی‌پشتوانه، `START_HERE.*`، اسکریپت‌های `test_sdlc_*.py`، `backend.log`) با `git rm` حذف شدند. `SDLC_PLATFORM_GUIDE.md` به `docs/sdlc-platform-guide.md` منتقل شد.
 
+## ✅ رفع‌شده در مرحلهٔ ۵ (2026-11-20)
+
+- هر تسک در repoهای گیت روی برنچ `sdlc/<task-id>` کار می‌کند؛ `main` دست نمی‌خورد؛ تغییرات commit‌نشدهٔ برنچ دیگر مرحله را با پیام روشن متوقف می‌کند.
+- endpointهای `github/validate`، `github/commit-push` و `github/create-pr` که داشبورد صدا می‌زد پیاده‌سازی شدند.
+- داشبورد خطاهای واقعی سرور را نشان می‌دهد (قبلاً پاسخ خطا را «موفق» نمایش می‌داد) و برنچ، commit و لینک PR تسک را نشان می‌دهد.
+- #15 (بخشی): endpointهای GitHub token را ذخیره نمی‌کنند و در خطاها نمایش نمی‌دهند. فرم پروژه هنوز `github_token` را در `data/projects/*.json` ذخیره می‌کند.
+- آزمون واقعی: pipeline با Claude Code روی repo گیت نمونه ← برنچ `sdlc/...` ← commit تمیز با خلاصهٔ مراحل ← push به remote محلی. ساخت PR روی GitHub واقعی با mock تست شده، نه با repo واقعی.
+
+**باقی‌مانده:** بازیابی تسک‌های در حال اجرا پس از restart (#13)؛ قفل فایل (#12)؛ حذف ذخیرهٔ token از فرم پروژه (#15)؛ GitLab.
+
 ## ✅ رفع‌شده در مرحلهٔ ۴ (2026-11-20)
 
 - #9 حلقهٔ بازبینی: `needs_revision` و شکست تست‌ها مرحلهٔ هدف را تا `max_revision_attempts` بار دوباره اجرا می‌کنند و بعد از انسان می‌پرسند.

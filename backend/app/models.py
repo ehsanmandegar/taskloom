@@ -462,6 +462,17 @@ class AgentResult(BaseModel):
         return value
 
 
+class TaskRepo(BaseModel):
+    """A Git repository an SDLC task worked in, and what has been published from it."""
+    path: str
+    branch: str
+    base_branch: str
+    commit_sha: str = ""
+    pushed: bool = False
+    pr_url: str = ""
+    pr_number: int | None = None
+
+
 class SDLCTaskContext(BaseModel):
     """Complete context for SDLC agent execution"""
     task_id: str
@@ -501,6 +512,7 @@ class SDLCTask(BaseModel):
     human_interventions: list[HumanIntervention] = Field(default_factory=list)
     revisions: list[RevisionRequest] = Field(default_factory=list)
     test_results: dict[str, TestResults] = Field(default_factory=dict)
+    repos: dict[str, TaskRepo] = Field(default_factory=dict)  # keyed by repository root path
     
     # Checkpoint and recovery
     checkpoint_path: str = ""

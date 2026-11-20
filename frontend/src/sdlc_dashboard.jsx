@@ -25,6 +25,13 @@ const sdlcStages = [
   { id: 'blocked', label: 'مسدود شده', color: 'bg-gray-300', icon: Pause }
 ];
 
+// Parse a JSON response and turn HTTP errors into exceptions carrying the server's message
+async function readJsonOrThrow(response) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || data.message || `HTTP ${response.status}`);
+  return data;
+}
+
 const responseOptionLabels = { approve: 'تأیید', stop: 'توقف تسک' };
 
 // What a free-text answer does for each kind of inbox item (see SDLCTaskManager.submit_human_response)
@@ -1194,8 +1201,23 @@ export default function SDLCDashboard() {
 
               {/* GitHub Integration for agents */}
               <div className="sdlc-detail-section">
-                <h4>GitHub Integration - نتشر و Commit</h4>
+                <h4>GitHub — Commit، Push و Pull Request</h4>
                 <div style={{padding: '12px 14px', fontSize: '12px', color: '#384239'}}>
+                  {Object.values(selectedTask.repos || {}).length > 0 ? (
+                    <div className="sdlc-task-repos">
+                      {Object.values(selectedTask.repos).map(repo => (
+                        <div key={repo.path} className="sdlc-task-repo" dir="ltr">
+                          <code>{repo.path}</code>
+                          <span>{repo.branch} ← {repo.base_branch}</span>
+                          {repo.commit_sha && <span>commit {repo.commit_sha.slice(0, 8)}{repo.pushed ? ' (pushed)' : ''}</span>}
+                          {repo.pr_url && <a href={repo.pr_url} target="_blank" rel="noreferrer">PR #{repo.pr_number}</a>}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="sdlc-intervention-hint">این تسک هنوز در هیچ پوشهٔ git کار نکرده است؛ برنچ sdlc/&lt;task-id&gt; هنگام اجرای اولین مرحله ساخته می‌شود.</p>
+                  )}
+                  <p className="sdlc-intervention-hint">اگر URL و Token را خالی بگذارید، github_config همان agent در پروژه یا متغیر محیطی GITHUB_TOKEN استفاده می‌شود. Token جایی ذخیره نمی‌شود.</p>
                   {['backend', 'n8n', 'frontend'].map(agent => (
                     <div key={agent} style={{marginBottom: '16px', borderBottom: '1px solid #e2e3dd', paddingBottom: '12px'}}>
                       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'}}>
@@ -1255,10 +1277,6 @@ export default function SDLCDashboard() {
                           <div style={{display: 'flex', gap: '8px'}}>
                             <button
                               onClick={() => {
-                                if (!githubCredentials[agent].url || !githubCredentials[agent].token) {
-                                  alert('لطفاً URL و Token را وارد کنید');
-                                  return;
-                                }
                                 // Save credentials and validate
                                 fetch(`${API}/api/sdlc/tasks/${selectedTask.base_task.task_id}/github/validate`, {
                                   method: 'POST',
@@ -1268,7 +1286,7 @@ export default function SDLCDashboard() {
                                     github_token: githubCredentials[agent].token
                                   })
                                 })
-                                .then(r => r.json())
+                                .then(readJsonOrThrow)
                                 .then(data => {
                                   if (data.status === 'valid') {
                                     alert(`✅ GitHub credentials تأیید شدند!\nRepository: ${data.owner}/${data.repo}`);
@@ -1284,10 +1302,6 @@ export default function SDLCDashboard() {
                             </button>
                             <button
                               onClick={() => {
-                                if (!githubCredentials[agent].url || !githubCredentials[agent].token) {
-                                  alert('لطفاً ابتدا GitHub credentials را وارد کنید');
-                                  return;
-                                }
                                 // Commit and push
                                 fetch(`${API}/api/sdlc/tasks/${selectedTask.base_task.task_id}/github/commit-push`, {
                                   method: 'POST',
@@ -1298,9 +1312,10 @@ export default function SDLCDashboard() {
                                     github_token: githubCredentials[agent].token
                                   })
                                 })
-                                .then(r => r.json())
+                                .then(readJsonOrThrow)
                                 .then(data => {
                                   alert(`✅ ${data.message}\n\nCommit: ${data.commit_sha}\nBranch: ${data.branch}`);
+                                  loadSDLCData();
                                 })
                                 .catch(err => alert(`❌ خطا: ${err.message}`));
                               }}
@@ -1310,10 +1325,6 @@ export default function SDLCDashboard() {
                             </button>
                             <button
                               onClick={() => {
-                                if (!githubCredentials[agent].url || !githubCredentials[agent].token) {
-                                  alert('لطفاً ابتدا GitHub credentials را وارد کنید');
-                                  return;
-                                }
                                 // Create PR
                                 fetch(`${API}/api/sdlc/tasks/${selectedTask.base_task.task_id}/github/create-pr`, {
                                   method: 'POST',
@@ -1321,14 +1332,13 @@ export default function SDLCDashboard() {
                                   body: JSON.stringify({
                                     agent: agent,
                                     repo_url: githubCredentials[agent].url,
-                                    github_token: githubCredentials[agent].token,
-                                    title: `SDLC: Changes from ${agent} agent`,
-                                    description: selectedTask.description
+                                    github_token: githubCredentials[agent].token
                                   })
                                 })
-                                .then(r => r.json())
+                                .then(readJsonOrThrow)
                                 .then(data => {
                                   alert(`✅ ${data.message}\n\nPR #${data.pr_number}\nURL: ${data.pr_url}`);
+                                  loadSDLCData();
                                 })
                                 .catch(err => alert(`❌ خطا: ${err.message}`));
                               }}

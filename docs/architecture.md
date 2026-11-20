@@ -149,6 +149,23 @@ flowchart TD
 - تنظیمات هر مرحله: `project_path`، `knowledge_path`، `system_prompt`، `test_instructions: {"command": "...", "working_directory": "..."}`،
   `cli_timeout_seconds` (پیش‌فرض 3600) و `timeout_seconds` (فقط Ollama).
 
+### Git و GitHub (`backend/app/sdlc_git.py`)
+
+- اگر پوشهٔ یک مرحله داخل یک repository گیت باشد، قبل از اجرای عامل آن repo روی برنچ `sdlc/<task-id>` می‌رود؛
+  برنچ یک بار از `github_config.branch` (پیش‌فرض `main`، یا برنچ فعلی اگر وجود نداشته باشد) ساخته می‌شود و مراحل بعدی همان تسک روی آن ادامه می‌دهند.
+- اگر repo روی برنچ دیگری تغییرات commit‌نشده داشته باشد، مرحله با پیام روشن `failed` می‌شود تا کار دو تسک قاطی نشود.
+- برای هر repo یک `TaskRepo` در `task.repos` ثبت می‌شود: برنچ، برنچ پایه، آخرین commit، push شده یا نه، و لینک PR.
+- commit، push و PR فقط با دکمه‌های داشبورد (اقدام انسانی) انجام می‌شوند:
+
+| Endpoint | کار |
+|---|---|
+| `POST .../github/validate` | بررسی دسترسی token به repo از طریق GitHub API |
+| `POST .../github/commit-push` | `git add -A` و commit روی برنچ تسک (پیام شامل خلاصهٔ مراحل)، سپس push همان برنچ |
+| `POST .../github/create-pr` | ساخت PR از `sdlc/<task-id>` به برنچ پایه با خلاصه، فایل‌ها، نتیجهٔ تست‌ها و issueهای هر مرحله؛ اگر PR وجود داشته باشد همان را برمی‌گرداند |
+
+- token در هر درخواست فرستاده می‌شود (یا از `github_config` / `GITHUB_TOKEN`)، در remote گیت ذخیره نمی‌شود و در پیام خطا با `***` پوشانده می‌شود.
+- آدرس غیر GitHub (مثلاً یک remote محلی) برای push پذیرفته می‌شود ولی ساخت PR فقط برای GitHub است.
+
 ## ذخیره‌سازی
 
 همه‌چیز فایل JSON است، بدون دیتابیس و بدون قفل:
