@@ -1069,6 +1069,22 @@ async def transition_sdlc_task(task_id: str, transition: StageTransitionRequest)
         raise HTTPException(500, f"Failed to transition task: {exc}") from exc
 
 
+@app.post("/api/sdlc/tasks/{task_id}/approve", response_model=SDLCTask)
+async def approve_sdlc_task(task_id: str):
+    """Human sign-off: move a task that finished every stage from pending_approval to done."""
+    task = await sdlc_task_manager.load_task(task_id)
+    if not task:
+        raise HTTPException(404, f"SDLC task {task_id} not found")
+    if task.sdlc_status != SDLCStatus.pending_approval:
+        raise HTTPException(409, f"Task status is {task.sdlc_status.value}, not pending_approval")
+    task.previous_status = task.sdlc_status
+    task.sdlc_status = SDLCStatus.done
+    task.transition_reason = "Approved by human"
+    task.updated_at = datetime.now(timezone.utc)
+    await sdlc_task_manager.save_task(task)
+    return task
+
+
 @app.post("/api/sdlc/human-intervention", response_model=dict)
 async def create_human_intervention_request(
     task_id: str,

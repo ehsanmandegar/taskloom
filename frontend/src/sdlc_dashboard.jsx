@@ -19,6 +19,7 @@ const sdlcStages = [
   { id: 'testing', label: 'آزمون', color: 'bg-orange-100', icon: AlertCircle },
   { id: 'human_qa', label: 'تأیید کیفیت', color: 'bg-yellow-100', icon: Eye },
   { id: 'revision', label: 'بازبینی', color: 'bg-red-100', icon: RefreshCw },
+  { id: 'pending_approval', label: 'منتظر تأیید نهایی', color: 'bg-yellow-200', icon: Eye },
   { id: 'done', label: 'انجام شده', color: 'bg-green-200', icon: CheckCircle },
   { id: 'failed', label: 'ناموفق', color: 'bg-red-200', icon: XCircle },
   { id: 'blocked', label: 'مسدود شده', color: 'bg-gray-300', icon: Pause }
@@ -66,7 +67,15 @@ export default function SDLCDashboard() {
         system_prompt: '',
         test_instructions: {},
         timeout_seconds: 300,
-        max_retries: 2
+        max_retries: 2,
+        github_config: {
+          repository_url: '',
+          github_token: '',
+          branch: 'main',
+          auto_commit: false,
+          auto_push: false,
+          auto_pr: false
+        }
       },
       backend: { 
         enabled: true, 
@@ -75,7 +84,15 @@ export default function SDLCDashboard() {
         system_prompt: '',
         test_instructions: {},
         timeout_seconds: 300,
-        max_retries: 2
+        max_retries: 2,
+        github_config: {
+          repository_url: '',
+          github_token: '',
+          branch: 'main',
+          auto_commit: false,
+          auto_push: false,
+          auto_pr: false
+        }
       },
       n8n: { 
         enabled: true, 
@@ -84,7 +101,15 @@ export default function SDLCDashboard() {
         system_prompt: '',
         test_instructions: {},
         timeout_seconds: 300,
-        max_retries: 2
+        max_retries: 2,
+        github_config: {
+          repository_url: '',
+          github_token: '',
+          branch: 'main',
+          auto_commit: false,
+          auto_push: false,
+          auto_pr: false
+        }
       },
       frontend: { 
         enabled: true, 
@@ -93,7 +118,15 @@ export default function SDLCDashboard() {
         system_prompt: '',
         test_instructions: {},
         timeout_seconds: 300,
-        max_retries: 2
+        max_retries: 2,
+        github_config: {
+          repository_url: '',
+          github_token: '',
+          branch: 'main',
+          auto_commit: false,
+          auto_push: false,
+          auto_pr: false
+        }
       },
       qa: { 
         enabled: true, 
@@ -102,7 +135,15 @@ export default function SDLCDashboard() {
         system_prompt: '',
         test_instructions: {},
         timeout_seconds: 300,
-        max_retries: 2
+        max_retries: 2,
+        github_config: {
+          repository_url: '',
+          github_token: '',
+          branch: 'main',
+          auto_commit: false,
+          auto_push: false,
+          auto_pr: false
+        }
       }
     }
   });
@@ -118,6 +159,16 @@ export default function SDLCDashboard() {
   const [projectFormStep, setProjectFormStep] = useState(1);
   const [activeAgentTab, setActiveAgentTab] = useState('analysis');
   const [selectedTask, setSelectedTask] = useState(null);
+  const [githubCredentials, setGithubCredentials] = useState({
+    backend: { url: '', token: '', showToken: false },
+    n8n: { url: '', token: '', showToken: false },
+    frontend: { url: '', token: '', showToken: false }
+  });
+  const [agentGithubDialogs, setAgentGithubDialogs] = useState({
+    backend: false,
+    n8n: false,
+    frontend: false
+  });
   
   // Load SDLC data
   useEffect(() => {
@@ -130,10 +181,14 @@ export default function SDLCDashboard() {
     try {
       setLoading(true);
       
-      // Load tasks
-      const tasksUrl = selectedStatus || selectedProject 
-        ? `${API}/api/sdlc/tasks?${selectedStatus ? `status=${selectedStatus}` : ''}${selectedProject ? `&project=${selectedProject}` : ''}`
-        : `${API}/api/sdlc/tasks`;
+      // Load tasks with filters
+      let tasksUrl = `${API}/api/sdlc/tasks`;
+      const params = [];
+      if (selectedStatus) params.push(`status=${selectedStatus}`);
+      if (selectedProject) params.push(`project=${selectedProject}`);
+      if (params.length > 0) {
+        tasksUrl += '?' + params.join('&');
+      }
       
       const tasksResponse = await fetch(tasksUrl);
       if (!tasksResponse.ok) throw new Error('خطا در بارگذاری تسک‌ها');
@@ -163,26 +218,29 @@ export default function SDLCDashboard() {
   }
   
   // Filter tasks based on search query
-  const filteredTasks = tasks.filter(task => {
+  // Ensure tasks is an array
+  const safeTasks = Array.isArray(tasks) ? tasks : [];
+  
+  const filteredTasks = safeTasks.filter(task => {
     if (!searchQuery) return true;
     
     const query = searchQuery.toLowerCase();
     return (
-      task.base_task.task_id.toLowerCase().includes(query) ||
-      task.base_task.session_name.toLowerCase().includes(query) ||
-      task.base_task.summary.toLowerCase().includes(query) ||
-      task.project_config_id.toLowerCase().includes(query)
+      task.base_task?.task_id?.toLowerCase().includes(query) ||
+      task.base_task?.session_name?.toLowerCase().includes(query) ||
+      task.base_task?.summary?.toLowerCase().includes(query) ||
+      task.project_config_id?.toLowerCase().includes(query)
     );
   });
   
   // Calculate statistics
   const stats = {
-    total: tasks.length,
-    active: tasks.filter(t => ['analyzing', 'backend_running', 'n8n_running', 'frontend_running', 'testing'].includes(t.sdlc_status)).length,
-    pendingHuman: tasks.filter(t => ['human_review', 'human_qa'].includes(t.sdlc_status)).length,
-    completed: tasks.filter(t => t.sdlc_status === 'done').length,
-    failed: tasks.filter(t => t.sdlc_status === 'failed').length,
-    revisions: tasks.reduce((sum, task) => sum + (task.revision_count || 0), 0)
+    total: safeTasks.length,
+    active: safeTasks.filter(t => ['analyzing', 'backend_running', 'n8n_running', 'frontend_running', 'testing'].includes(t.sdlc_status)).length,
+    pendingHuman: safeTasks.filter(t => ['human_review', 'human_qa', 'pending_approval'].includes(t.sdlc_status)).length,
+    completed: safeTasks.filter(t => t.sdlc_status === 'done').length,
+    failed: safeTasks.filter(t => t.sdlc_status === 'failed').length,
+    revisions: safeTasks.reduce((sum, task) => sum + (task.revision_count || 0), 0)
   };
   
   // Group tasks by status for pipeline view
@@ -227,6 +285,19 @@ export default function SDLCDashboard() {
     }
   };
   
+  // Final human sign-off for a task that finished every stage
+  const handleApprove = async (taskId) => {
+    try {
+      const response = await fetch(`${API}/api/sdlc/tasks/${taskId}/approve`, { method: 'POST' });
+      if (!response.ok) throw new Error('خطا در تأیید نهایی تسک');
+      const updated = await response.json();
+      setSelectedTask(current => (current && current.base_task.task_id === taskId ? updated : current));
+      await loadSDLCData();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
   // Handle human intervention response
   const handleInterventionResponse = async (interventionId, response) => {
     try {
@@ -739,7 +810,7 @@ export default function SDLCDashboard() {
             onChange={(e) => setSelectedProject(e.target.value)}
           >
             <option value="">همه پروژه‌ها</option>
-            {projects.map(project => (
+            {(Array.isArray(projects) ? projects : []).map(project => (
               <option key={project.id} value={project.id}>
                 {project.name}
               </option>
@@ -924,7 +995,7 @@ export default function SDLCDashboard() {
             </div>
           ) : (
             <div className="sdlc-interventions-list">
-              {pendingInterventions.map(intervention => (
+              {(Array.isArray(pendingInterventions) ? pendingInterventions : []).map(intervention => (
                 <div key={intervention.id} className="sdlc-intervention-card">
                   <div className="sdlc-intervention-header">
                     <div>
@@ -1022,6 +1093,11 @@ export default function SDLCDashboard() {
                     اولویت: {{low:'پایین',medium:'متوسط',high:'بالا',critical:'بحرانی'}[selectedTask.priority]}
                   </span>
                 )}
+                {selectedTask.sdlc_status === 'pending_approval' && (
+                  <button type="button" className="sdlc-btn sdlc-btn-primary" onClick={() => handleApprove(selectedTask.base_task.task_id)}>
+                    <CheckCircle size={14} /> تأیید نهایی
+                  </button>
+                )}
               </div>
 
               {/* Description */}
@@ -1074,6 +1150,158 @@ export default function SDLCDashboard() {
                 <div className="sdlc-review-row"><span>تعداد بازبینی</span><span>{selectedTask.revision_count}</span></div>
                 <div className="sdlc-review-row"><span>ایجاد</span><span>{formatDate(selectedTask.created_at)}</span></div>
                 <div className="sdlc-review-row"><span>آخرین به‌روزرسانی</span><span>{formatDate(selectedTask.updated_at)}</span></div>
+              </div>
+
+              {/* GitHub Integration for agents */}
+              <div className="sdlc-detail-section">
+                <h4>GitHub Integration - نتشر و Commit</h4>
+                <div style={{padding: '12px 14px', fontSize: '12px', color: '#384239'}}>
+                  {['backend', 'n8n', 'frontend'].map(agent => (
+                    <div key={agent} style={{marginBottom: '16px', borderBottom: '1px solid #e2e3dd', paddingBottom: '12px'}}>
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'}}>
+                        <strong style={{textTransform: 'capitalize'}}>{agent} Agent</strong>
+                        <button
+                          onClick={() => setAgentGithubDialogs({...agentGithubDialogs, [agent]: !agentGithubDialogs[agent]})}
+                          style={{padding: '4px 12px', fontSize: '11px', background: '#173f2b', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
+                        >
+                          {agentGithubDialogs[agent] ? 'بستن' : 'تنظیم GitHub'}
+                        </button>
+                      </div>
+                      
+                      {agentGithubDialogs[agent] && (
+                        <div style={{background: '#f5f7f4', padding: '12px', borderRadius: '6px', marginTop: '8px'}}>
+                          <div style={{marginBottom: '10px'}}>
+                            <label style={{display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px', color: '#50574f'}}>GitHub Repository URL</label>
+                            <input
+                              type="text"
+                              placeholder="https://github.com/user/repo"
+                              value={githubCredentials[agent].url}
+                              onChange={(e) => setGithubCredentials({
+                                ...githubCredentials,
+                                [agent]: {...githubCredentials[agent], url: e.target.value}
+                              })}
+                              style={{width: '100%', padding: '8px', fontSize: '12px', border: '1px solid #d9dcd4', borderRadius: '6px', fontFamily: 'monospace'}}
+                            />
+                          </div>
+                          
+                          <div style={{marginBottom: '10px'}}>
+                            <label style={{display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px', color: '#50574f'}}>GitHub Token (PAT)</label>
+                            <div style={{display: 'flex', gap: '8px'}}>
+                              <input
+                                type={githubCredentials[agent].showToken ? "text" : "password"}
+                                placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                                value={githubCredentials[agent].token}
+                                onChange={(e) => setGithubCredentials({
+                                  ...githubCredentials,
+                                  [agent]: {...githubCredentials[agent], token: e.target.value}
+                                })}
+                                style={{flex: 1, padding: '8px', fontSize: '12px', border: '1px solid #d9dcd4', borderRadius: '6px', fontFamily: 'monospace'}}
+                              />
+                              <button
+                                onClick={() => setGithubCredentials({
+                                  ...githubCredentials,
+                                  [agent]: {...githubCredentials[agent], showToken: !githubCredentials[agent].showToken}
+                                })}
+                                style={{padding: '8px 10px', fontSize: '11px', background: '#e8ede4', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
+                              >
+                                {githubCredentials[agent].showToken ? '🙈' : '👁️'}
+                              </button>
+                            </div>
+                            <small style={{display: 'block', color: '#899087', marginTop: '4px'}}>
+                              Create at https://github.com/settings/tokens (repo scope required)
+                            </small>
+                          </div>
+                          
+                          <div style={{display: 'flex', gap: '8px'}}>
+                            <button
+                              onClick={() => {
+                                if (!githubCredentials[agent].url || !githubCredentials[agent].token) {
+                                  alert('لطفاً URL و Token را وارد کنید');
+                                  return;
+                                }
+                                // Save credentials and validate
+                                fetch(`${API}/api/sdlc/tasks/${selectedTask.base_task.task_id}/github/validate`, {
+                                  method: 'POST',
+                                  headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify({
+                                    repo_url: githubCredentials[agent].url,
+                                    github_token: githubCredentials[agent].token
+                                  })
+                                })
+                                .then(r => r.json())
+                                .then(data => {
+                                  if (data.status === 'valid') {
+                                    alert(`✅ GitHub credentials تأیید شدند!\nRepository: ${data.owner}/${data.repo}`);
+                                  } else {
+                                    alert(`❌ خطا: ${data.message}`);
+                                  }
+                                })
+                                .catch(err => alert(`❌ خطا: ${err.message}`));
+                              }}
+                              style={{flex: 1, padding: '8px 12px', fontSize: '11px', background: '#173f2b', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
+                            >
+                              ✓ ذخیره و تأیید
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (!githubCredentials[agent].url || !githubCredentials[agent].token) {
+                                  alert('لطفاً ابتدا GitHub credentials را وارد کنید');
+                                  return;
+                                }
+                                // Commit and push
+                                fetch(`${API}/api/sdlc/tasks/${selectedTask.base_task.task_id}/github/commit-push`, {
+                                  method: 'POST',
+                                  headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify({
+                                    agent: agent,
+                                    repo_url: githubCredentials[agent].url,
+                                    github_token: githubCredentials[agent].token
+                                  })
+                                })
+                                .then(r => r.json())
+                                .then(data => {
+                                  alert(`✅ ${data.message}\n\nCommit: ${data.commit_sha}\nBranch: ${data.branch}`);
+                                })
+                                .catch(err => alert(`❌ خطا: ${err.message}`));
+                              }}
+                              style={{flex: 1, padding: '8px 12px', fontSize: '11px', background: '#6b8d72', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
+                            >
+                              📤 Commit و Push
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (!githubCredentials[agent].url || !githubCredentials[agent].token) {
+                                  alert('لطفاً ابتدا GitHub credentials را وارد کنید');
+                                  return;
+                                }
+                                // Create PR
+                                fetch(`${API}/api/sdlc/tasks/${selectedTask.base_task.task_id}/github/create-pr`, {
+                                  method: 'POST',
+                                  headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify({
+                                    agent: agent,
+                                    repo_url: githubCredentials[agent].url,
+                                    github_token: githubCredentials[agent].token,
+                                    title: `SDLC: Changes from ${agent} agent`,
+                                    description: selectedTask.description
+                                  })
+                                })
+                                .then(r => r.json())
+                                .then(data => {
+                                  alert(`✅ ${data.message}\n\nPR #${data.pr_number}\nURL: ${data.pr_url}`);
+                                })
+                                .catch(err => alert(`❌ خطا: ${err.message}`));
+                              }}
+                              style={{flex: 1, padding: '8px 12px', fontSize: '11px', background: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
+                            >
+                              🔀 Pull Request
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -1363,8 +1591,26 @@ export default function SDLCDashboard() {
                     { key: 'frontend',  label: 'Frontend',  icon: '🎨', color: '#ec4899' },
                     { key: 'qa',        label: 'QA',        icon: '✅', color: '#f97316' },
                   ];
-                  const updateAgent = (key, field, val) =>
-                    setNewProject({...newProject, agents: {...newProject.agents, [key]: {...newProject.agents[key], [field]: val}}});
+                  
+                  // Helper to ensure github_config always exists
+                  const ensureGithubConfig = (agentConfig) => ({
+                    ...agentConfig,
+                    github_config: agentConfig?.github_config || {
+                      repository_url: '',
+                      github_token: '',
+                      branch: 'main',
+                      auto_commit: false,
+                      auto_push: false,
+                      auto_pr: false,
+                      showToken: false
+                    }
+                  });
+                  
+                  const updateAgent = (key, field, val) => {
+                    const currentAgent = newProject.agents[key] || {};
+                    const updatedAgent = ensureGithubConfig({...currentAgent, [field]: val});
+                    setNewProject({...newProject, agents: {...newProject.agents, [key]: updatedAgent}});
+                  };
 
                   return (
                     <>
@@ -1450,6 +1696,115 @@ export default function SDLCDashboard() {
                                     value={newProject.agents[key].max_retries}
                                     onChange={(e) => updateAgent(key, 'max_retries', parseInt(e.target.value) || 2)}
                                   />
+                                </div>
+                              </div>
+
+                              <div className="sdlc-agent-section">
+                                <h5>GitHub Configuration</h5>
+                                <div className="sdlc-form-row">
+                                  <div className="sdlc-form-group">
+                                    <label>Repository URL</label>
+                                    <input
+                                      type="text"
+                                      value={newProject.agents[key]?.github_config?.repository_url || ''}
+                                      onChange={(e) => {
+                                        updateAgent(key, 'github_config', {
+                                          ...(newProject.agents[key]?.github_config || {}),
+                                          repository_url: e.target.value
+                                        });
+                                      }}
+                                      placeholder="https://github.com/username/repository"
+                                    />
+                                  </div>
+                                </div>
+                                <div className="sdlc-form-group">
+                                  <label>GitHub Token</label>
+                                  <div className="sdlc-input-with-button">
+                                    <input
+                                      type={newProject.agents[key]?.github_config?.showToken ? 'text' : 'password'}
+                                      value={newProject.agents[key]?.github_config?.github_token || ''}
+                                      onChange={(e) => {
+                                        updateAgent(key, 'github_config', {
+                                          ...(newProject.agents[key]?.github_config || {}),
+                                          github_token: e.target.value
+                                        });
+                                      }}
+                                      placeholder="ghp_..."
+                                    />
+                                    <button
+                                      type="button"
+                                      className="sdlc-btn sdlc-btn-secondary"
+                                      onClick={() => {
+                                        updateAgent(key, 'github_config', {
+                                          ...(newProject.agents[key]?.github_config || {}),
+                                          showToken: !(newProject.agents[key]?.github_config?.showToken)
+                                        });
+                                      }}
+                                      style={{minWidth: '70px'}}
+                                    >
+                                      {newProject.agents[key]?.github_config?.showToken ? 'Hide' : 'Show'}
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="sdlc-form-row">
+                                  <div className="sdlc-form-group">
+                                    <label>Branch</label>
+                                    <input
+                                      type="text"
+                                      value={newProject.agents[key]?.github_config?.branch || 'main'}
+                                      onChange={(e) => {
+                                        updateAgent(key, 'github_config', {
+                                          ...(newProject.agents[key]?.github_config || {}),
+                                          branch: e.target.value
+                                        });
+                                      }}
+                                      placeholder="main"
+                                    />
+                                  </div>
+                                  <div className="sdlc-form-group">
+                                    <label>Auto Actions</label>
+                                    <div className="sdlc-checkbox-group">
+                                      <label>
+                                        <input
+                                          type="checkbox"
+                                          checked={newProject.agents[key]?.github_config?.auto_commit || false}
+                                          onChange={(e) => {
+                                            updateAgent(key, 'github_config', {
+                                              ...(newProject.agents[key]?.github_config || {}),
+                                              auto_commit: e.target.checked
+                                            });
+                                          }}
+                                        />
+                                        <span>Auto Commit</span>
+                                      </label>
+                                      <label>
+                                        <input
+                                          type="checkbox"
+                                          checked={newProject.agents[key]?.github_config?.auto_push || false}
+                                          onChange={(e) => {
+                                            updateAgent(key, 'github_config', {
+                                              ...(newProject.agents[key]?.github_config || {}),
+                                              auto_push: e.target.checked
+                                            });
+                                          }}
+                                        />
+                                        <span>Auto Push</span>
+                                      </label>
+                                      <label>
+                                        <input
+                                          type="checkbox"
+                                          checked={newProject.agents[key]?.github_config?.auto_pr || false}
+                                          onChange={(e) => {
+                                            updateAgent(key, 'github_config', {
+                                              ...(newProject.agents[key]?.github_config || {}),
+                                              auto_pr: e.target.checked
+                                            });
+                                          }}
+                                        />
+                                        <span>Auto PR</span>
+                                      </label>
+                                    </div>
+                                  </div>
                                 </div>
                               </div>
                             </div>
@@ -1545,7 +1900,7 @@ export default function SDLCDashboard() {
             </div>
           ) : (
             <div className="sdlc-projects-grid">
-              {projects.map(project => (
+              {(Array.isArray(projects) ? projects : []).map(project => (
                 <div key={project.id} className="sdlc-project-card">
                   <div className="sdlc-project-header">
                     <h3>{project.name}</h3>

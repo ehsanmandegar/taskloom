@@ -330,6 +330,7 @@ class SDLCStatus(str, Enum):
     frontend_running = "frontend_running"
     testing = "testing"  # Reusing existing
     human_qa = "human_qa"
+    pending_approval = "pending_approval"
     revision = "revision"
     blocked = "blocked"  # Reusing existing
     failed = "failed"    # Reusing existing
@@ -345,6 +346,14 @@ class AgentConfig(BaseModel):
     test_instructions: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = 300
     max_retries: int = 2
+    github_config: dict[str, str | bool] = Field(default_factory=lambda: {
+        "repository_url": "",
+        "github_token": "",
+        "branch": "main",
+        "auto_commit": False,
+        "auto_push": False,
+        "auto_pr": False
+    })
 
 
 class ProjectWorkflowConfig(BaseModel):

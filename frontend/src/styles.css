@@ -2263,17 +2263,37 @@ html[data-theme="dark"] .sdlc-chip-arrow {
 .sdlc-task-detail-modal {
   position: relative;
   width: min(720px, 100%);
+  height: auto;
   max-height: calc(100vh - 40px);
-  overflow-y: auto;
   background: #fffffce8;
   border: 1px solid #d0d4ca;
   border-radius: 16px;
   box-shadow: 0 20px 60px rgba(10,40,20,0.18);
   animation: slideUp 0.18s ease;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sdlc-task-detail-modal .sdlc-form-header {
+  flex-shrink: 0;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid #e2e3dd;
+  background: #fffffce8;
+  z-index: 2;
+}
+
+.sdlc-task-detail-modal .sdlc-form-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px 20px 24px;
 }
 
 .sdlc-detail-section {
   margin-bottom: 16px;
+  margin-left: 0;
+  margin-right: 0;
   border: 1px solid #e2e3dd;
   border-radius: 10px;
   overflow: hidden;
@@ -2341,6 +2361,152 @@ html[data-theme="dark"] .sdlc-chip-arrow {
   border-radius: 3px;
 }
 
+.sdlc-github-section {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: #384239;
+}
+
+.sdlc-github-agent {
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e2e3dd;
+  padding-bottom: 12px;
+}
+
+.sdlc-github-agent:last-child {
+  border-bottom: none;
+}
+
+.sdlc-github-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.sdlc-github-header strong {
+  text-transform: capitalize;
+  font-weight: 600;
+}
+
+.sdlc-github-button {
+  padding: 4px 12px;
+  font-size: 11px;
+  background: #173f2b;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.sdlc-github-button:hover {
+  background: #0f2818;
+}
+
+.sdlc-github-form {
+  background: #f5f7f4;
+  padding: 12px;
+  border-radius: 6px;
+  margin-top: 8px;
+}
+
+.sdlc-github-form-group {
+  margin-bottom: 10px;
+}
+
+.sdlc-github-form-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #50574f;
+}
+
+.sdlc-github-form-input {
+  width: 100%;
+  padding: 8px;
+  font-size: 12px;
+  border: 1px solid #d9dcd4;
+  border-radius: 6px;
+  font-family: monospace;
+  color: #384239;
+}
+
+.sdlc-github-form-input:focus {
+  outline: none;
+  border-color: #6b8d72;
+  box-shadow: 0 0 0 3px #6b8d721c;
+}
+
+.sdlc-github-input-group {
+  display: flex;
+  gap: 8px;
+}
+
+.sdlc-github-input-group input {
+  flex: 1;
+}
+
+.sdlc-github-toggle-btn {
+  padding: 8px 10px;
+  font-size: 14px;
+  background: #e8ede4;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sdlc-github-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sdlc-github-action-btn {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 11px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: 0.2s;
+}
+
+.sdlc-github-action-save {
+  background: #173f2b;
+  color: #fff;
+}
+
+.sdlc-github-action-save:hover {
+  background: #0f2818;
+}
+
+.sdlc-github-action-commit {
+  background: #6b8d72;
+  color: #fff;
+}
+
+.sdlc-github-action-commit:hover {
+  background: #527159;
+}
+
+.sdlc-github-action-pr {
+  background: #d97706;
+  color: #fff;
+}
+
+.sdlc-github-action-pr:hover {
+  background: #b86c05;
+}
+
+.sdlc-github-hint {
+  display: block;
+  color: #899087;
+  margin-top: 4px;
+  font-size: 10px;
+}
+
 .sdlc-raw-output {
   margin: 8px 0 0;
   padding: 10px;
@@ -2348,12 +2514,13 @@ html[data-theme="dark"] .sdlc-chip-arrow {
   color: #9dffcb;
   border-radius: 6px;
   font-size: 10px;
-  max-height: 240px;
+  max-height: 400px;
   overflow: auto;
   white-space: pre-wrap;
   direction: ltr;
   text-align: left;
   font-family: 'Courier New', monospace;
+  line-height: 1.5;
 }
 
 html[data-theme="dark"] .sdlc-task-detail-modal {
@@ -2362,8 +2529,87 @@ html[data-theme="dark"] .sdlc-task-detail-modal {
   box-shadow: 0 20px 60px rgba(0,0,0,0.5);
 }
 
+html[data-theme="dark"] .sdlc-task-detail-modal .sdlc-form-header {
+  background: #020c08f0;
+  border-color: #0a5a36;
+}
+
 html[data-theme="dark"] .sdlc-detail-section {
   border-color: #0a4b2f;
+  background: #03150d;
+}
+
+html[data-theme="dark"] .sdlc-detail-section h4 {
+  background: #061a0f;
+  border-color: #0a4b2f;
+  color: #70a88c;
+}
+
+html[data-theme="dark"] .sdlc-agent-result-card {
+  background: #051d11;
+  border-color: #0a4b2f;
+  color: #c9ffe3;
+}
+
+html[data-theme="dark"] .sdlc-agent-result-status {
+  color: #70a88c;
+}
+
+html[data-theme="dark"] .sdlc-github-form {
+  background: #051d11;
+  border: 1px solid #0a4b2f;
+}
+
+html[data-theme="dark"] .sdlc-github-form-label {
+  color: #70a88c;
+}
+
+html[data-theme="dark"] .sdlc-github-form-input {
+  background: #010503;
+  color: #c9ffe3;
+  border-color: #0b5735;
+}
+
+html[data-theme="dark"] .sdlc-github-form-input:focus {
+  border-color: #00db72;
+  box-shadow: 0 0 0 3px #00ff8824;
+}
+
+html[data-theme="dark"] .sdlc-github-toggle-btn {
+  background: #03110b;
+  color: #8dffc5;
+  border-color: #0b673d;
+}
+
+html[data-theme="dark"] .sdlc-github-action-save {
+  background: var(--hacker-green, #00db72);
+  color: #00180c;
+}
+
+html[data-theme="dark"] .sdlc-github-action-save:hover {
+  background: var(--hacker-green, #00ff88);
+}
+
+html[data-theme="dark"] .sdlc-github-action-commit {
+  background: #0c5a36;
+  color: #8dffc5;
+}
+
+html[data-theme="dark"] .sdlc-github-action-commit:hover {
+  background: #0a7344;
+}
+
+html[data-theme="dark"] .sdlc-github-action-pr {
+  background: #8b5a00;
+  color: #ffd57c;
+}
+
+html[data-theme="dark"] .sdlc-github-action-pr:hover {
+  background: #b87000;
+}
+
+html[data-theme="dark"] .sdlc-github-hint {
+  color: #70a88c;
 }
 
 html[data-theme="dark"] .sdlc-detail-section h4 {
@@ -2464,4 +2710,113 @@ html[data-theme="dark"] .sdlc-form-actions {
     align-items: flex-start;
     gap: 15px;
   }
+}/* GitHub Configuration Styles */
+.sdlc-agent-section {
+  border-top: 1px solid #e2e3dd;
+  margin-top: 20px;
+  padding-top: 15px;
+}
+
+.sdlc-agent-section h5 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 15px 0;
+  color: #384239;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sdlc-agent-section h5::before {
+  content: '';
+  width: 18px;
+  height: 18px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236e746c'%3E%3Cpath d='M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+.sdlc-input-with-button {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sdlc-input-with-button input {
+  flex: 1;
+  min-width: 0;
+}
+
+.sdlc-input-with-button button {
+  min-width: 70px;
+  height: 38px;
+  border: 1px solid #d7dbd3;
+  border-radius: 8px;
+  background: #fff;
+  color: #31563d;
+  padding: 0 12px;
+  font: 600 11px Vazirmatn;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.sdlc-input-with-button button:hover {
+  border-color: #6b8d72;
+  background: #f5f8f3;
+}
+
+.sdlc-checkbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sdlc-checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #384239;
+}
+
+.sdlc-checkbox-group input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.sdlc-checkbox-group span {
+  font-size: 12px;
+}
+
+/* Dark mode styles */
+html[data-theme="dark"] .sdlc-agent-section {
+  border-color: #0a4b2f;
+}
+
+html[data-theme="dark"] .sdlc-agent-section h5 {
+  color: #d7ffe9;
+}
+
+html[data-theme="dark"] .sdlc-agent-section h5::before {
+  filter: invert(1) brightness(2);
+}
+
+html[data-theme="dark"] .sdlc-input-with-button button {
+  background: #03110b;
+  color: var(--hacker-green-soft);
+  border-color: #0b673d;
+}
+
+html[data-theme="dark"] .sdlc-input-with-button button:hover {
+  background: #052619;
+  border-color: var(--hacker-green);
+}
+
+html[data-theme="dark"] .sdlc-checkbox-group label {
+  color: #d7ffe9;
 }
