@@ -30,6 +30,10 @@ async def lifespan(_: FastAPI):
     global scheduler_worker
     scheduler_worker = asyncio.create_task(todo_scheduler())
     try:
+        await sdlc_task_manager.recover_interrupted_tasks()
+    except Exception as exc:  # recovery must never keep the server from starting
+        print(f"[SDLC] Recovery after restart failed: {exc}", flush=True)
+    try:
         yield
     finally:
         scheduler_worker.cancel()

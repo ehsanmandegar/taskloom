@@ -107,6 +107,7 @@ stateDiagram-v2
 | `analysis_approval` | پایان analysis وقتی `require_analysis_approval` | رفتن به مرحلهٔ بعد | analysis با بازخورد دوباره اجرا می‌شود | `failed` |
 | `agent_question` | عامل `needs_human` برگرداند | — | همان مرحله با پاسخ دوباره اجرا می‌شود | `failed` |
 | `revision_limit` | `revision_count` به `max_revision_attempts` رسید یا مرحلهٔ هدف نامعتبر بود | — | مرحلهٔ درخواست‌کننده با راهنمایی دوباره اجرا می‌شود | `failed` |
+| `interrupted` | سرور وسط اجرای مرحله بسته شد | `resume`: مرحله دوباره اجرا می‌شود | مرحله با راهنمایی دوباره اجرا می‌شود | `failed` |
 
 پاسخ‌های انسان و درخواست‌های بازبینی هر مرحله در prompt اجرای بعدی همان مرحله قرار می‌گیرند (`sdlc_runner.stage_feedback`) — هم برای عامل CLI و هم Ollama.
 
@@ -148,6 +149,16 @@ flowchart TD
   `needs_revision` ← حلقهٔ بازبینی (پایین‌تر)؛ `blocked`/`failed` ← `failed` با دلیل.
 - تنظیمات هر مرحله: `project_path`، `knowledge_path`، `system_prompt`، `test_instructions: {"command": "...", "working_directory": "..."}`،
   `cli_timeout_seconds` (پیش‌فرض 3600) و `timeout_seconds` (فقط Ollama).
+
+### بازیابی پس از restart
+
+- هنگام اجرای عامل CLI، PID و نام برنامهٔ آن در `data/tasks/<id>/agent.pid` نوشته می‌شود و پس از پایان حذف می‌شود.
+- در شروع سرور (`lifespan` ← `SDLCTaskManager.recover_interrupted_tasks`) هر تسکی که در وضعیت در حال اجرا مانده باشد پیدا می‌شود:
+  - اگر فرایند عامل قبلی هنوز زنده باشد و **همان برنامه** باشد (نام برنامه با مقدار ثبت‌شده مقایسه می‌شود تا PID بازاستفاده‌شده کشته نشود)، کل درخت فرایند آن متوقف می‌شود.
+    روی ویندوز عامل با crash سرور نمی‌میرد و به ویرایش فایل‌ها ادامه می‌دهد؛ بدون این کار دو عامل هم‌زمان در یک پوشه کار می‌کردند.
+  - یک مورد `interrupted` در inbox ساخته می‌شود: `resume` همان مرحله را دوباره اجرا می‌کند، `stop` تسک را متوقف می‌کند.
+  - اگر `workflow.auto_resume_interrupted` روشن باشد، مرحله بدون پرسیدن دوباره اجرا می‌شود.
+- خاموش‌کردن عادی سرور (Ctrl+C) اجرای عامل را لغو و فرایند را می‌کشد؛ این مسیر فقط برای crash یا kill است.
 
 ### Git و GitHub (`backend/app/sdlc_git.py`)
 

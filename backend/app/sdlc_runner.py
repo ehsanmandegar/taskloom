@@ -18,7 +18,9 @@ from .models import (
     SDLCProjectConfig, SDLCTask, StageRunner, TestResults,
 )
 from .sdlc_git import prepare_task_branch
+from .process_tools import process_image
 from .services import (
+    _command_started_handler,
     WORKSPACE_IGNORED_DIRECTORIES, agent_error_detail, agent_executable, agent_name,
     agent_response, command, initial_agent_args, run_agent_command, test_plan,
 )
@@ -206,7 +208,17 @@ async def run_stage_tests(config: AgentConfig, workdir: Path) -> TestResults:
     )
 
 
-async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, runner: StageRunner) -> AgentResult:
+def record_agent_process(pid_file: Path, stage: str):
+    """Return a callback that writes the started agent's PID and image name to `pid_file`."""
+    def started(pid: int) -> None:
+        image = process_image(pid) or ""
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(json.dumps({"pid": pid, "image": image, "stage": stage}), encoding="utf-8")
+    return started
+
+
+async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, runner: StageRunner,
+                        pid_file: Path | None = None) -> AgentResult:
     """Run one SDLC stage with Claude Code or Codex inside the stage's project folder."""
     agent_type = AgentType.claude if runner == StageRunner.claude else AgentType.codex
     display_name = agent_name(agent_type)
@@ -224,7 +236,13 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     state.step = f"{display_name} is running the {stage} stage"
 
     before = snapshot_folder(workdir)
-    code, output = await run_agent_command(agent_type, initial_agent_args(agent_type, executable, prompt), workdir, state, config.cli_timeout_seconds)
+    token = _command_started_handler.set(record_agent_process(pid_file, stage) if pid_file else None)
+    try:
+        code, output = await run_agent_command(agent_type, initial_agent_args(agent_type, executable, prompt), workdir, state, config.cli_timeout_seconds)
+    finally:
+        _command_started_handler.reset(token)
+        if pid_file:
+            pid_file.unlink(missing_ok=True)
     changes = folder_changes(before, snapshot_folder(workdir))
     session_id, response = agent_response(agent_type, output)
     state.codex_thread_id = session_id or state.codex_thread_id

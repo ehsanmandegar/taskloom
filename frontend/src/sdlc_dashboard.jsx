@@ -32,13 +32,14 @@ async function readJsonOrThrow(response) {
   return data;
 }
 
-const responseOptionLabels = { approve: 'تأیید', stop: 'توقف تسک' };
+const responseOptionLabels = { approve: 'تأیید', stop: 'توقف تسک', resume: 'ادامه (اجرای دوبارهٔ مرحله)' };
 
 // What a free-text answer does for each kind of inbox item (see SDLCTaskManager.submit_human_response)
 const interventionHints = {
   analysis_approval: 'با «تأیید» توسعه شروع می‌شود؛ اگر بازخورد بنویسید، تحلیل با بازخورد شما دوباره اجرا می‌شود.',
   agent_question: 'پاسخ شما به عامل داده می‌شود و همین مرحله دوباره اجرا می‌شود.',
   revision_limit: 'سقف دفعات بازبینی پر شده است؛ راهنمایی شما به عامل داده می‌شود و مرحله دوباره اجرا می‌شود.',
+  interrupted: 'سرور وسط اجرای این مرحله بسته شد. «ادامه» مرحله را دوباره اجرا می‌کند؛ فایل‌هایی که عامل قبلاً تغییر داده بود در پوشه باقی مانده‌اند.',
 };
 
 const agentTypes = {

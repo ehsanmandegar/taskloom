@@ -378,6 +378,7 @@ class ProjectWorkflowConfig(BaseModel):
     max_revision_attempts: int = 3
     require_analysis_approval: bool = False
     require_final_human_approval: bool = False
+    auto_resume_interrupted: bool = False  # re-run a stage cut off by a server restart without asking
 
 
 class SDLCProjectConfig(BaseModel):

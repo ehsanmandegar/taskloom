@@ -24,6 +24,8 @@ from .models import AgentType, ChatMessage, GitProvider, McpFailureMode, McpStat
 
 
 _command_output_handler: ContextVar[Callable[[str], None] | None] = ContextVar("command_output_handler", default=None)
+# Called with the child's PID right after it starts (used to find orphaned agents after a crash).
+_command_started_handler: ContextVar[Callable[[int], None] | None] = ContextVar("command_started_handler", default=None)
 COMMIT_MESSAGE_PATTERN = re.compile(r"^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([a-z0-9][a-z0-9._/-]*\))?!?: [A-Za-z0-9][ -~]{0,117}$")
 
 
@@ -35,6 +37,7 @@ def _command_sync(
     handler: Callable[[str], None] | None,
     cancelled: threading.Event,
     stdin_text: str | None = None,
+    started: Callable[[int], None] | None = None,
 ) -> tuple[int, str]:
     """Run a command without depending on the server's asyncio event-loop policy."""
     executable = args[0]
@@ -64,6 +67,8 @@ def _command_sync(
             env=env or os.environ.copy(),
             creationflags=creationflags,
         )
+    if started:
+        started(process.pid)
     assert process.stdout is not None
     output_queue: queue.Queue[bytes | None] = queue.Queue()
 
@@ -115,7 +120,7 @@ async def command(
     """Run a subprocess portably while preserving streaming, timeout, and cancellation."""
     cancelled = threading.Event()
     worker = asyncio.create_task(
-        asyncio.to_thread(_command_sync, args, cwd, timeout, env, _command_output_handler.get(), cancelled, stdin_text)
+        asyncio.to_thread(_command_sync, args, cwd, timeout, env, _command_output_handler.get(), cancelled, stdin_text, _command_started_handler.get())
     )
     try:
         return await asyncio.shield(worker)
@@ -1765,6 +1770,49 @@ class SDLCTaskManager:
     def inbox_dir(self) -> Path:
         return self.data_dir.parent / "human-inbox"
 
+    def agent_pid_file(self, task_id: str) -> Path:
+        return self.data_dir / task_id / "agent.pid"
+
+    async def recover_interrupted_tasks(self) -> List[str]:
+        """On startup: find tasks whose stage was running when the server died, stop orphaned
+        agent processes, and either resume the stage or ask a human what to do."""
+        from .process_tools import stop_if_same_program
+
+        running = set(self.STAGE_STATUS.values()) | {SDLCStatus.created, SDLCStatus.revision}
+        recovered = []
+        for task in await self.list_tasks():
+            task_id = task.base_task.task_id
+            if task.sdlc_status not in running or self.is_running(task_id):
+                continue
+            stage = task.current_stage or "analysis"
+            note = ""
+            pid_file = self.agent_pid_file(task_id)
+            if pid_file.exists():
+                try:
+                    info = json.loads(pid_file.read_text(encoding="utf-8"))
+                    outcome = stop_if_same_program(int(info["pid"]), str(info.get("image", "")))
+                    note = f" The previous agent process (PID {info['pid']}): {outcome}."
+                except (OSError, ValueError, KeyError) as exc:
+                    note = f" Could not check the previous agent process: {exc}."
+                pid_file.unlink(missing_ok=True)
+            print(f"[SDLC] Recovering {task_id}: {stage} was interrupted.{note}", flush=True)
+            recovered.append(task_id)
+
+            project = self.load_project(task.project_config_id)
+            if project and project.workflow.auto_resume_interrupted:
+                task.transition_reason = f"Resumed {stage} after a server restart.{note}"
+                await self.save_task(task)
+                await self.execute_stage(task_id, stage, project)
+                continue
+            await self._ask_human(
+                task, stage, "interrupted", f"Interrupted: the server restarted during {stage}",
+                f"Taskloom stopped while the {stage} stage was running, so its result was lost. "
+                f"Files the agent had already changed are still in its working folder.{note}\n\n"
+                f"Answer 'resume' to run {stage} again (you may add guidance), or 'stop'.",
+                ["resume", "stop"],
+            )
+        return recovered
+
     def load_project(self, project_id: str) -> Optional[SDLCProjectConfig]:
         return SDLCProjectManager(self.data_dir.parent / "projects").get_project(project_id)
 
@@ -1831,7 +1879,7 @@ class SDLCTaskManager:
                     previous = {k: v.model_dump() for k, v in task.agent_results.items()}
                     result = await loop.run_in_executor(None, _ollama_runner.run_agent, stage, task, project, previous)
             else:
-                result = await run_cli_stage(stage, task, project, agent_cfg, runner)
+                result = await run_cli_stage(stage, task, project, agent_cfg, runner, self.agent_pid_file(task_id))
 
             print(f"[SDLC] {stage} finished for {task_id}: {result.status} - {result.summary[:120]}", flush=True)
 
