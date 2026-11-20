@@ -72,6 +72,31 @@ def folder_changes(before: Snapshot, after: Snapshot) -> list[Change]:
     return changes
 
 
+def stage_feedback(task: SDLCTask, stage: str) -> list[str]:
+    """Prompt sections with revision requests aimed at this stage and human answers given to it."""
+    sections = []
+    revisions = [revision for revision in task.revisions if revision.target_agent == stage][-3:]
+    if revisions:
+        sections.append(
+            "## Revision requested — address this first\n" + "\n\n".join(
+                f"From {revision.requesting_agent}: {revision.reason}"
+                + (f"\n{revision.description}" if revision.description and revision.description != revision.reason else "")
+                for revision in revisions
+            )
+        )
+    answers = [
+        item for item in task.human_interventions
+        if item.status == "responded" and (item.context.get("stage") or item.requesting_agent) == stage
+    ][-5:]
+    if answers:
+        sections.append(
+            "## Answers from a human — follow them\n" + "\n\n".join(
+                f"Question: {item.description}\nAnswer: {item.response}" for item in answers
+            )
+        )
+    return sections
+
+
 def build_stage_prompt(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, workdir: Path) -> str:
     role = STAGE_ROLES.get(stage, stage)
     sections = [f"You are the {role} stage of an automated software delivery pipeline (Taskloom) for project \"{project.name}\"."]
@@ -98,6 +123,7 @@ def build_stage_prompt(stage: str, task: SDLCTask, project: SDLCProjectConfig, c
     ]
     if previous:
         sections.append("## Results from earlier stages\n" + "\n\n".join(previous))
+    sections.extend(stage_feedback(task, stage))
     if stage in REPORT_ONLY_STAGES:
         work = (
             "Investigate the existing code and documents in your working folder and produce your report. "
@@ -217,8 +243,10 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
         issues.append(f"{display_name} finished without changing any file in {workdir}.")
 
     tests = await run_stage_tests(config, workdir)
-    if tests.executed and not tests.passed and status == "completed":
-        status = "failed"
+    tests_failed = tests.executed and not tests.passed and status == "completed"
+    if tests_failed:
+        # Let the same stage fix its own work; the manager enforces max_revision_attempts.
+        status = "needs_revision"
         issues.append("Stage tests failed; see test results.")
 
     result = AgentResult(
@@ -236,6 +264,13 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
         result.human_intervention = HumanIntervention(
             id="", task_id=task.base_task.task_id, requesting_agent=stage,
             reason="Agent needs a human decision", description=question,
+        )
+    elif tests_failed:
+        failure = tests.results[0]
+        result.revision_request = RevisionRequest(
+            requesting_agent=stage, target_agent=stage,
+            reason=f"Tests failed: `{failure['name']}` exited with code {failure['exit_code']}",
+            description=f"Fix the code so the tests pass. Test output (tail):\n{failure['output'][-1500:]}",
         )
     elif status == "needs_revision":
         result.revision_request = RevisionRequest(

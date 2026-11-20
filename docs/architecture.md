@@ -76,26 +76,45 @@ sequenceDiagram
 stateDiagram-v2
     [*] --> created
     created --> analyzing
-    analyzing --> human_review: require_analysis_approval / needs_human
-    human_review --> analysis_approved: پاسخ انسان
-    analyzing --> backend_running
+    analyzing --> human_review: require_analysis_approval
+    human_review --> analysis_approved: approve
+    human_review --> analyzing: بازخورد انسان
     analysis_approved --> backend_running
+    analyzing --> backend_running: بدون دروازهٔ تأیید
     backend_running --> n8n_running
     n8n_running --> frontend_running
     frontend_running --> testing
-    testing --> pending_approval: همهٔ مراحل تمام شد
-    pending_approval --> done: تأیید انسان
-    analyzing --> failed
-    backend_running --> failed
-    n8n_running --> failed
-    frontend_running --> failed
-    testing --> failed
-    note right of pending_approval
-      POST /api/sdlc/tasks/{id}/approve
-    end note
+    testing --> revision: needs_revision / تست ناموفق
+    backend_running --> revision
+    revision --> backend_running: اجرای دوبارهٔ مرحلهٔ هدف
+    backend_running --> human_review: needs_human / سقف بازبینی
+    human_review --> backend_running: پاسخ انسان ← اجرای دوبارهٔ همان مرحله
+    testing --> pending_approval: require_final_human_approval
+    testing --> done: بدون تأیید نهایی
+    pending_approval --> done: POST /approve
+    human_review --> failed: stop
+    backend_running --> failed: blocked / failed / خطا
 ```
 
-`revision`, `human_qa`, `blocked` در enum هستند ولی هیچ مسیری در کد به آن‌ها نمی‌رسد.
+(برای خوانایی، یال‌های `revision` و `human_review` فقط برای backend رسم شده‌اند؛ برای همهٔ مراحل یکسان است.)
+
+### صندوق انسانی (human inbox)
+
+هر مورد در `data/human-inbox/pending/` یک `kind` در `context` دارد و پاسخ انسان (`SDLCTaskManager.submit_human_response`) این‌طور عمل می‌کند:
+
+| `kind` | چه زمانی | `approve` | متن آزاد | `stop` |
+|---|---|---|---|---|
+| `analysis_approval` | پایان analysis وقتی `require_analysis_approval` | رفتن به مرحلهٔ بعد | analysis با بازخورد دوباره اجرا می‌شود | `failed` |
+| `agent_question` | عامل `needs_human` برگرداند | — | همان مرحله با پاسخ دوباره اجرا می‌شود | `failed` |
+| `revision_limit` | `revision_count` به `max_revision_attempts` رسید یا مرحلهٔ هدف نامعتبر بود | — | مرحلهٔ درخواست‌کننده با راهنمایی دوباره اجرا می‌شود | `failed` |
+
+پاسخ‌های انسان و درخواست‌های بازبینی هر مرحله در prompt اجرای بعدی همان مرحله قرار می‌گیرند (`sdlc_runner.stage_feedback`) — هم برای عامل CLI و هم Ollama.
+
+### حلقهٔ بازبینی
+
+- عامل با `needs_revision` و `revision_target` مرحلهٔ دیگری را برمی‌گرداند؛ شکست تست‌های یک مرحله هم یعنی `needs_revision` به خود همان مرحله (با خروجی تست).
+- تا `max_revision_attempts` بار (برای کل تسک) خط لوله از مرحلهٔ هدف دوباره جلو می‌رود؛ بعد از آن از انسان پرسیده می‌شود.
+- خروجی زندهٔ عامل در حال اجرا در حافظه نگه داشته می‌شود و `GET /api/sdlc/tasks/{id}` آن را در `base_task.live_output` برمی‌گرداند؛ داشبورد آن را در جزئیات تسک نشان می‌دهد.
 
 مراحل از `project.workflow.stages` خوانده می‌شوند و عامل‌هایی که `enabled=false` دارند رد می‌شوند.
 
@@ -126,7 +145,7 @@ flowchart TD
 - مراحل `analysis` و `qa` فقط گزارش می‌دهند؛ `backend`، `n8n` و `frontend` کد می‌نویسند.
 - `changes` را Taskloom از روی دیسک تعیین می‌کند، نه از ادعای مدل.
 - وضعیت‌های عامل: `completed` ← مرحلهٔ بعد؛ `needs_human` ← یک HumanIntervention در inbox و `human_review`؛
-  `needs_revision` ← `human_review` با `transition_reason` (حلقهٔ بازگشت خودکار: مرحلهٔ ۴)؛ `blocked`/`failed` ← `failed` با دلیل.
+  `needs_revision` ← حلقهٔ بازبینی (پایین‌تر)؛ `blocked`/`failed` ← `failed` با دلیل.
 - تنظیمات هر مرحله: `project_path`، `knowledge_path`، `system_prompt`، `test_instructions: {"command": "...", "working_directory": "..."}`،
   `cli_timeout_seconds` (پیش‌فرض 3600) و `timeout_seconds` (فقط Ollama).
 

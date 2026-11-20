@@ -20,6 +20,18 @@
 - `frontend/.env` (اشاره به mock روی :8000) حذف شد؛ proxy `/api` → :8003 در `vite.config.js` برگشت؛ hack `forceSDLC` از `main.jsx` حذف شد (حلقهٔ بی‌نهایتی دیده نشد: ۴ درخواست polling در ۱۵ ثانیه).
 - #18 فایل‌های mock/backup/یادداشت‌ها: فایل‌های untracked به `C:\Users\vira\taskloom-archive-2026-11-20` منتقل شدند؛ فایل‌های tracked (`ARCHITECTURE.md` خراب، راهنماهای Docker/Render بی‌پشتوانه، `START_HERE.*`، اسکریپت‌های `test_sdlc_*.py`، `backend.log`) با `git rm` حذف شدند. `SDLC_PLATFORM_GUIDE.md` به `docs/sdlc-platform-guide.md` منتقل شد.
 
+## ✅ رفع‌شده در مرحلهٔ ۴ (2026-11-20)
+
+- #9 حلقهٔ بازبینی: `needs_revision` و شکست تست‌ها مرحلهٔ هدف را تا `max_revision_attempts` بار دوباره اجرا می‌کنند و بعد از انسان می‌پرسند.
+- #10 دروازهٔ تأیید تحلیل واقعاً resume می‌شود؛ بازخورد انسان تحلیل را با همان بازخورد دوباره اجرا می‌کند؛ ذخیرهٔ کهنه در `submit_human_response` حذف شد.
+- پاسخ انسان به سؤال عامل در prompt اجرای بعدی همان مرحله قرار می‌گیرد؛ `stop` تسک را متوقف می‌کند.
+- `require_final_human_approval` رعایت می‌شود (قبلاً همیشه `pending_approval`).
+- inbox مسیرش را از `data_dir` می‌گیرد، نه از پوشهٔ جاری؛ اجرای هم‌زمان دو مرحله برای یک تسک رد می‌شود (409).
+- داشبورد: خروجی زندهٔ عامل، دلیل وضعیت و تعداد بازبینی در جزئیات تسک؛ جزئیات باز هر ۵ ثانیه تازه می‌شود؛ راهنمای هر نوع درخواست در inbox.
+- آزمون واقعی با Claude Code: analysis ← بازخورد انسان («divide هم اضافه شود») ← analysis دوباره ← approve ← backend که divide را هم پیاده کرد ← qa ← `pending_approval`.
+
+**باقی‌مانده:** برنچ git برای پوشه‌های git؛ endpointهای `github/*` داشبورد؛ بازیابی تسک‌های در حال اجرا پس از restart سرور (#13)؛ قفل فایل (#12)؛ نگهداری امن token (#15).
+
 ## ✅ رفع‌شده در مرحلهٔ ۳ (2026-11-20)
 
 - #6، #7، #8: مراحل SDLC اکنون با Claude Code / Codex واقعی در `project_path` اجرا می‌شوند (`sdlc_runner.py`).

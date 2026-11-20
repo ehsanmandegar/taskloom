@@ -1435,6 +1435,14 @@ from .models import (
 
 from .config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
+def _feedback_text(task: SDLCTask, stage: str) -> str:
+    """Revision requests and human answers for a stage, as plain prompt text (shared with CLI stages)."""
+    from .sdlc_runner import stage_feedback
+
+    sections = stage_feedback(task, stage)
+    return "\n\n".join(sections) + "\n\n" if sections else ""
+
+
 class OllamaAgentRunner:
     """Calls ollama /v1/chat/completions to run an SDLC agent."""
 
@@ -1482,7 +1490,8 @@ class OllamaAgentRunner:
             f"Project: {project.name}\n"
             f"Task title: {task.title}\n"
             f"Task description: {task.description}\n\n"
-            "Produce only the JSON report, no extra text."
+            + _feedback_text(task, "analysis")
+            + "Produce only the JSON report, no extra text."
         )
         raw = self._chat(system, user, timeout=agent_cfg.timeout_seconds)
         # Try to parse JSON; fall back to plain text summary
@@ -1530,7 +1539,8 @@ class OllamaAgentRunner:
             f"Task: {task.title}\n"
             f"Description: {task.description}\n"
             f"Previous agent results:\n{prev_summary}\n\n"
-            "Produce only the JSON report."
+            + _feedback_text(task, agent_key)
+            + "Produce only the JSON report."
         )
         raw = self._chat(system, user, timeout=agent_cfg.timeout_seconds)
         try:
@@ -1645,6 +1655,7 @@ class SDLCTaskManager:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.active_tasks: Dict[str, SDLCTask] = {}
         self.task_workers: Dict[str, asyncio.Task] = {}
+        self.live_states: Dict[str, TaskState] = {}
     
     def generate_task_id(self) -> str:
         """Generate a unique task ID"""
@@ -1740,45 +1751,66 @@ class SDLCTaskManager:
         # Start analysis (in real implementation, this would be queued)
         await self.execute_stage(task.base_task.task_id, "analysis")
     
-    async def execute_stage(self, task_id: str, stage: str) -> None:
-        """Execute a specific stage for a task using the ollama agent runner."""
+    STAGE_STATUS = {
+        "analysis": SDLCStatus.analyzing,
+        "backend": SDLCStatus.backend_running,
+        "n8n": SDLCStatus.n8n_running,
+        "frontend": SDLCStatus.frontend_running,
+        "qa": SDLCStatus.testing,
+    }
+    APPROVE_WORDS = {"approve", "approved", "ok", "yes", "تأیید", "تایید", "بله"}
+    STOP_WORDS = {"stop", "توقف"}
+
+    @property
+    def inbox_dir(self) -> Path:
+        return self.data_dir.parent / "human-inbox"
+
+    def load_project(self, project_id: str) -> Optional[SDLCProjectConfig]:
+        return SDLCProjectManager(self.data_dir.parent / "projects").get_project(project_id)
+
+    def is_running(self, task_id: str) -> bool:
+        worker = self.task_workers.get(task_id)
+        return worker is not None and not worker.done()
+
+    def with_live_output(self, task: SDLCTask) -> SDLCTask:
+        """Copy the in-memory transcript of a running agent onto a task loaded from disk."""
+        live = self.live_states.get(task.base_task.task_id)
+        if live is not None:
+            task.base_task.live_output = live.live_output
+            task.base_task.live_response = live.live_response
+            task.base_task.step = live.step
+        return task
+
+    async def execute_stage(self, task_id: str, stage: str,
+                            project: Optional[SDLCProjectConfig] = None) -> None:
+        """Mark the task as running `stage` and start that stage's agent in the background."""
+        if self.is_running(task_id):
+            raise ValueError(f"Task {task_id} already has a stage running")
         task = await self.load_task(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
+        project = project or self.load_project(task.project_config_id)
+        if not project:
+            task.sdlc_status = SDLCStatus.failed
+            task.transition_reason = f"Project {task.project_config_id} not found"
+            await self.save_task(task)
+            return
 
-        # Update task state
         task.current_stage = stage
         task.current_agent = stage
+        if stage in self.STAGE_STATUS:
+            task.sdlc_status = self.STAGE_STATUS[stage]
         task.updated_at = datetime.now(timezone.utc)
-
-        status_map = {
-            "analysis": SDLCStatus.analyzing,
-            "backend":  SDLCStatus.backend_running,
-            "n8n":      SDLCStatus.n8n_running,
-            "frontend": SDLCStatus.frontend_running,
-            "qa":       SDLCStatus.testing,
-        }
-        if stage in status_map:
-            task.sdlc_status = status_map[stage]
-
         await self.save_task(task)
         print(f"[SDLC] Starting {stage} stage for task {task_id}", flush=True)
 
-        # Load project config for agent settings
-        project_manager = SDLCProjectManager()
-        project = project_manager.get_project(task.project_config_id)
-        if not project:
-            print(f"[SDLC] Project {task.project_config_id} not found, skipping agent run", flush=True)
-            return
-
-        # Run in background so we don't block the HTTP response
         worker = asyncio.create_task(self._run_agent_async(task_id, stage, project))
         self.task_workers[task_id] = worker
         worker.add_done_callback(lambda done, key=task_id: self.task_workers.get(key) is done and self.task_workers.pop(key, None))
 
     async def _run_agent_async(self, task_id: str, stage: str,
                                project: SDLCProjectConfig) -> None:
-        """Background coroutine: run one stage with its configured runner and record the result."""
+        """Background coroutine: run one stage with its configured runner and route the result."""
         from .sdlc_runner import resolve_runner, run_cli_stage
 
         task = await self.load_task(task_id)
@@ -1789,6 +1821,7 @@ class SDLCTaskManager:
             agent_cfg = project.agents.get(stage, AgentConfig())
             runner = resolve_runner(agent_cfg)
             print(f"[SDLC] Running {stage} for {task_id} with {runner.value}", flush=True)
+            self.live_states[task_id] = task.base_task
 
             if runner == StageRunner.ollama:
                 loop = asyncio.get_running_loop()
@@ -1807,29 +1840,24 @@ class SDLCTaskManager:
             fresh_task.agent_results[stage] = result
             fresh_task.base_task.codex_thread_id = task.base_task.codex_thread_id
             fresh_task.updated_at = datetime.now(timezone.utc)
+            # The worker must not count as "running" while it schedules the next stage.
+            self.task_workers.pop(task_id, None)
+            self.live_states.pop(task_id, None)
 
             if result.status == "completed":
                 await self.save_task(fresh_task)
                 await self._advance_or_complete(fresh_task, project)
-                return
-            if result.status == "needs_human":
-                await self.save_task(fresh_task)
+            elif result.status == "needs_human":
                 question = result.human_intervention.description if result.human_intervention else result.summary
-                await self.create_human_intervention(
-                    task_id, stage, "Agent needs a human decision", question,
-                    {"stage": stage}, ["continue", "stop"],
+                await self._ask_human(
+                    fresh_task, stage, "agent_question", f"{stage} needs a human decision", question, ["stop"],
                 )
-                return
-            if result.status == "needs_revision":
-                fresh_task.sdlc_status = SDLCStatus.human_review
-                target = result.revision_request.target_agent if result.revision_request else ""
-                fresh_task.transition_reason = f"{stage} requested a revision of {target or 'an earlier stage'}: {result.summary}"
-                if result.revision_request:
-                    fresh_task.revisions.append(result.revision_request)
-            else:  # blocked / failed
+            elif result.status == "needs_revision" and result.revision_request:
+                await self._request_revision(fresh_task, stage, result.revision_request, project)
+            else:  # blocked / failed / needs_revision without details
                 fresh_task.sdlc_status = SDLCStatus.failed
                 fresh_task.transition_reason = f"{stage} {result.status}: " + ("; ".join(result.issues) or result.summary)
-            await self.save_task(fresh_task)
+                await self.save_task(fresh_task)
 
         except Exception as exc:
             import traceback
@@ -1841,152 +1869,199 @@ class SDLCTaskManager:
                 task.transition_reason = f"{stage} error: {exc}"
                 task.updated_at = datetime.now(timezone.utc)
                 await self.save_task(task)
+        finally:
+            if self.live_states.get(task_id) is task.base_task:
+                self.live_states.pop(task_id, None)
+
+    @staticmethod
+    def enabled_stages(project: SDLCProjectConfig) -> List[str]:
+        stages = project.workflow.stages or ["analysis", "backend", "n8n", "frontend", "qa"]
+        return [stage for stage in stages if project.agents.get(stage, AgentConfig()).enabled]
+
+    async def _request_revision(self, task: SDLCTask, stage: str, request: RevisionRequest,
+                                project: SDLCProjectConfig) -> None:
+        """Send the pipeline back to the stage that must fix something, within the revision budget."""
+        target = request.target_agent or stage
+        request.target_agent = target
+        task.revisions.append(request)
+        limit = project.workflow.max_revision_attempts
+        if target not in self.enabled_stages(project):
+            await self._ask_human(
+                task, stage, "revision_limit", f"{stage} asked for a revision of an unknown stage '{target}'",
+                f"{request.reason}\n\n{request.description}\n\nAnswer with guidance to re-run {stage}, or 'stop'.", ["stop"],
+            )
+            return
+        if task.revision_count >= limit:
+            await self._ask_human(
+                task, stage, "revision_limit", f"Revision limit reached ({limit})",
+                f"{stage} still asks {target} to revise: {request.reason}\n\n"
+                f"Answer with guidance to re-run {stage}, or 'stop'.", ["stop"],
+            )
+            return
+        task.revision_count += 1
+        task.previous_status = task.sdlc_status
+        task.sdlc_status = SDLCStatus.revision
+        task.transition_reason = f"Revision {task.revision_count}/{limit}: {stage} -> {target}: {request.reason}"
+        task.updated_at = datetime.now(timezone.utc)
+        await self.save_task(task)
+        print(f"[SDLC] {task.transition_reason}", flush=True)
+        await self.execute_stage(task.base_task.task_id, target, project)
 
     async def _advance_or_complete(self, task: SDLCTask,
                                    project: SDLCProjectConfig) -> None:
-        """Move task to the next workflow stage, or mark as done."""
-        stages = project.workflow.stages if project.workflow.stages else \
-            ["analysis", "backend", "n8n", "frontend", "qa"]
+        """After task.current_stage completed: gate, start the next enabled stage, or finish."""
+        if (task.current_stage == "analysis" and project.workflow.require_analysis_approval
+                and task.sdlc_status != SDLCStatus.analysis_approved):
+            analysis = task.agent_results.get("analysis")
+            await self._ask_human(
+                task, "analysis", "analysis_approval", "Approve the analysis",
+                (analysis.summary if analysis else "")
+                + "\n\nApprove to start development, write feedback to redo the analysis, or 'stop'.",
+                ["approve", "stop"],
+            )
+            return
 
+        stages = project.workflow.stages or ["analysis", "backend", "n8n", "frontend", "qa"]
         try:
             idx = stages.index(task.current_stage)
         except ValueError:
             idx = -1
-
-        print(f"[SDLC] _advance_or_complete: current_stage={task.current_stage} idx={idx} stages={stages}", flush=True)
-
-        # Check approval gate after analysis
-        if task.current_stage == "analysis" and project.workflow.require_analysis_approval:
-            task.sdlc_status = SDLCStatus.human_review
-            print(f"[SDLC] Analysis approval required, pausing at human_review", flush=True)
+        next_stage = next(
+            (stage for stage in stages[idx + 1:] if project.agents.get(stage, AgentConfig()).enabled), None
+        )
+        if next_stage:
+            print(f"[SDLC] Advancing {task.base_task.task_id} to {next_stage}", flush=True)
+            await self.execute_stage(task.base_task.task_id, next_stage, project)
             return
 
-        # Find next enabled stage (skip disabled agents)
-        next_idx = idx + 1
-        while next_idx < len(stages):
-            candidate = stages[next_idx]
-            agent_cfg = project.agents.get(candidate, AgentConfig())
-            print(f"[SDLC] Checking stage {candidate} (idx {next_idx}): enabled={agent_cfg.enabled}", flush=True)
-            if agent_cfg.enabled:
-                break
-            next_idx += 1
-
-        if next_idx < len(stages):
-            next_stage = stages[next_idx]
-            print(f"[SDLC] Advancing to next stage: {next_stage}", flush=True)
-            # Update current_stage BEFORE execute_stage so re-entrant calls see the right value
-            task.current_stage = next_stage
-            task.current_agent = next_stage
-            await self.save_task(task)
-            await self.execute_stage(task.base_task.task_id, next_stage)
-        else:
-            # All stages done - await human approval
+        task.previous_status = task.sdlc_status
+        if project.workflow.require_final_human_approval:
             task.sdlc_status = SDLCStatus.pending_approval
-            task.updated_at = datetime.now(timezone.utc)
-            print(f"[SDLC] Task {task.base_task.task_id} awaiting human approval", flush=True)
-            await self.save_task(task)
-    
+            task.transition_reason = "All stages finished; waiting for final approval"
+        else:
+            task.sdlc_status = SDLCStatus.done
+            task.transition_reason = "All stages finished"
+        task.updated_at = datetime.now(timezone.utc)
+        print(f"[SDLC] Task {task.base_task.task_id}: {task.transition_reason}", flush=True)
+        await self.save_task(task)
+
     async def transition_to_next_stage(self, task_id: str) -> bool:
-        """Transition task to next stage in workflow"""
+        """Treat the current stage as finished and continue the workflow."""
         task = await self.load_task(task_id)
         if not task:
             return False
-
-        project_manager = SDLCProjectManager()
-        project = project_manager.get_project(task.project_config_id)
+        project = self.load_project(task.project_config_id)
         if not project:
             return False
-
         await self._advance_or_complete(task, project)
-        await self.save_task(task)
         return True
-    
-    async def create_human_intervention(self, task_id: str, agent: str,
-                                      reason: str, description: str,
-                                      context: dict, response_options: List[str]) -> str:
-        """Create a human intervention request"""
-        intervention_id = f"INT-{uuid.uuid4().hex[:8].upper()}"
-        
+
+    async def _ask_human(self, task: SDLCTask, agent: str, kind: str, reason: str, description: str,
+                         response_options: List[str], context: Optional[dict] = None) -> str:
+        """Put a question in the human inbox and park the task in human_review."""
         intervention = HumanIntervention(
-            id=intervention_id,
-            task_id=task_id,
+            id=f"INT-{uuid.uuid4().hex[:8].upper()}",
+            task_id=task.base_task.task_id,
             requesting_agent=agent,
             reason=reason,
-            description=description,
-            context=context,
+            description=description.strip(),
+            context={**(context or {}), "kind": kind, "stage": agent},
             response_options=response_options,
-            created_at=datetime.now(timezone.utc)
         )
-        
-        # Save intervention to inbox
-        inbox_dir = Path("data/human-inbox/pending")
-        inbox_dir.mkdir(parents=True, exist_ok=True)
-        
-        intervention_file = inbox_dir / f"{intervention_id}.json"
-        with open(intervention_file, 'w', encoding='utf-8') as f:
-            json.dump(intervention.model_dump(), f, indent=2, ensure_ascii=False, default=str)
-        
-        # Update task status
+        pending = self.inbox_dir / "pending"
+        pending.mkdir(parents=True, exist_ok=True)
+        (pending / f"{intervention.id}.json").write_text(
+            json.dumps(intervention.model_dump(), indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+        task.human_interventions.append(intervention)
+        task.previous_status = task.sdlc_status
+        task.sdlc_status = SDLCStatus.human_review
+        task.transition_reason = reason
+        task.updated_at = datetime.now(timezone.utc)
+        await self.save_task(task)
+        return intervention.id
+
+    async def create_human_intervention(self, task_id: str, agent: str,
+                                        reason: str, description: str,
+                                        context: dict, response_options: List[str]) -> str:
+        """Create a human intervention request (API entry point)."""
         task = await self.load_task(task_id)
-        if task:
-            task.sdlc_status = SDLCStatus.human_review
-            task.human_interventions.append(intervention)
-            await self.save_task(task)
-        
-        return intervention_id
-    
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+        return await self._ask_human(task, agent, context.get("kind", "manual"), reason, description,
+                                     response_options, context)
+
+    def list_pending_interventions(self) -> List[HumanIntervention]:
+        interventions = []
+        for path in (self.inbox_dir / "pending").glob("*.json"):
+            try:
+                interventions.append(HumanIntervention(**json.loads(path.read_text(encoding="utf-8"))))
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                print(f"Error loading intervention {path}: {exc}")
+        interventions.sort(key=lambda item: item.created_at)
+        return interventions
+
     async def submit_human_response(self, intervention_id: str, response: str) -> bool:
-        """Submit response to human intervention and resume workflow"""
-        # Load intervention
-        inbox_dir = Path("data/human-inbox/pending")
-        intervention_file = inbox_dir / f"{intervention_id}.json"
-        
-        if not intervention_file.exists():
+        """Record a human answer and resume the workflow accordingly."""
+        pending_file = self.inbox_dir / "pending" / f"{intervention_id}.json"
+        if not pending_file.exists():
             return False
-        
         try:
-            with open(intervention_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            intervention = HumanIntervention(**data)
-            intervention.response = response
-            intervention.responded_at = datetime.now(timezone.utc)
-            intervention.status = "responded"
-            
-            # Move to resolved
-            resolved_dir = Path("data/human-inbox/resolved")
-            resolved_dir.mkdir(parents=True, exist_ok=True)
-            
-            resolved_file = resolved_dir / f"{intervention_id}.json"
-            with open(resolved_file, 'w', encoding='utf-8') as f:
-                json.dump(intervention.model_dump(), f, indent=2, ensure_ascii=False, default=str)
-            
-            # Remove from pending
-            intervention_file.unlink()
-            
-            # Resume task workflow
-            task = await self.load_task(intervention.task_id)
-            if task:
-                # Transition back to appropriate status based on stage
-                stage_status_map = {
-                    "analysis": SDLCStatus.analysis_approved,
-                    "qa": SDLCStatus.human_qa
-                }
-                
-                if task.current_stage in stage_status_map:
-                    task.sdlc_status = stage_status_map[task.current_stage]
-                else:
-                    # For other stages, continue to next stage
-                    await self.transition_to_next_stage(intervention.task_id)
-                
-                await self.save_task(task)
-            
-            return True
-            
-        except (json.JSONDecodeError, ValueError, OSError) as e:
-            print(f"Error processing human response: {e}")
+            intervention = HumanIntervention(**json.loads(pending_file.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"Error reading intervention {intervention_id}: {exc}")
             return False
-    
+
+        intervention.response = response.strip()
+        intervention.responded_at = datetime.now(timezone.utc)
+        intervention.status = "responded"
+        resolved = self.inbox_dir / "resolved"
+        resolved.mkdir(parents=True, exist_ok=True)
+        (resolved / f"{intervention_id}.json").write_text(
+            json.dumps(intervention.model_dump(), indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+        pending_file.unlink()
+
+        task = await self.load_task(intervention.task_id)
+        if not task:
+            return True
+        if any(item.id == intervention_id for item in task.human_interventions):
+            task.human_interventions = [
+                intervention if item.id == intervention_id else item for item in task.human_interventions
+            ]
+        else:
+            task.human_interventions.append(intervention)
+
+        answer = intervention.response.casefold()
+        kind = intervention.context.get("kind", "manual")
+        stage = intervention.context.get("stage") or intervention.requesting_agent
+        task.updated_at = datetime.now(timezone.utc)
+
+        if answer in self.STOP_WORDS:
+            task.sdlc_status = SDLCStatus.failed
+            task.transition_reason = f"Stopped by a human at {stage}"
+            await self.save_task(task)
+            return True
+
+        project = self.load_project(task.project_config_id)
+        if kind == "manual" or not project:
+            await self.save_task(task)
+            return True
+
+        if kind == "analysis_approval" and answer in self.APPROVE_WORDS:
+            task.sdlc_status = SDLCStatus.analysis_approved
+            task.transition_reason = "Analysis approved by a human"
+            await self.save_task(task)
+            await self._advance_or_complete(task, project)
+            return True
+
+        # Feedback on the analysis, an answer to an agent's question, or guidance after the
+        # revision limit: re-run that stage; the answer is part of its next prompt.
+        task.transition_reason = f"Human answered {stage}; re-running it"
+        await self.save_task(task)
+        await self.execute_stage(task.base_task.task_id, stage, project)
+        return True
+
     async def list_tasks(self, status_filter: Optional[str] = None,
                         project_filter: Optional[str] = None) -> List[SDLCTask]:
         """List tasks with optional filters"""

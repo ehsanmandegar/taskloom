@@ -979,7 +979,7 @@ async def get_sdlc_task(task_id: str):
     task = await sdlc_task_manager.load_task(task_id)
     if not task:
         raise HTTPException(404, f"SDLC task {task_id} not found")
-    return task
+    return sdlc_task_manager.with_live_output(task)
 
 
 @app.post("/api/sdlc/tasks", response_model=SDLCTask, status_code=202)
@@ -1066,6 +1066,10 @@ async def transition_sdlc_task(task_id: str, transition: StageTransitionRequest)
         # Return updated task
         updated_task = await sdlc_task_manager.load_task(task_id)
         return updated_task
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(500, f"Failed to transition task: {exc}") from exc
 
@@ -1123,23 +1127,8 @@ async def respond_to_human_intervention(
 
 @app.get("/api/sdlc/human-inbox/pending", response_model=list[HumanIntervention])
 async def list_pending_human_interventions():
-    """List pending human intervention requests"""
-    inbox_dir = Path("data/human-inbox/pending")
-    interventions = []
-    
-    if inbox_dir.exists():
-        for intervention_file in inbox_dir.glob("*.json"):
-            try:
-                with open(intervention_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    intervention = HumanIntervention(**data)
-                    interventions.append(intervention)
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"Error loading intervention {intervention_file}: {e}")
-    
-    # Sort by creation date (oldest first)
-    interventions.sort(key=lambda x: x.created_at)
-    return interventions
+    """List pending human intervention requests (oldest first)"""
+    return sdlc_task_manager.list_pending_interventions()
 
 
 # ===== END SDLC API ENDPOINTS =====

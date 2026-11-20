@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   BarChart3, ClipboardList, RefreshCw, Users, Play, Pause, CheckCircle, XCircle, 
   Clock, AlertCircle, FileCode, GitBranch, GitPullRequest, MessageCircle, Eye,
@@ -24,6 +24,15 @@ const sdlcStages = [
   { id: 'failed', label: 'ناموفق', color: 'bg-red-200', icon: XCircle },
   { id: 'blocked', label: 'مسدود شده', color: 'bg-gray-300', icon: Pause }
 ];
+
+const responseOptionLabels = { approve: 'تأیید', stop: 'توقف تسک' };
+
+// What a free-text answer does for each kind of inbox item (see SDLCTaskManager.submit_human_response)
+const interventionHints = {
+  analysis_approval: 'با «تأیید» توسعه شروع می‌شود؛ اگر بازخورد بنویسید، تحلیل با بازخورد شما دوباره اجرا می‌شود.',
+  agent_question: 'پاسخ شما به عامل داده می‌شود و همین مرحله دوباره اجرا می‌شود.',
+  revision_limit: 'سقف دفعات بازبینی پر شده است؛ راهنمایی شما به عامل داده می‌شود و مرحله دوباره اجرا می‌شود.',
+};
 
 const agentTypes = {
   analysis: { label: 'تحلیلگر', color: 'bg-blue-500' },
@@ -159,6 +168,9 @@ export default function SDLCDashboard() {
   const [projectFormStep, setProjectFormStep] = useState(1);
   const [activeAgentTab, setActiveAgentTab] = useState('analysis');
   const [selectedTask, setSelectedTask] = useState(null);
+  // The polling interval is created once, so it reads the open task through a ref.
+  const selectedTaskIdRef = useRef(null);
+  useEffect(() => { selectedTaskIdRef.current = selectedTask?.base_task?.task_id ?? null; }, [selectedTask]);
   const [githubCredentials, setGithubCredentials] = useState({
     backend: { url: '', token: '', showToken: false },
     n8n: { url: '', token: '', showToken: false },
@@ -209,6 +221,16 @@ export default function SDLCDashboard() {
       setTasks(tasksData);
       setProjects(projectsData);
       setError('');
+
+      // Keep the open task detail (status, results, live agent output) current
+      const openTaskId = selectedTaskIdRef.current;
+      if (openTaskId) {
+        const detailResponse = await fetch(`${API}/api/sdlc/tasks/${openTaskId}`);
+        if (detailResponse.ok) {
+          const fresh = await detailResponse.json();
+          setSelectedTask(current => (current && current.base_task.task_id === openTaskId ? fresh : current));
+        }
+      }
     } catch (err) {
       setError(err.message);
       console.error('Error loading SDLC data:', err);
@@ -1011,8 +1033,11 @@ export default function SDLCDashboard() {
                   
                   <div className="sdlc-intervention-body">
                     <h4>{intervention.reason}</h4>
-                    <p>{intervention.description}</p>
-                    
+                    <p style={{whiteSpace:'pre-wrap'}}>{intervention.description}</p>
+                    {interventionHints[intervention.context?.kind] && (
+                      <p className="sdlc-intervention-hint">{interventionHints[intervention.context?.kind]}</p>
+                    )}
+
                     {intervention.response_options && intervention.response_options.length > 0 && (
                       <div className="sdlc-response-options">
                         <p>گزینه‌های پاسخ:</p>
@@ -1023,7 +1048,7 @@ export default function SDLCDashboard() {
                               className="sdlc-option-btn"
                               onClick={() => handleInterventionResponse(intervention.id, option)}
                             >
-                              {option}
+                              {responseOptionLabels[option] || option}
                             </button>
                           ))}
                         </div>
@@ -1099,6 +1124,21 @@ export default function SDLCDashboard() {
                   </button>
                 )}
               </div>
+
+              {(selectedTask.transition_reason || selectedTask.revision_count > 0) && (
+                <div className="sdlc-detail-section sdlc-detail-status">
+                  {selectedTask.transition_reason && <p>{selectedTask.transition_reason}</p>}
+                  {selectedTask.revision_count > 0 && <p>دفعات بازبینی: {selectedTask.revision_count}</p>}
+                </div>
+              )}
+
+              {/* Live output of the agent that is running right now */}
+              {selectedTask.base_task?.live_output && (
+                <div className="sdlc-detail-section">
+                  <h4>خروجی زندهٔ عامل — {selectedTask.current_stage}</h4>
+                  <pre className="sdlc-live-output" dir="ltr">{selectedTask.base_task.live_output.slice(-6000)}</pre>
+                </div>
+              )}
 
               {/* Description */}
               {selectedTask.description && (

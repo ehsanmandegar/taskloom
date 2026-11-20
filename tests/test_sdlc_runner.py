@@ -99,15 +99,17 @@ def test_code_stage_without_report_or_changes_is_flagged(tmp_path, fake_agent):
     assert any("without changing any file" in issue for issue in result.issues)
 
 
-def test_failing_stage_tests_fail_the_stage(tmp_path, fake_agent):
+def test_failing_stage_tests_send_the_stage_back_to_itself(tmp_path, fake_agent):
     fake_agent(report(status="completed", summary="ok"), edit=lambda repo: (repo / "a.py").write_text("1", encoding="utf-8"))
     proj, config = project(tmp_path, test_instructions={"command": f'"{sys.executable}" -c "import sys; sys.exit(3)"'})
 
     result = asyncio.run(sdlc_runner.run_cli_stage("backend", make_task(), proj, config, StageRunner.claude))
 
-    assert result.status == "failed"
+    assert result.status == "needs_revision"
     assert result.tests.executed and not result.tests.passed
     assert result.tests.results[0]["exit_code"] == 3
+    assert result.revision_request.target_agent == "backend"
+    assert "exited with code 3" in result.revision_request.reason
 
 
 def test_agent_can_ask_a_human_or_request_a_revision(tmp_path, fake_agent):
@@ -157,7 +159,8 @@ def test_manager_routes_needs_human_to_the_inbox(tmp_path, monkeypatch, fake_age
     task = asyncio.run(manager.load_task("sdlc-run"))
     assert task.sdlc_status == SDLCStatus.human_review
     assert task.human_interventions[0].description == "Which currency?"
-    assert len(list((tmp_path / "data" / "human-inbox" / "pending").glob("*.json"))) == 1
+    pending = manager.list_pending_interventions()
+    assert [(item.description, item.context["kind"]) for item in pending] == [("Which currency?", "agent_question")]
 
 
 def test_manager_marks_failed_stage_with_reason(tmp_path, monkeypatch, fake_agent):

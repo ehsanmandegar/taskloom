@@ -20,7 +20,7 @@ def test_last_stage_moves_task_to_pending_approval(tmp_path):
     manager = SDLCTaskManager(data_dir=tmp_path)
     project = SDLCProjectConfig(
         id="p", name="p",
-        workflow=ProjectWorkflowConfig(stages=["analysis", "qa"]),
+        workflow=ProjectWorkflowConfig(stages=["analysis", "qa"], require_final_human_approval=True),
         agents={"qa": AgentConfig()},
     )
     task = make_task("sdlc-last", "qa")
