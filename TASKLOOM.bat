@@ -35,6 +35,21 @@ exit /b %errorlevel%
 
 :dev
 start "Taskloom Backend" cmd /k python main.py --no-browser
+rem Vite answers /api calls with "500" when the backend is not up, so wait for it first.
+set /a tries=0
+:wait_backend
+curl -s -o nul --max-time 2 http://127.0.0.1:8003/api/health && goto backend_ready
+set /a tries+=1
+if %tries% geq 30 (
+    echo [!] The backend did not start on http://127.0.0.1:8003 - check the "Taskloom Backend" window for the error.
+    echo     Until it runs, every /api request from the dashboard fails with 500.
+    goto start_vite
+)
+timeout /t 1 /nobreak >nul
+goto wait_backend
+:backend_ready
+echo Backend is ready on http://127.0.0.1:8003
+:start_vite
 pushd frontend
 call npm run dev
 popd
