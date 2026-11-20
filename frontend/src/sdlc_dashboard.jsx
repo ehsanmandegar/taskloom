@@ -4,6 +4,7 @@ import {
   Clock, AlertCircle, FileCode, GitBranch, GitPullRequest, MessageCircle, Eye,
   ChevronRight, ChevronDown, Filter, Search, Download, Upload, Settings, Plus, X
 } from 'lucide-react';
+import { UiTag } from './ui_tag';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -523,7 +524,7 @@ export default function SDLCDashboard() {
 
   // Handle view project details
   const handleViewProject = (project) => {
-    alert(`جزئیات پروژه:\n\nنام: ${project.name}\nشناسه: ${project.id}\nتوضیحات: ${project.description}\nوضعیت: ${project.enabled ? 'فعال' : 'غیرفعال'}\nوضعیت SDLC: ${project.sdlc_enabled ? 'فعال' : 'غیرفعال'}`);
+    alert(`[A1 ProjectInfo] جزئیات پروژه:\n\nنام: ${project.name}\nشناسه: ${project.id}\nتوضیحات: ${project.description}\nوضعیت: ${project.enabled ? 'فعال' : 'غیرفعال'}\nوضعیت SDLC: ${project.sdlc_enabled ? 'فعال' : 'غیرفعال'}`);
   };
 
   // Load full task details with agent results
@@ -566,7 +567,7 @@ export default function SDLCDashboard() {
       
       await loadSDLCData();
       setError('');
-      alert(`پروژه "${projectId}" با موفقیت حذف شد`);
+      alert(`[A2 ProjectDeleted] پروژه "${projectId}" با موفقیت حذف شد`);
     } catch (err) {
       setError(err.message);
     }
@@ -614,7 +615,7 @@ export default function SDLCDashboard() {
           <div className="sdlc-project-form" style={{width: 'min(560px, 100%)'}}>
             <div className="sdlc-form-header">
               <div>
-                <h3>ایجاد تسک جدید</h3>
+                <h3>ایجاد تسک جدید <UiTag id="M2" name="NewTask"/></h3>
                 <small style={{fontSize:'11px', color:'#899087'}}>تسک بلافاصله وارد فرایند تحلیل می‌شود</small>
               </div>
               <button type="button" className="sdlc-form-close" onClick={() => {
@@ -1092,10 +1093,10 @@ export default function SDLCDashboard() {
       {/* Task detail modal */}
       {selectedTask && (
         <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setSelectedTask(null); }}>
-          <div className="sdlc-task-detail-modal">
+          <div className="sdlc-task-detail-modal" data-ui="M3">
             <div className="sdlc-form-header">
               <div>
-                <h3>{selectedTask.title || selectedTask.base_task.session_name}</h3>
+                <h3>{selectedTask.title || selectedTask.base_task.session_name} <UiTag id="M3" name="TaskDetail"/></h3>
                 <small style={{fontSize:'11px', color:'#899087'}}>
                   {selectedTask.base_task.task_id} · پروژه: {selectedTask.project_config_id}
                 </small>
@@ -1108,6 +1109,7 @@ export default function SDLCDashboard() {
             <div className="sdlc-form-body">
               {/* Status badges */}
               <div style={{display:'flex', gap:'8px', flexWrap:'wrap', marginBottom:'12px'}}>
+                <UiTag id="M3-A" name="Status"/>
                 {(() => {
                   const stage = getStageInfo(selectedTask.sdlc_status);
                   const StageIcon = stage.icon;
@@ -1143,7 +1145,7 @@ export default function SDLCDashboard() {
               {/* Live output of the agent that is running right now */}
               {selectedTask.base_task?.live_output && (
                 <div className="sdlc-detail-section">
-                  <h4>خروجی زندهٔ عامل — {selectedTask.current_stage}</h4>
+                  <h4>خروجی زندهٔ عامل — {selectedTask.current_stage} <UiTag id="M3-B" name="LiveOutput"/></h4>
                   <pre className="sdlc-live-output" dir="ltr">{selectedTask.base_task.live_output.slice(-6000)}</pre>
                 </div>
               )}
@@ -1151,7 +1153,7 @@ export default function SDLCDashboard() {
               {/* Description */}
               {selectedTask.description && (
                 <div className="sdlc-detail-section">
-                  <h4>شرح تسک</h4>
+                  <h4>شرح تسک <UiTag id="M3-C" name="Description"/></h4>
                   <p style={{fontSize:'13px', lineHeight:'1.6', color:'#384239', whiteSpace:'pre-wrap'}}>{selectedTask.description}</p>
                 </div>
               )}
@@ -1159,7 +1161,7 @@ export default function SDLCDashboard() {
               {/* Agent results */}
               {Object.keys(selectedTask.agent_results || {}).length > 0 && (
                 <div className="sdlc-detail-section">
-                  <h4>نتایج Agentها ({Object.keys(selectedTask.agent_results).length})</h4>
+                  <h4>نتایج Agentها ({Object.keys(selectedTask.agent_results).length}) <UiTag id="M3-D" name="AgentResults"/></h4>
                   {Object.entries(selectedTask.agent_results).map(([agentKey, result]) => (
                     <div key={agentKey} className="sdlc-agent-result-card">
                       <div className="sdlc-agent-result-header">
@@ -1192,7 +1194,7 @@ export default function SDLCDashboard() {
 
               {/* Metadata */}
               <div className="sdlc-detail-section">
-                <h4>اطلاعات اجرا</h4>
+                <h4>اطلاعات اجرا <UiTag id="M3-E" name="RunInfo"/></h4>
                 <div className="sdlc-review-row"><span>مرحله فعلی</span><span>{selectedTask.current_stage}</span></div>
                 <div className="sdlc-review-row"><span>Agent فعلی</span><span>{selectedTask.current_agent}</span></div>
                 <div className="sdlc-review-row"><span>تعداد بازبینی</span><span>{selectedTask.revision_count}</span></div>
@@ -1202,7 +1204,7 @@ export default function SDLCDashboard() {
 
               {/* GitHub Integration for agents */}
               <div className="sdlc-detail-section">
-                <h4>GitHub — Commit، Push و Pull Request</h4>
+                <h4>GitHub — Commit، Push و Pull Request <UiTag id="M3-F" name="GitHub"/></h4>
                 <div style={{padding: '12px 14px', fontSize: '12px', color: '#384239'}}>
                   {Object.values(selectedTask.repos || {}).length > 0 ? (
                     <div className="sdlc-task-repos">
@@ -1291,12 +1293,12 @@ export default function SDLCDashboard() {
                                 .then(readJsonOrThrow)
                                 .then(data => {
                                   if (data.status === 'valid') {
-                                    alert(`✅ GitHub credentials تأیید شدند!\nRepository: ${data.owner}/${data.repo}`);
+                                    alert(`[A3 GitHubValidate] ✅ GitHub credentials تأیید شدند!\nRepository: ${data.owner}/${data.repo}`);
                                   } else {
-                                    alert(`❌ خطا: ${data.message}`);
+                                    alert(`[A3 GitHubValidate] ❌ خطا: ${data.message}`);
                                   }
                                 })
-                                .catch(err => alert(`❌ خطا: ${err.message}`));
+                                .catch(err => alert(`[A3 GitHubValidate] ❌ خطا: ${err.message}`));
                               }}
                               style={{flex: 1, padding: '8px 12px', fontSize: '11px', background: '#173f2b', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
                             >
@@ -1316,10 +1318,10 @@ export default function SDLCDashboard() {
                                 })
                                 .then(readJsonOrThrow)
                                 .then(data => {
-                                  alert(`✅ ${data.message}\n\nCommit: ${data.commit_sha}\nBranch: ${data.branch}`);
+                                  alert(`[A4 CommitPush] ✅ ${data.message}\n\nCommit: ${data.commit_sha}\nBranch: ${data.branch}`);
                                   loadSDLCData();
                                 })
-                                .catch(err => alert(`❌ خطا: ${err.message}`));
+                                .catch(err => alert(`[A4 CommitPush] ❌ خطا: ${err.message}`));
                               }}
                               style={{flex: 1, padding: '8px 12px', fontSize: '11px', background: '#6b8d72', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
                             >
@@ -1339,10 +1341,10 @@ export default function SDLCDashboard() {
                                 })
                                 .then(readJsonOrThrow)
                                 .then(data => {
-                                  alert(`✅ ${data.message}\n\nPR #${data.pr_number}\nURL: ${data.pr_url}`);
+                                  alert(`[A5 PullRequest] ✅ ${data.message}\n\nPR #${data.pr_number}\nURL: ${data.pr_url}`);
                                   loadSDLCData();
                                 })
-                                .catch(err => alert(`❌ خطا: ${err.message}`));
+                                .catch(err => alert(`[A5 PullRequest] ❌ خطا: ${err.message}`));
                               }}
                               style={{flex: 1, padding: '8px 12px', fontSize: '11px', background: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
                             >
@@ -1450,9 +1452,9 @@ export default function SDLCDashboard() {
           {/* Project form modal */}
           {showProjectForm && (
             <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setShowProjectForm(false); setIsEditingProject(false); setEditingProjectId(''); setProjectFormStep(1); } }}>
-            <div className="sdlc-project-form sdlc-project-wizard">
+            <div className="sdlc-project-form sdlc-project-wizard" data-ui="M4">
               <div className="sdlc-form-header">
-                <h3>{isEditingProject ? 'ویرایش پروژه' : 'ایجاد پروژه جدید'}</h3>
+                <h3>{isEditingProject ? 'ویرایش پروژه' : 'ایجاد پروژه جدید'} <UiTag id="M4" name="ProjectForm"/></h3>
                 <button type="button" className="sdlc-form-close" onClick={() => {
                   setShowProjectForm(false);
                   setIsEditingProject(false);
@@ -1485,6 +1487,7 @@ export default function SDLCDashboard() {
               </div>
               
               <div className="sdlc-form-body">
+                <UiTag id={`M4-${projectFormStep}`} name={['', 'ProjectInfo', 'Workflow', 'Agents', 'Review'][projectFormStep]}/>
 
                 {/* ── Step 1: Project Info ── */}
                 {projectFormStep === 1 && (

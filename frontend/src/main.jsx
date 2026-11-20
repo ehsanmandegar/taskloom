@@ -1,4 +1,5 @@
 import React, {useEffect, useRef, useState} from 'react';
+import { UiTag } from './ui_tag';
 import {createRoot} from 'react-dom/client';
 import {Bot, GitBranch, GitPullRequest, Play, CheckCircle2, XCircle, FileCode2, Code2, Eye, Terminal, GitCommit, Upload, Sparkles, Moon, Sun, Save, Trash2, MessageCircle, Send, Square, Bell, Copy, Plus, X, Folder, FolderOpen, File, ChevronLeft, RefreshCw, Menu, LayoutDashboard, ClipboardList, Users, BarChart3} from 'lucide-react';
 import './styles.css';
@@ -218,7 +219,7 @@ function TaskWorkspace({workspaceId,onIdentityChange}){
         </section>
       </div>
     </main>
-    {showTodoModal&&<div className="todo-modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setShowTodoModal(false)}}><div className="todo-modal" role="dialog" aria-modal="true" aria-label="کارهای بعدی"><button className="todo-modal-close" type="button" onClick={()=>setShowTodoModal(false)} aria-label="بستن">×</button><TodoPanel task={task} sessions={sessions} todoDraft={todoDraft} setTodoDraft={setTodoDraft} todoTarget={todoTarget} setTodoTarget={setTodoTarget} todoScheduledFor={todoScheduledFor} setTodoScheduledFor={setTodoScheduledFor} addTodo={addTodo} sendTodo={sendTodo} removeTodo={removeTodo} busy={busy} running={running}/></div></div>}
+    {showTodoModal&&<div className="todo-modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setShowTodoModal(false)}}><div className="todo-modal" role="dialog" aria-modal="true" aria-label="کارهای بعدی" data-ui="M1"><UiTag id="M1" name="Todo"/><button className="todo-modal-close" type="button" onClick={()=>setShowTodoModal(false)} aria-label="بستن">×</button><TodoPanel task={task} sessions={sessions} todoDraft={todoDraft} setTodoDraft={setTodoDraft} todoTarget={todoTarget} setTodoTarget={setTodoTarget} todoScheduledFor={todoScheduledFor} setTodoScheduledFor={setTodoScheduledFor} addTodo={addTodo} sendTodo={sendTodo} removeTodo={removeTodo} busy={busy} running={running}/></div></div>}
   </div>
 }
 

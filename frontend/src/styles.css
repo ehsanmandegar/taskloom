@@ -2851,3 +2851,20 @@ html[data-theme="dark"] .sdlc-intervention-hint {
 .sdlc-task-repos { display: grid; gap: 6px; margin-bottom: 10px; }
 .sdlc-task-repo { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 12px; }
 .sdlc-task-repo code { font-size: 11px; word-break: break-all; }
+
+/* UI names (see docs/ui-map.md): tell Claude "M3-D" to point at a modal or section */
+.ui-tag {
+  display: inline-block;
+  margin-inline: 6px;
+  padding: 1px 6px;
+  border: 1px dashed #9aa79b;
+  border-radius: 4px;
+  font: 600 10px/1.6 ui-monospace, Consolas, monospace;
+  color: #6b7a6c;
+  background: rgba(154, 167, 155, 0.12);
+  vertical-align: middle;
+  user-select: all;
+  white-space: nowrap;
+}
+.todo-modal > .ui-tag { position: absolute; top: 12px; left: 48px; }
+html[data-theme="dark"] .ui-tag { color: #b7c7b5; border-color: #5d6b5e; background: rgba(183, 199, 181, 0.08); }
