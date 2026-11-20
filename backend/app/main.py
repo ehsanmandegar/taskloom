@@ -1119,7 +1119,7 @@ class GitHubActionRequest(BaseModel):
     description: str | None = None
 
 
-async def _github_context(task_id: str, request: GitHubActionRequest):
+async def _github_context(task_id: str, request: GitHubActionRequest, need_repo: bool = True):
     """Resolve the task, the agent's repository record, and the repo URL/token to use."""
     task = await sdlc_task_manager.load_task(task_id)
     if not task:
@@ -1128,11 +1128,12 @@ async def _github_context(task_id: str, request: GitHubActionRequest):
     config = project.agents.get(request.agent) if project and request.agent else None
     github = config.github_config if config else {}
     repo_url = request.repo_url.strip() or str(github.get("repository_url") or "")
-    token = request.github_token.strip() or str(github.get("github_token") or "")
+    stored = sdlc_project_manager.github_token(project.id, request.agent) if config else ""
+    token = request.github_token.strip() or stored  # GITHUB_TOKEN is the last fallback (sdlc_git.resolve_token)
     if not repo_url:
         raise HTTPException(400, "Repository URL is required")
     repo = None
-    if config and config.project_path:
+    if need_repo and config and config.project_path:
         root = await git_root(Path(config.project_path))
         if root is None:
             raise HTTPException(400, f"The {request.agent} folder is not a Git repository: {config.project_path}")
@@ -1145,7 +1146,7 @@ async def _github_context(task_id: str, request: GitHubActionRequest):
 @app.post("/api/sdlc/tasks/{task_id}/github/validate")
 async def validate_github(task_id: str, request: GitHubActionRequest):
     """Check that the repository exists and the token can access it."""
-    _, _, repo_url, token = await _github_context(task_id, request)
+    _, _, repo_url, token = await _github_context(task_id, request, need_repo=False)
     try:
         return await validate_repository(repo_url, token)
     except GitHubError as exc:

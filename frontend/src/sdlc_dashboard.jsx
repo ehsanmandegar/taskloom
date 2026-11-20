@@ -1283,6 +1283,7 @@ export default function SDLCDashboard() {
                                   method: 'POST',
                                   headers: {'Content-Type': 'application/json'},
                                   body: JSON.stringify({
+                                    agent: agent,
                                     repo_url: githubCredentials[agent].url,
                                     github_token: githubCredentials[agent].token
                                   })
@@ -1299,7 +1300,7 @@ export default function SDLCDashboard() {
                               }}
                               style={{flex: 1, padding: '8px 12px', fontSize: '11px', background: '#173f2b', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'}}
                             >
-                              ✓ ذخیره و تأیید
+                              ✓ بررسی دسترسی
                             </button>
                             <button
                               onClick={() => {
@@ -1780,7 +1781,8 @@ export default function SDLCDashboard() {
                                           github_token: e.target.value
                                         });
                                       }}
-                                      placeholder="ghp_..."
+                                      placeholder={newProject.agents[key]?.github_config?.token_saved ? 'ذخیره شده — برای تعویض، توکن جدید وارد کنید' : 'ghp_...'}
+                                      autoComplete="off"
                                     />
                                     <button
                                       type="button"
@@ -1796,6 +1798,22 @@ export default function SDLCDashboard() {
                                       {newProject.agents[key]?.github_config?.showToken ? 'Hide' : 'Show'}
                                     </button>
                                   </div>
+                                  <small className="sdlc-intervention-hint">
+                                    توکن رمزنگاری‌شده جدا از فایل پروژه ذخیره می‌شود و هرگز به مرورگر برگردانده نمی‌شود؛ خالی گذاشتن، توکن فعلی را نگه می‌دارد.
+                                  </small>
+                                  {newProject.agents[key]?.github_config?.token_saved && (
+                                    <label className="sdlc-checkbox-label">
+                                      <input
+                                        type="checkbox"
+                                        checked={!!newProject.agents[key]?.github_config?.clear_token}
+                                        onChange={(e) => updateAgent(key, 'github_config', {
+                                          ...(newProject.agents[key]?.github_config || {}),
+                                          clear_token: e.target.checked
+                                        })}
+                                      />
+                                      حذف توکن ذخیره‌شده
+                                    </label>
+                                  )}
                                 </div>
                                 <div className="sdlc-form-row">
                                   <div className="sdlc-form-group">

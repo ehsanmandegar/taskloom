@@ -1433,6 +1433,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from .file_lock import FileLock, LockTimeout, replace_with_retry
+from .secret_store import SecretStore
 from .models import (
     SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig,
     SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention,
@@ -1597,42 +1598,75 @@ _ollama_runner = OllamaAgentRunner()
 
 
 class SDLCProjectManager:
-    """Manages SDLC project configurations"""
-    
-    def __init__(self, data_dir: Path = Path("data/projects")):
+    """Manages SDLC project configurations.
+
+    GitHub tokens never stay in project JSON: on save (and when an old file is loaded) they move
+    into the encrypted SecretStore, and the config keeps only `github_config.token_saved`.
+    """
+
+    def __init__(self, data_dir: Path = Path("data/projects"), secrets: Optional[SecretStore] = None):
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.secrets = secrets or SecretStore(self.data_dir.parent / "secrets.json")
         self.projects: Dict[str, SDLCProjectConfig] = {}
         self.load_projects()
-    
+
+    @staticmethod
+    def _token_name(project_id: str, agent: str) -> str:
+        return f"github:{project_id}:{agent}"
+
+    def _move_tokens_to_store(self, project: SDLCProjectConfig) -> bool:
+        """Store any token from the config in the secret store and blank it; True if one was moved."""
+        moved = False
+        for agent, config in project.agents.items():
+            github = config.github_config
+            name = self._token_name(project.id, agent)
+            if github.pop("clear_token", False) is True:
+                self.secrets.delete(name)
+            token = github.get("github_token")
+            if isinstance(token, str) and token.strip():
+                self.secrets.set(name, token.strip())
+                moved = True
+            github["github_token"] = ""
+            github["token_saved"] = self.secrets.has(name)
+        return moved
+
+    def github_token(self, project_id: str, agent: str) -> str:
+        return self.secrets.get(self._token_name(project_id, agent)) or ""
+
+    def _write_project(self, project: SDLCProjectConfig) -> None:
+        project_file = self.data_dir / f"{project.id}.json"
+        temp_file = project_file.with_name(f"{project.id}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_file.write_text(json.dumps(project.model_dump(), indent=2, ensure_ascii=False), encoding="utf-8")
+            replace_with_retry(temp_file, project_file)
+        except OSError as e:
+            temp_file.unlink(missing_ok=True)
+            raise RuntimeError(f"Could not save project {project.id}: {e}") from e
+
     def load_projects(self) -> None:
-        """Load all project configurations from disk"""
+        """Load all project configurations; migrate plaintext tokens out of old files."""
         self.projects = {}
         if not self.data_dir.exists():
             return
-            
+
         for project_file in self.data_dir.glob("*.json"):
             try:
-                with open(project_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    project = SDLCProjectConfig(**data)
-                    self.projects[project.id] = project
-            except (json.JSONDecodeError, ValueError) as e:
+                project = SDLCProjectConfig(**json.loads(_read_text_with_retry(project_file)))
+            except (OSError, json.JSONDecodeError, ValueError) as e:
                 print(f"Error loading project {project_file}: {e}")
-    
-    def save_project(self, project: SDLCProjectConfig) -> None:
-        """Save project configuration to disk"""
-        project_file = self.data_dir / f"{project.id}.json"
-        temp_file = project_file.with_suffix(".json.tmp")
-        
-        try:
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(project.model_dump(), f, indent=2, ensure_ascii=False)
-            temp_file.replace(project_file)
+                continue
+            if self._move_tokens_to_store(project):
+                self._write_project(project)
+                print(f"[SDLC] Moved GitHub token(s) of project {project.id} into the secret store", flush=True)
             self.projects[project.id] = project
-        except OSError as e:
-            raise RuntimeError(f"Could not save project {project.id}: {e}")
-    
+
+    def save_project(self, project: SDLCProjectConfig) -> None:
+        """Save project configuration to disk (tokens go to the secret store, not the file)."""
+        self._move_tokens_to_store(project)
+        self._write_project(project)
+        self.projects[project.id] = project
+
     def get_project(self, project_id: str) -> Optional[SDLCProjectConfig]:
         """Get project configuration by ID"""
         return self.projects.get(project_id)
@@ -1649,6 +1683,8 @@ class SDLCProjectManager:
         project_file = self.data_dir / f"{project_id}.json"
         if project_file.exists():
             project_file.unlink()
+        for agent in self.projects[project_id].agents:
+            self.secrets.delete(self._token_name(project_id, agent))
         del self.projects[project_id]
         return True
 

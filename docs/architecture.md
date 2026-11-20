@@ -174,7 +174,14 @@ flowchart TD
 | `POST .../github/commit-push` | `git add -A` و commit روی برنچ تسک (پیام شامل خلاصهٔ مراحل)، سپس push همان برنچ |
 | `POST .../github/create-pr` | ساخت PR از `sdlc/<task-id>` به برنچ پایه با خلاصه، فایل‌ها، نتیجهٔ تست‌ها و issueهای هر مرحله؛ اگر PR وجود داشته باشد همان را برمی‌گرداند |
 
-- token در هر درخواست فرستاده می‌شود (یا از `github_config` / `GITHUB_TOKEN`)، در remote گیت ذخیره نمی‌شود و در پیام خطا با `***` پوشانده می‌شود.
+- token به این ترتیب پیدا می‌شود: فیلد درخواست ← token ذخیره‌شدهٔ همان agent ← `GITHUB_TOKEN`. در remote گیت ذخیره نمی‌شود و در پیام خطا با `***` پوشانده می‌شود.
+
+### نگهداری token (`backend/app/secret_store.py`)
+
+- token هرگز در `data/projects/*.json` نمی‌ماند: هنگام ذخیرهٔ پروژه (و هنگام بارگذاری فایل‌های قدیمی) به `data/secrets.json` منتقل
+  و در config فقط `github_config.token_saved` نگه داشته می‌شود. هیچ پاسخ API‌ای token را برنمی‌گرداند.
+- روی ویندوز مقدار با **DPAPI** رمز می‌شود (فقط همان کاربر ویندوز روی همان دستگاه می‌تواند بازش کند)؛ روی سیستم‌های دیگر فایل با مجوز `0600` است.
+- فرم پروژه: خالی گذاشتن token مقدار فعلی را نگه می‌دارد، مقدار جدید جایگزین می‌شود، گزینهٔ «حذف توکن ذخیره‌شده» (`clear_token`) آن را پاک می‌کند؛ حذف پروژه tokenهایش را هم پاک می‌کند.
 - آدرس غیر GitHub (مثلاً یک remote محلی) برای push پذیرفته می‌شود ولی ساخت PR فقط برای GitHub است.
 
 ## ذخیره‌سازی
@@ -185,6 +192,7 @@ flowchart TD
 - `data/tasks/<task_id>/task.json` — `SDLCTask`
 - `data/tasks/<task_id>/agent.pid` — فقط هنگام اجرای عامل CLI
 - `data/human-inbox/pending|resolved/<INT-id>.json` — `HumanIntervention`
+- `data/secrets.json` — tokenهای GitHub، رمزشده (DPAPI روی ویندوز)
 - `~/.taskloom/role-knowledge.json` — مسیرهای دانش نقش‌ها (حالت کلاسیک)
 
 ### هم‌زمانی (`backend/app/file_lock.py`)

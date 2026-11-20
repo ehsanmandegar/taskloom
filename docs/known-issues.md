@@ -20,6 +20,13 @@
 - `frontend/.env` (اشاره به mock روی :8000) حذف شد؛ proxy `/api` → :8003 در `vite.config.js` برگشت؛ hack `forceSDLC` از `main.jsx` حذف شد (حلقهٔ بی‌نهایتی دیده نشد: ۴ درخواست polling در ۱۵ ثانیه).
 - #18 فایل‌های mock/backup/یادداشت‌ها: فایل‌های untracked به `C:\Users\vira\taskloom-archive-2026-11-20` منتقل شدند؛ فایل‌های tracked (`ARCHITECTURE.md` خراب، راهنماهای Docker/Render بی‌پشتوانه، `START_HERE.*`، اسکریپت‌های `test_sdlc_*.py`، `backend.log`) با `git rm` حذف شدند. `SDLC_PLATFORM_GUIDE.md` به `docs/sdlc-platform-guide.md` منتقل شد.
 
+## ✅ رفع‌شده در مرحلهٔ ۸ — نگهداری امن token (2026-11-20)
+
+- #15 token GitHub دیگر در `data/projects/*.json` ذخیره نمی‌شود؛ در `data/secrets.json` با DPAPI ویندوز رمز می‌شود و هیچ پاسخ API‌ای آن را برنمی‌گرداند.
+- فایل‌های پروژهٔ قدیمی که token داشتند هنگام بارگذاری خودکار پاک‌سازی می‌شوند.
+- endpointهای GitHub (از جمله validate) از token ذخیره‌شدهٔ همان agent استفاده می‌کنند؛ validate دیگر نیازی به اجرای قبلی مرحله ندارد.
+- آزمون واقعی روی سرور در حال اجرا: token در پاسخ POST/GET، در فایل پروژه و به‌صورت متن ساده در secrets.json نبود؛ با حذف پروژه secret هم حذف شد.
+
 ## ✅ رفع‌شده در مرحلهٔ ۷ — قفل فایل (2026-11-20)
 
 - #12 ذخیرهٔ تسک با نسخه‌گذاری خوش‌بینانه زیر قفل فایل بین‌فرایندی؛ نوشتن نسخهٔ کهنه `TaskConflictError` (409) می‌دهد.
