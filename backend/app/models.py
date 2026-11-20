@@ -337,14 +337,28 @@ class SDLCStatus(str, Enum):
     done = "done"
 
 
+class StageRunner(str, Enum):
+    """Who executes an SDLC stage.
+
+    auto: a CLI coding agent (Claude Code, else Codex) when the stage has a project_path
+    and a CLI is installed; otherwise a text-only Ollama report.
+    """
+    auto = "auto"
+    ollama = "ollama"
+    claude = "claude"
+    codex = "codex"
+
+
 class AgentConfig(BaseModel):
     """Configuration for a specific agent type within a project"""
     enabled: bool = True
+    runner: StageRunner = StageRunner.auto
     knowledge_path: str = ""
     project_path: str = ""
     system_prompt: str = ""
     test_instructions: dict[str, str] = Field(default_factory=dict)
-    timeout_seconds: int = 300
+    timeout_seconds: int = 300  # Ollama request timeout
+    cli_timeout_seconds: int = 3600  # Claude Code / Codex run timeout
     max_retries: int = 2
     github_config: dict[str, str | bool] = Field(default_factory=lambda: {
         "repository_url": "",

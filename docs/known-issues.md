@@ -20,6 +20,19 @@
 - `frontend/.env` (اشاره به mock روی :8000) حذف شد؛ proxy `/api` → :8003 در `vite.config.js` برگشت؛ hack `forceSDLC` از `main.jsx` حذف شد (حلقهٔ بی‌نهایتی دیده نشد: ۴ درخواست polling در ۱۵ ثانیه).
 - #18 فایل‌های mock/backup/یادداشت‌ها: فایل‌های untracked به `C:\Users\vira\taskloom-archive-2026-11-20` منتقل شدند؛ فایل‌های tracked (`ARCHITECTURE.md` خراب، راهنماهای Docker/Render بی‌پشتوانه، `START_HERE.*`، اسکریپت‌های `test_sdlc_*.py`، `backend.log`) با `git rm` حذف شدند. `SDLC_PLATFORM_GUIDE.md` به `docs/sdlc-platform-guide.md` منتقل شد.
 
+## ✅ رفع‌شده در مرحلهٔ ۳ (2026-11-20)
+
+- #6، #7، #8: مراحل SDLC اکنون با Claude Code / Codex واقعی در `project_path` اجرا می‌شوند (`sdlc_runner.py`).
+  خروجی ساختگی تحلیل و قالب ثابت `BackendAgent` حذف شدند؛ `changes` از روی دیسک و نتایج تست از اجرای واقعی می‌آیند.
+- `needs_human` اکنون یک درخواست در inbox انسانی می‌سازد؛ `needs_revision` و `blocked` با دلیل ثبت می‌شوند.
+- #13 (بخشی): به اجرای پس‌زمینه reference نگه داشته می‌شود (`task_workers`).
+- prompt عامل Claude از stdin فرستاده می‌شود (محدودیت ۳۲K کاراکتر خط فرمان ویندوز).
+- `test_plan` دستورهای تست با مسیر داخل کوتیشن را در ویندوز درست اجرا نمی‌کرد؛ رفع شد.
+- آزمون واقعی: تسک «Add subtract» روی یک پروژهٔ نمونه از analysis → backend → qa با Claude Code عبور کرد، کد و تست واقعی نوشته شد و تست‌ها پاس شدند.
+
+**محدودیت‌های فعلی:** پوشه‌های غیر git بدون برنچ اجرا می‌شوند (تغییرات مستقیم در پوشه)؛ پاسخ انسان به `needs_human`
+هنوز به عامل برگردانده نمی‌شود و `needs_revision` خودکار به مرحلهٔ هدف برنمی‌گردد (مرحلهٔ ۴)؛ داشبورد خروجی زندهٔ عامل را نشان نمی‌دهد.
+
 ## 🔴 بحرانی — سیستم را از کار می‌اندازد
 
 1. **`backend/app/main.py` در working copy با نسخهٔ mock جایگزین شده است.**

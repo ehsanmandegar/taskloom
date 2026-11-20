@@ -142,7 +142,13 @@ def test_working_directory(repo: Path, configured: str | None) -> Path:
 def test_plan(repo: Path, test_command: str | None, configured_working_directory: str | None) -> tuple[list[str], Path]:
     """Build the final test invocation from the selected command and directory."""
     cwd = test_working_directory(repo, configured_working_directory)
-    return (shlex.split(test_command, posix=False) if test_command else detect_tests(cwd), cwd)
+    return (split_command(test_command) if test_command else detect_tests(cwd), cwd)
+
+
+def split_command(text: str) -> list[str]:
+    """Split a command line, keeping Windows backslashes and dropping the quotes around tokens."""
+    return [token[1:-1] if len(token) > 1 and token[0] == token[-1] and token[0] in "\"'" else token
+            for token in shlex.split(text, posix=False)]
 
 
 def codex_account_status_payload(responses: dict[int, dict]) -> dict:
@@ -1020,7 +1026,9 @@ async def claude_command(args: list[str], repo: Path, state: TaskState, timeout:
     stream = ClaudeEventStream(state)
     token = _command_output_handler.set(stream.feed)
     try:
-        code, output = await command(args, repo, timeout)
+        # `claude --print` reads the prompt from stdin when no positional prompt is given,
+        # which avoids the Windows command-line length limit for long prompts.
+        code, output = await command(args[:-1], repo, timeout, stdin_text=args[-1])
     finally:
         _command_output_handler.reset(token)
     if not stream.saw_data:
@@ -1422,7 +1430,7 @@ from typing import Dict, List, Optional
 from .models import (
     SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig,
     SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention,
-    RevisionRequest, SDLCTaskContext, TaskState, RunStatus
+    RevisionRequest, SDLCTaskContext, TaskState, RunStatus, StageRunner
 )
 
 from .config import OLLAMA_BASE_URL, OLLAMA_MODEL
@@ -1551,11 +1559,16 @@ class OllamaAgentRunner:
                 elif isinstance(c, str):
                     clean_changes.append({"file": c, "description": ""})
 
+        # Ollama only returns text and writes nothing, so its file list is a proposal, not a change.
+        proposed = [f"{c['file']}: {c.get('description', '')}".rstrip(": ") for c in clean_changes]
+        if proposed:
+            recommendations["proposed_changes"] = proposed
+
         return AgentResult(
             agent=agent_key,
             status="completed",
             summary=str(summary),
-            changes=clean_changes,
+            changes=[],
             tests={"executed": False, "passed": False, "results": []},
             recommendations=recommendations,
             issues=[str(i) for i in (issues if isinstance(issues, list) else [])],
@@ -1759,92 +1772,63 @@ class SDLCTaskManager:
             return
 
         # Run in background so we don't block the HTTP response
-        asyncio.create_task(self._run_agent_async(task_id, stage, project))
+        worker = asyncio.create_task(self._run_agent_async(task_id, stage, project))
+        self.task_workers[task_id] = worker
+        worker.add_done_callback(lambda done, key=task_id: self.task_workers.get(key) is done and self.task_workers.pop(key, None))
 
     async def _run_agent_async(self, task_id: str, stage: str,
                                project: SDLCProjectConfig) -> None:
-        """Background coroutine: runs the ollama agent and saves the result."""
+        """Background coroutine: run one stage with its configured runner and record the result."""
+        from .sdlc_runner import resolve_runner, run_cli_stage
+
         task = await self.load_task(task_id)
         if not task:
             return
 
         try:
-            loop = asyncio.get_event_loop()
-            previous = {k: v.model_dump() for k, v in task.agent_results.items()}
-            print(f"[SDLC] Calling ollama for {stage} (task {task_id})...", flush=True)
+            agent_cfg = project.agents.get(stage, AgentConfig())
+            runner = resolve_runner(agent_cfg)
+            print(f"[SDLC] Running {stage} for {task_id} with {runner.value}", flush=True)
 
-            if stage == "analysis":
-                try:
-                    result = await loop.run_in_executor(
-                        None, _ollama_runner.run_analysis, task, project
-                    )
-                except Exception as e:
-                    print(f"[SDLC] Analysis failed with Ollama: {e}, using fallback analysis", flush=True)
-                    # Fallback analysis when Ollama is not available
-                    result = AgentResult(
-                        agent="analysis",
-                        status="completed",
-                        summary="تحلیل اولیه انجام شد (نسخه جایگزین - Ollama در دسترس نیست)",
-                        changes=[
-                            {"file": "requirements.txt", "description": "نیازمندی‌های پروژه", "kind": "created"},
-                            {"file": "architecture.md", "description": "معماری سیستم", "kind": "created"}
-                        ],
-                        tests={
-                            "executed": True,
-                            "passed": True,
-                            "results": [
-                                {"name": "نیازمندی‌ها", "status": "passed"},
-                                {"name": "معماری", "status": "passed"},
-                                {"name": "کامپوننت‌ها", "status": "passed"}
-                            ]
-                        },
-                        recommendations={
-                            "optimization": ["کاهش پیچیدگی", "افزایش کارایی"],
-                            "refactoring": ["جداسازی کامپوننت‌ها", "افزونگی کد"]
-                        },
-                        issues=["نیاز به بررسی بیشتر توسط تیم توسعه"],
-                        revision_request=None,
-                        human_intervention=None,
-                        raw_output="تحلیل اولیه به دلیل عدم دسترسی به Ollama با نسخه جایگزین انجام شد.\n\nپیشنهادات:\n- نصب و راه‌اندازی Ollama برای تحلیل دقیق‌تر\n- بررسی دقیق‌تر نیازمندی‌ها\n- طراحی معماری دقیق"
-                    )
-            elif stage == "backend":
-                # Use specialized backend agent that writes actual code
-                agent_config = project.agents.get("backend")
-                if not agent_config:
-                    raise RuntimeError("Backend agent not configured for project")
-                
-                # Use the project_path from agent config or default to current directory
-                backend_project_path = agent_config.project_path or "."
-                backend_agent = BackendAgent(project_path=backend_project_path, ollama_base_url=OLLAMA_BASE_URL, ollama_model=OLLAMA_MODEL)
-                result = await loop.run_in_executor(
-                    None, backend_agent.generate_code, task, project, previous.get("analysis", {})
-                )
+            if runner == StageRunner.ollama:
+                loop = asyncio.get_running_loop()
+                if stage == "analysis":
+                    result = await loop.run_in_executor(None, _ollama_runner.run_analysis, task, project)
+                else:
+                    previous = {k: v.model_dump() for k, v in task.agent_results.items()}
+                    result = await loop.run_in_executor(None, _ollama_runner.run_agent, stage, task, project, previous)
             else:
-                result = await loop.run_in_executor(
-                    None, _ollama_runner.run_agent, stage, task, project, previous
-                )
+                result = await run_cli_stage(stage, task, project, agent_cfg, runner)
 
-            print(f"[SDLC] Ollama returned for {stage} (raw len {len(result.raw_output)})", flush=True)
+            print(f"[SDLC] {stage} finished for {task_id}: {result.status} - {result.summary[:120]}", flush=True)
 
-            # Persist result
-            task.agent_results[stage] = result
-            task.updated_at = datetime.now(timezone.utc)
-            print(f"[SDLC] {stage} completed for {task_id}: {result.summary[:120]}", flush=True)
-            await self.save_task(task)
-
-            # Determine next step — reload fresh task from disk
-            fresh_task = await self.load_task(task_id)
-            if not fresh_task:
-                return
+            # Reload: the task file may have changed while the agent was running.
+            fresh_task = await self.load_task(task_id) or task
             fresh_task.agent_results[stage] = result
+            fresh_task.base_task.codex_thread_id = task.base_task.codex_thread_id
             fresh_task.updated_at = datetime.now(timezone.utc)
 
             if result.status == "completed":
+                await self.save_task(fresh_task)
                 await self._advance_or_complete(fresh_task, project)
-            elif result.status == "needs_human":
+                return
+            if result.status == "needs_human":
+                await self.save_task(fresh_task)
+                question = result.human_intervention.description if result.human_intervention else result.summary
+                await self.create_human_intervention(
+                    task_id, stage, "Agent needs a human decision", question,
+                    {"stage": stage}, ["continue", "stop"],
+                )
+                return
+            if result.status == "needs_revision":
                 fresh_task.sdlc_status = SDLCStatus.human_review
-            elif result.status in ("blocked", "failed"):
+                target = result.revision_request.target_agent if result.revision_request else ""
+                fresh_task.transition_reason = f"{stage} requested a revision of {target or 'an earlier stage'}: {result.summary}"
+                if result.revision_request:
+                    fresh_task.revisions.append(result.revision_request)
+            else:  # blocked / failed
                 fresh_task.sdlc_status = SDLCStatus.failed
+                fresh_task.transition_reason = f"{stage} {result.status}: " + ("; ".join(result.issues) or result.summary)
             await self.save_task(fresh_task)
 
         except Exception as exc:
@@ -1854,7 +1838,7 @@ class SDLCTaskManager:
             task = await self.load_task(task_id)
             if task:
                 task.sdlc_status = SDLCStatus.failed
-                task.transition_reason = str(exc)
+                task.transition_reason = f"{stage} error: {exc}"
                 task.updated_at = datetime.now(timezone.utc)
                 await self.save_task(task)
 
@@ -2022,280 +2006,3 @@ class SDLCTaskManager:
         # Sort by creation date (newest first)
         tasks.sort(key=lambda t: t.created_at, reverse=True)
         return tasks
-
-
-class BackendAgent:
-    """Specialized agent for generating backend code files"""
-    
-    def __init__(self, project_path: str, ollama_base_url: str = "http://localhost:11434", 
-                 ollama_model: str = "qwen2.5:0.5b"):
-        self.project_path = Path(project_path)
-        self.ollama_base_url = ollama_base_url
-        self.ollama_model = ollama_model
-        
-    def generate_code(self, task: SDLCTask, project: SDLCProjectConfig, 
-                     analysis_result: dict = None) -> AgentResult:
-        """Generate backend code based on task requirements"""
-        try:
-            print(f"[BackendAgent] Starting code generation for task: {task.title}")
-            
-            # Extract requirements from task
-            description = task.description
-            title = task.title
-            
-            # Simulate code generation (in real implementation, this would call Ollama)
-            generated_files = self._generate_backend_files(task, project)
-            
-            # Create result
-            result = AgentResult(
-                agent="backend",
-                status="completed",
-                summary=f"بک‌اند کد برای '{title}' ایجاد شد. {len(generated_files)} فایل تولید شد.",
-                changes=[
-                    {"file": str(f), "description": d} for f, d in generated_files
-                ],
-                tests={
-                    "executed": True,
-                    "passed": True,
-                    "results": [
-                        {"name": "File generation", "status": "passed"},
-                        {"name": "Code syntax", "status": "passed"},
-                        {"name": "API endpoints", "status": "passed"},
-                        {"name": "Data models", "status": "passed"}
-                    ]
-                },
-                recommendations={
-                    "improvements": ["Add authentication", "Add validation", "Add tests"],
-                    "deployment": ["Dockerize", "Add CI/CD", "Monitor"]
-                },
-                issues=[],
-                raw_output=f"Backend Code Generation Report\n{'='*40}\n\n"
-                          f"Task: {title}\nDescription: {description[:200]}...\n\n"
-                          f"Generated Files:\n" + "\n".join([f"✓ {f}: {d}" for f, d in generated_files]) + "\n\n"
-                          f"Total files: {len(generated_files)}\n"
-                          f"Status: SUCCESS\nTime: 4.7s"
-            )
-            
-            print(f"[BackendAgent] Code generation completed: {len(generated_files)} files")
-            return result
-            
-        except Exception as e:
-            print(f"[BackendAgent] Error: {e}")
-            return AgentResult(
-                agent="backend",
-                status="failed",
-                summary=f"خطا در تولید کد بک‌اند: {str(e)}",
-                changes=[],
-                tests={"executed": False, "passed": False, "results": []},
-                recommendations={},
-                issues=[f"Error: {str(e)}"],
-                raw_output=f"Error: {str(e)}\n\nBackend code generation failed."
-            )
-    
-    def _generate_backend_files(self, task: SDLCTask, project: SDLCProjectConfig) -> list:
-        """Generate backend files in the project directory"""
-        generated = []
-        task_id_short = task.base_task.task_id[:8]
-        
-        # Get backend agent config from project
-        agent_config = project.agents.get("backend")
-        if not agent_config:
-            raise RuntimeError("Backend agent not configured for project")
-        
-        # Determine the base directory from agent config
-        if agent_config.project_path:
-            base_dir = Path(agent_config.project_path)
-        else:
-            base_dir = self.project_path
-            
-        # Create the backend directory structure in the actual project path
-        backend_dir = base_dir / "backend"
-        backend_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 1. main.py - API endpoints
-        main_py_content = f'''# FastAPI backend for {task.title}
-# Generated by SDLC BackendAgent
-# Task ID: {task.base_task.task_id}
-
-from fastapi import FastAPI, HTTPException, Query
-from datetime import datetime
-import json
-
-app = FastAPI(title="{task.title}", version="1.0.0")
-
-@app.get("/")
-async def root():
-    return {{"message": "{task.title} API", "status": "running", "timestamp": datetime.now().isoformat()}}
-
-@app.get("/api/task-info")
-async def get_task_info():
-    """Get information about this task"""
-    return {{
-        "task_id": "{task.base_task.task_id}",
-        "title": "{task.title}",
-        "description": "{task.description[:100] if task.description else 'No description'}",
-        "status": "generated",
-        "created_at": datetime.now().isoformat()
-    }}
-
-@app.post("/api/execute")
-async def execute_operation(data: dict):
-    """Execute a backend operation"""
-    return {{
-        "status": "success",
-        "operation": data.get("operation", "unknown"),
-        "result": "Operation executed successfully",
-        "timestamp": datetime.now().isoformat()
-    }}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-'''
-        
-        main_file = backend_dir / "app" / "main.py"
-        main_file.parent.mkdir(parents=True, exist_ok=True)
-        main_file.write_text(main_py_content, encoding='utf-8')
-        generated.append((main_file, "FastAPI main application with endpoints"))
-        
-        # 2. models.py - Data models
-        models_py_content = f'''# Data models for {task.title}
-# Generated by SDLC BackendAgent
-
-from pydantic import BaseModel, Field
-from datetime import datetime
-from typing import Optional, List
-
-class TaskModel(BaseModel):
-    """Task data model"""
-    id: str
-    title: str
-    description: str
-    status: str = "pending"
-    priority: str = "medium"
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: Optional[datetime] = None
-    
-class UserModel(BaseModel):
-    """User data model"""
-    id: str
-    username: str
-    email: str
-    is_active: bool = True
-    created_at: datetime = Field(default_factory=datetime.now)
-
-class OperationLog(BaseModel):
-    """Operation log model"""
-    id: str
-    operation: str
-    result: str
-    timestamp: datetime = Field(default_factory=datetime.now)
-    metadata: dict = Field(default_factory=dict)
-
-# Example database
-class InMemoryDB:
-    """Simple in-memory database"""
-    def __init__(self):
-        self.tasks = []
-        self.users = []
-        self.logs = []
-    
-    def add_task(self, task: TaskModel):
-        self.tasks.append(task)
-        return task
-    
-    def get_task(self, task_id: str):
-        for task in self.tasks:
-            if task.id == task_id:
-                return task
-        return None
-
-db = InMemoryDB()
-'''
-        
-        models_file = backend_dir / "app" / "models.py"
-        models_file.parent.mkdir(parents=True, exist_ok=True)
-        models_file.write_text(models_py_content, encoding='utf-8')
-        generated.append((models_file, "Pydantic data models and database"))
-        
-        # 3. requirements.txt
-        requirements_content = '''fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-'''
-        
-        req_file = backend_dir / "requirements.txt"
-        req_file.write_text(requirements_content, encoding='utf-8')
-        generated.append((req_file, "Python dependencies"))
-        
-        # 4. Dockerfile
-        dockerfile_content = '''FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY ./app ./app
-
-EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-'''
-        
-        docker_file = backend_dir / "Dockerfile"
-        docker_file.write_text(dockerfile_content, encoding='utf-8')
-        generated.append((docker_file, "Docker container configuration"))
-        
-        # 5. Readme.md
-        readme_content = f'''# {task.title} - Backend API
-
-This backend API was automatically generated by SDLC BackendAgent.
-
-## Features
-- FastAPI web framework
-- RESTful API endpoints
-- Pydantic data validation
-- In-memory database
-- Docker support
-
-## API Endpoints
-
-### GET /
-Returns API status
-
-### GET /api/task-info  
-Returns information about this task
-
-### POST /api/execute
-Execute a backend operation
-
-## Running Locally
-
-1. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-2. Run the server:
-```bash
-python -m uvicorn app.main:app --reload
-```
-
-## Docker
-```bash
-docker build -t {task_id_short}-backend .
-docker run -p 8000:8000 {task_id_short}-backend
-```
-
-## Task Information
-- Task ID: {task.base_task.task_id}
-- Project: {project.id}
-- Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-'''
-        
-        readme_file = backend_dir / "README.md"
-        readme_file.write_text(readme_content, encoding='utf-8')
-        generated.append((readme_file, "Documentation and instructions"))
-        
-        return generated

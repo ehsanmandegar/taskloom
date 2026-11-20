@@ -99,13 +99,36 @@ stateDiagram-v2
 
 مراحل از `project.workflow.stages` خوانده می‌شوند و عامل‌هایی که `enabled=false` دارند رد می‌شوند.
 
-### عامل‌ها
+### عامل‌ها (اجراکنندهٔ هر مرحله)
 
-| مرحله | پیاده‌سازی | خروجی واقعی |
-|---|---|---|
-| analysis | `OllamaAgentRunner.run_analysis` | JSON از LLM؛ اگر Ollama در دسترس نباشد یک نتیجهٔ **ساختگی** «completed» برمی‌گردد |
-| backend | `BackendAgent.generate_code` | **قالب ثابت** (FastAPI/Dockerfile/README) در `<project_path>/backend` نوشته می‌شود؛ LLM صدا زده نمی‌شود و نتایج تست hard-code شده‌اند |
-| n8n / frontend / qa | `OllamaAgentRunner.run_agent` | فقط گزارش JSON؛ هیچ فایلی نوشته نمی‌شود و تستی اجرا نمی‌شود |
+هر مرحله با فیلد `runner` در `AgentConfig` اجرا می‌شود (`backend/app/sdlc_runner.py`):
+
+| `runner` | رفتار |
+|---|---|
+| `auto` (پیش‌فرض) | اگر مرحله `project_path` دارد و Claude Code (یا Codex) نصب است ← عامل CLI؛ وگرنه Ollama |
+| `claude` / `codex` | عامل CLI واقعی در پوشهٔ `project_path` |
+| `ollama` | فقط گزارش متنی؛ فایلی نوشته نمی‌شود. فایل‌هایی که مدل «پیشنهاد» می‌دهد در `recommendations.proposed_changes` ثبت می‌شوند، نه در `changes` |
+
+اجرای یک مرحله با عامل CLI:
+
+```mermaid
+flowchart TD
+    A[ساخت prompt: system_prompt + تسک + knowledge_path + نتایج مراحل قبل + قوانین] --> B[snapshot پوشه]
+    B --> C[Claude Code / Codex در project_path<br/>prompt از stdin، حالت acceptEdits]
+    C --> D[snapshot دوباره ← changes واقعی]
+    D --> E[خواندن بلوک JSON پایانی عامل<br/>status / summary / issues / ...]
+    E --> F{test_instructions.command؟}
+    F -- بله --> G[Taskloom خودش تست را اجرا می‌کند<br/>شکست تست ← stage failed]
+    F -- خیر --> H[AgentResult]
+    G --> H
+```
+
+- مراحل `analysis` و `qa` فقط گزارش می‌دهند؛ `backend`، `n8n` و `frontend` کد می‌نویسند.
+- `changes` را Taskloom از روی دیسک تعیین می‌کند، نه از ادعای مدل.
+- وضعیت‌های عامل: `completed` ← مرحلهٔ بعد؛ `needs_human` ← یک HumanIntervention در inbox و `human_review`؛
+  `needs_revision` ← `human_review` با `transition_reason` (حلقهٔ بازگشت خودکار: مرحلهٔ ۴)؛ `blocked`/`failed` ← `failed` با دلیل.
+- تنظیمات هر مرحله: `project_path`، `knowledge_path`، `system_prompt`، `test_instructions: {"command": "...", "working_directory": "..."}`،
+  `cli_timeout_seconds` (پیش‌فرض 3600) و `timeout_seconds` (فقط Ollama).
 
 ## ذخیره‌سازی
 
