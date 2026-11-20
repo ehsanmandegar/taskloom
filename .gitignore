@@ -12,3 +12,4 @@ dist/
 .env
 *.log
 graphify-out/
+data/
