@@ -2049,7 +2049,11 @@ class SDLCTaskManager:
             await self._advance_or_complete(task, project)
         elif result.status == "needs_human":
             question = result.human_intervention.description if result.human_intervention else result.summary
-            await self._ask_human(task, stage, "agent_question", f"{stage} needs a human decision", question, ["stop"])
+            kind = result.human_intervention.context.get("kind", "agent_question") if result.human_intervention else "agent_question"
+            if kind == "agent_unavailable":
+                await self._ask_human(task, stage, kind, f"{stage}: agent unavailable", question, ["resume", "stop"])
+            else:
+                await self._ask_human(task, stage, "agent_question", f"{stage} needs a human decision", question, ["stop"])
         elif result.status == "needs_revision" and result.revision_request:
             await self._request_revision(task, stage, result.revision_request, project)
         else:  # blocked / failed / needs_revision without details

@@ -35,6 +35,7 @@ STAGE_ROLES = {
 REPORT_ONLY_STAGES = {"analysis", "qa"}
 AGENT_STATUSES = {"completed", "needs_human", "needs_revision", "blocked"}
 SNAPSHOT_MAX_FILES = 50_000
+AGENT_LIMIT = re.compile(r"hit your .{0,40}limit|usage limit|rate limit|rate_limit|\b429\b|overloaded", re.IGNORECASE)
 TEST_OUTPUT_TAIL = 4_000
 
 Snapshot = dict[str, tuple[int, int]]
@@ -91,6 +92,7 @@ def stage_feedback(task: SDLCTask, stage: str) -> list[str]:
     answers = [
         item for item in task.human_interventions
         if item.status == "responded" and (item.context.get("stage") or item.requesting_agent) == stage
+        and item.context.get("kind") not in ("agent_unavailable", "interrupted")
     ][-5:]
     if answers:
         sections.append(
@@ -293,6 +295,18 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
 
     if code:
         detail = agent_error_detail(output) or output.strip()[-2000:]
+        if AGENT_LIMIT.search(detail or output):
+            # Usage/rate limit: temporary, not a failure of the work. Park it for a human to resume later.
+            return AgentResult(
+                agent=stage, status="needs_human", summary=f"{display_name} is unavailable: {detail[:300]}",
+                changes=changes, issues=[detail], raw_output=output[-20_000:],
+                human_intervention=HumanIntervention(
+                    id="", task_id=task.base_task.task_id, requesting_agent=stage, reason="Agent unavailable",
+                    description=f"{display_name} hit a usage or rate limit: {detail[:300]}. Answer 'resume' after the "
+                                "limit resets to run this stage again, or 'stop'.",
+                    context={"kind": "agent_unavailable"},
+                ),
+            )
         return AgentResult(
             agent=stage, status="failed", summary=f"{display_name} exited with code {code}",
             changes=changes, issues=[detail] if detail else [], raw_output=output[-20_000:],
