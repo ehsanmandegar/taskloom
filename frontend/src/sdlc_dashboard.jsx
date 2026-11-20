@@ -481,14 +481,17 @@ export default function SDLCDashboard() {
     
     agentTypes.forEach(agentType => {
       if (project.agents && project.agents[agentType]) {
+        const agent = project.agents[agentType];
         processedAgents[agentType] = {
-          enabled: project.agents[agentType].enabled ?? true,
-          knowledge_path: project.agents[agentType].knowledge_path ?? '',
-          project_path: project.agents[agentType].project_path ?? '',
-          system_prompt: project.agents[agentType].system_prompt ?? '',
-          test_instructions: project.agents[agentType].test_instructions ?? {},
-          timeout_seconds: project.agents[agentType].timeout_seconds ?? 300,
-          max_retries: project.agents[agentType].max_retries ?? 2
+          ...agent,  // keep runner, cli timeout, github_config, ... (the PUT replaces the whole config)
+          enabled: agent.enabled ?? true,
+          knowledge_path: agent.knowledge_path ?? '',
+          project_path: agent.project_path ?? '',
+          system_prompt: agent.system_prompt ?? '',
+          test_instructions: agent.test_instructions ?? {},
+          timeout_seconds: agent.timeout_seconds ?? 300,
+          max_retries: agent.max_retries ?? 2,
+          repository: { ...DEFAULT_REPOSITORY, ...(agent.repository || {}), github_token: '', clear_token: false },
         };
       } else {
         processedAgents[agentType] = {
@@ -507,7 +510,6 @@ export default function SDLCDashboard() {
       id: project.id,
       name: project.name,
       description: project.description,
-      repository: { ...DEFAULT_REPOSITORY, ...(project.repository || {}), github_token: '', clear_token: false },
       enabled: project.enabled ?? true,
       sdlc_enabled: project.sdlc_enabled ?? true,
       workflow: project.workflow || {
@@ -1232,7 +1234,7 @@ export default function SDLCDashboard() {
                   ) : (
                     <p className="sdlc-intervention-hint">این تسک هنوز در هیچ پوشهٔ git کار نکرده است؛ برنچ <code dir="ltr">sdlc/&lt;task-id&gt;</code> هنگام اجرای اولین مرحله ساخته می‌شود.</p>
                   )}
-                  <ProjectRepoActions task={selectedTask} project={projects.find(p => p.id === selectedTask.project_config_id)} onDone={loadSDLCData} />
+                  <StageRepoActions task={selectedTask} project={projects.find(p => p.id === selectedTask.project_config_id)} onDone={loadSDLCData} />
                   <p className="sdlc-intervention-hint">اگر URL و Token را خالی بگذارید، <code dir="ltr">github_config</code> همان agent در پروژه یا متغیر محیطی <code dir="ltr">GITHUB_TOKEN</code> استفاده می‌شود. Token جایی ذخیره نمی‌شود.</p>
                   {['backend', 'n8n', 'frontend'].map(agent => (
                     <div key={agent} style={{marginBottom: '16px', borderBottom: '1px solid #e2e3dd', paddingBottom: '12px'}}>
@@ -1562,11 +1564,6 @@ export default function SDLCDashboard() {
                         <span>SDLC فعال</span>
                       </label>
                     </div>
-                    <RepositorySettings
-                      project={newProject}
-                      onChange={patch => setNewProject(current => ({ ...current, repository: { ...DEFAULT_REPOSITORY, ...(current.repository || {}), ...patch } }))}
-                      canPrepare={isEditingProject}
-                    />
                   </>
                 )}
 
@@ -1774,131 +1771,17 @@ export default function SDLCDashboard() {
                                 </div>
                               </div>
 
-                              <div className="sdlc-agent-section">
-                                <h5>GitHub Configuration</h5>
-                                <div className="sdlc-form-row">
-                                  <div className="sdlc-form-group">
-                                    <label>Repository URL</label>
-                                    <input
-                                      type="text"
-                                      value={newProject.agents[key]?.github_config?.repository_url || ''}
-                                      onChange={(e) => {
-                                        updateAgent(key, 'github_config', {
-                                          ...(newProject.agents[key]?.github_config || {}),
-                                          repository_url: e.target.value
-                                        });
-                                      }}
-                                      placeholder="https://github.com/username/repository"
-                                    />
-                                  </div>
-                                </div>
-                                <div className="sdlc-form-group">
-                                  <label>GitHub Token</label>
-                                  <div className="sdlc-input-with-button">
-                                    <input
-                                      type={newProject.agents[key]?.github_config?.showToken ? 'text' : 'password'}
-                                      value={newProject.agents[key]?.github_config?.github_token || ''}
-                                      onChange={(e) => {
-                                        updateAgent(key, 'github_config', {
-                                          ...(newProject.agents[key]?.github_config || {}),
-                                          github_token: e.target.value
-                                        });
-                                      }}
-                                      placeholder={newProject.agents[key]?.github_config?.token_saved ? 'ذخیره شده — برای تعویض، توکن جدید وارد کنید' : 'ghp_...'}
-                                      autoComplete="off"
-                                    />
-                                    <button
-                                      type="button"
-                                      className="sdlc-btn sdlc-btn-secondary"
-                                      onClick={() => {
-                                        updateAgent(key, 'github_config', {
-                                          ...(newProject.agents[key]?.github_config || {}),
-                                          showToken: !(newProject.agents[key]?.github_config?.showToken)
-                                        });
-                                      }}
-                                      style={{minWidth: '70px'}}
-                                    >
-                                      {newProject.agents[key]?.github_config?.showToken ? 'Hide' : 'Show'}
-                                    </button>
-                                  </div>
-                                  <small className="sdlc-intervention-hint">
-                                    توکن رمزنگاری‌شده جدا از فایل پروژه ذخیره می‌شود و هرگز به مرورگر برگردانده نمی‌شود؛ خالی گذاشتن، توکن فعلی را نگه می‌دارد.
-                                  </small>
-                                  {newProject.agents[key]?.github_config?.token_saved && (
-                                    <label className="sdlc-checkbox-label">
-                                      <input
-                                        type="checkbox"
-                                        checked={!!newProject.agents[key]?.github_config?.clear_token}
-                                        onChange={(e) => updateAgent(key, 'github_config', {
-                                          ...(newProject.agents[key]?.github_config || {}),
-                                          clear_token: e.target.checked
-                                        })}
-                                      />
-                                      حذف توکن ذخیره‌شده
-                                    </label>
-                                  )}
-                                </div>
-                                <div className="sdlc-form-row">
-                                  <div className="sdlc-form-group">
-                                    <label>Branch</label>
-                                    <input
-                                      type="text"
-                                      value={newProject.agents[key]?.github_config?.branch || 'main'}
-                                      onChange={(e) => {
-                                        updateAgent(key, 'github_config', {
-                                          ...(newProject.agents[key]?.github_config || {}),
-                                          branch: e.target.value
-                                        });
-                                      }}
-                                      placeholder="main"
-                                    />
-                                  </div>
-                                  <div className="sdlc-form-group">
-                                    <label>Auto Actions</label>
-                                    <div className="sdlc-checkbox-group">
-                                      <label>
-                                        <input
-                                          type="checkbox"
-                                          checked={newProject.agents[key]?.github_config?.auto_commit || false}
-                                          onChange={(e) => {
-                                            updateAgent(key, 'github_config', {
-                                              ...(newProject.agents[key]?.github_config || {}),
-                                              auto_commit: e.target.checked
-                                            });
-                                          }}
-                                        />
-                                        <span>Auto Commit</span>
-                                      </label>
-                                      <label>
-                                        <input
-                                          type="checkbox"
-                                          checked={newProject.agents[key]?.github_config?.auto_push || false}
-                                          onChange={(e) => {
-                                            updateAgent(key, 'github_config', {
-                                              ...(newProject.agents[key]?.github_config || {}),
-                                              auto_push: e.target.checked
-                                            });
-                                          }}
-                                        />
-                                        <span>Auto Push</span>
-                                      </label>
-                                      <label>
-                                        <input
-                                          type="checkbox"
-                                          checked={newProject.agents[key]?.github_config?.auto_pr || false}
-                                          onChange={(e) => {
-                                            updateAgent(key, 'github_config', {
-                                              ...(newProject.agents[key]?.github_config || {}),
-                                              auto_pr: e.target.checked
-                                            });
-                                          }}
-                                        />
-                                        <span>Auto PR</span>
-                                      </label>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
+                              <RepositorySettings
+                                project={newProject}
+                                stage={key}
+                                repository={newProject.agents[key]?.repository}
+                                onChange={patch => setNewProject(current => ({
+                                  ...current,
+                                  agents: { ...current.agents, [key]: { ...(current.agents[key] || {}),
+                                    repository: { ...DEFAULT_REPOSITORY, ...(current.agents[key]?.repository || {}), ...patch } } },
+                                }))}
+                                canPrepare={isEditingProject}
+                              />
                             </div>
                           )}
                         </div>
@@ -2045,27 +1928,29 @@ export default function SDLCDashboard() {
   );
 }
 
-// M4-1R: where the project's code lives on GitHub and on disk.
-function RepositorySettings({ project, onChange, canPrepare }) {
-  const repo = { ...DEFAULT_REPOSITORY, ...(project.repository || {}) };
-  const workspace = repo.local_path || `~/taskloom-workspaces/${project.id || '<project-id>'}`;
+// M4-3R: where one stage's code lives on GitHub and on disk (each stage can have its own repo).
+function RepositorySettings({ project, stage, repository, onChange, canPrepare }) {
+  const repo = { ...DEFAULT_REPOSITORY, ...(repository || {}) };
+  const agent = project.agents?.[stage] || {};
+  const defaultFolder = agent.project_path || `~/taskloom-workspaces/${project.id || '<project-id>'}/${stage}`;
+  const defaultName = `${project.id || 'project'}-${stage}`;
   const prepare = () => {
-    fetch(`${API}/api/sdlc/projects/${project.id}/repository/prepare`, { method: 'POST' })
+    fetch(`${API}/api/sdlc/projects/${project.id}/agents/${stage}/repository/prepare`, { method: 'POST' })
       .then(readJsonOrThrow)
-      .then(data => alert(`[A6 RepoPrepare] ✅ ریپو آماده است\n\nپوشه: ${data.path}\nبرنچ: ${data.branch}${data.url ? `\nGitHub: ${data.url}` : ''}`))
+      .then(data => alert(`[A6 RepoPrepare] ✅ ریپوی ${stage} آماده است\n\nپوشه: ${data.path}\nبرنچ: ${data.branch}${data.url ? `\nGitHub: ${data.url}` : ''}`))
       .catch(err => alert(`[A6 RepoPrepare] ❌ ${err.message}`));
   };
   return (
     <div className="sdlc-repo-settings">
-      <h4>ریپوی پروژه <UiTag id="M4-1R" name="Repository" /></h4>
+      <h4>ریپوی {stage} <UiTag id="M4-3R" name={`${stage} Repository`} /></h4>
       <div className="sdlc-repo-modes">
         {[
-          ['none', 'بدون ریپوی پروژه', 'هر agent در پوشهٔ خودش (project_path) کار می‌کند.'],
-          ['create', 'پروژهٔ جدید', 'Taskloom یک ریپوی محلی می‌سازد و در اولین «Commit و Push» ریپوی private روی GitHub شما ایجاد می‌کند.'],
+          ['none', 'بدون ریپو', 'این agent در پوشهٔ مسیر پروژه (project_path) کار می‌کند؛ چیزی ساخته یا clone نمی‌شود.'],
+          ['create', 'ریپوی جدید', 'Taskloom یک ریپوی محلی می‌سازد و در اولین «Commit و Push» ریپوی private روی GitHub شما ایجاد می‌کند.'],
           ['existing', 'ریپوی موجود', 'یک بار clone می‌شود و قبل از هر تسک pull می‌شود؛ برنچ هر تسک از آخرین نسخهٔ origin ساخته می‌شود.'],
         ].map(([mode, label, help]) => (
           <label key={mode} className={`sdlc-repo-mode ${repo.mode === mode ? 'active' : ''}`}>
-            <input type="radio" name="repo-mode" checked={repo.mode === mode} onChange={() => onChange({ mode })} />
+            <input type="radio" name={`repo-mode-${stage}`} checked={repo.mode === mode} onChange={() => onChange({ mode })} />
             <span><b>{label}</b><small>{help}</small></span>
           </label>
         ))}
@@ -2082,7 +1967,7 @@ function RepositorySettings({ project, onChange, canPrepare }) {
             <>
               <div className="sdlc-form-group">
                 <label>نام ریپو روی GitHub</label>
-                <input dir="ltr" value={repo.name} onChange={e => onChange({ name: e.target.value })} placeholder={project.id || 'project-id'} />
+                <input dir="ltr" value={repo.name} onChange={e => onChange({ name: e.target.value })} placeholder={defaultName} />
                 {repo.url && <small className="sdlc-intervention-hint">ساخته شده: <a href={repo.url} target="_blank" rel="noreferrer" dir="ltr">{repo.url}</a></small>}
               </div>
               <label className="sdlc-checkbox-label">
@@ -2108,9 +1993,8 @@ function RepositorySettings({ project, onChange, canPrepare }) {
             )}
           </div>
           <div className="sdlc-form-group">
-            <label>پوشهٔ محلی</label>
-            <input dir="ltr" value={repo.local_path} onChange={e => onChange({ local_path: e.target.value })} placeholder={workspace} />
-            <small className="sdlc-intervention-hint">agentهایی که پوشهٔ جداگانه (project_path) ندارند در این پوشه کار می‌کنند.</small>
+            <label>پوشهٔ محلی ریپو</label>
+            <input dir="ltr" value={repo.local_path} onChange={e => onChange({ local_path: e.target.value })} placeholder={defaultFolder} />
           </div>
           <div className="sdlc-form-group">
             <label>برنچ پایه</label>
@@ -2118,7 +2002,7 @@ function RepositorySettings({ project, onChange, canPrepare }) {
           </div>
           {canPrepare && (
             <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={prepare}>
-              آماده‌سازی ریپو اکنون ({repo.mode === 'existing' ? 'clone / بررسی' : 'ساخت ریپوی محلی'})
+              آماده‌سازی ریپوی {stage} اکنون ({repo.mode === 'existing' ? 'clone / بررسی' : 'ساخت ریپوی محلی'})
             </button>
           )}
         </div>
@@ -2127,30 +2011,39 @@ function RepositorySettings({ project, onChange, canPrepare }) {
   );
 }
 
-// Top of M3-F: one-click publish for projects with a project repository.
-function ProjectRepoActions({ task, project, onDone }) {
-  const repo = project?.repository;
-  if (!repo || repo.mode === 'none') return null;
-  const call = (action, label, show) => {
+// Top of M3-F: one-click validate / publish / PR for every stage that has its own repository.
+function StageRepoActions({ task, project, onDone }) {
+  const stages = Object.entries(project?.agents || {}).filter(([, agent]) => agent.repository && agent.repository.mode !== 'none');
+  if (!stages.length) return null;
+  const call = (stage, action, label, show) => {
     fetch(`${API}/api/sdlc/tasks/${task.base_task.task_id}/github/${action}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: stage }),
     })
       .then(readJsonOrThrow)
-      .then(data => { alert(`[${label}] ${show(data)}`); onDone && onDone(); })
-      .catch(err => alert(`[${label}] ❌ ${err.message}`));
+      .then(data => { alert(`[${label} · ${stage}] ${show(data)}`); onDone && onDone(); })
+      .catch(err => alert(`[${label} · ${stage}] ❌ ${err.message}`));
   };
   return (
-    <div className="sdlc-project-repo-actions">
-      <div dir="ltr" className="sdlc-project-repo-target">
-        {repo.url ? <a href={repo.url} target="_blank" rel="noreferrer">{repo.url}</a> : <span>GitHub repo will be created on the first push{repo.private ? ' (private)' : ''}</span>}
-      </div>
-      <div className="sdlc-project-repo-buttons">
-        <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => call('validate', 'A3 GitHubValidate', d => d.status === 'valid'
-          ? `✅ دسترسی تأیید شد: ${d.owner}/${d.repo}${d.will_create ? ' (در اولین push ساخته می‌شود)' : ''}`
-          : `❌ ${d.message}`)}>بررسی دسترسی</button>
-        <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => call('commit-push', 'A4 CommitPush', d => `✅ ${d.message}\n\nCommit: ${d.commit_sha}\nBranch: ${d.branch}\nRepo: ${d.repository_url}`)}>Commit و Push</button>
-        <button type="button" className="sdlc-btn sdlc-btn-primary" onClick={() => call('create-pr', 'A5 PullRequest', d => `✅ ${d.message}\n\nPR #${d.pr_number}\nURL: ${d.pr_url}`)}>Pull Request</button>
-      </div>
+    <div className="sdlc-stage-repos">
+      {stages.map(([stage, agent]) => (
+        <div key={stage} className="sdlc-project-repo-actions">
+          <div className="sdlc-stage-repo-head">
+            <strong>{stage}</strong>
+            <span dir="ltr" className="sdlc-project-repo-target">
+              {agent.repository.url
+                ? <a href={agent.repository.url} target="_blank" rel="noreferrer">{agent.repository.url}</a>
+                : <>new repo, created on the first push{agent.repository.private ? ' (private)' : ''}</>}
+            </span>
+          </div>
+          <div className="sdlc-project-repo-buttons">
+            <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => call(stage, 'validate', 'A3 GitHubValidate', d => d.status === 'valid'
+              ? `✅ دسترسی تأیید شد: ${d.owner}/${d.repo}${d.will_create ? ' (در اولین push ساخته می‌شود)' : ''}`
+              : `❌ ${d.message}`)}>بررسی دسترسی</button>
+            <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => call(stage, 'commit-push', 'A4 CommitPush', d => `✅ ${d.message}\n\nCommit: ${d.commit_sha}\nBranch: ${d.branch}\nRepo: ${d.repository_url}`)}>Commit و Push</button>
+            <button type="button" className="sdlc-btn sdlc-btn-primary" onClick={() => call(stage, 'create-pr', 'A5 PullRequest', d => `✅ ${d.message}\n\nPR #${d.pr_number}\nURL: ${d.pr_url}`)}>Pull Request</button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

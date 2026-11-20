@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RunStatus(str, Enum):
@@ -350,6 +350,28 @@ class StageRunner(str, Enum):
     codex = "codex"
 
 
+class RepositoryMode(str, Enum):
+    none = "none"          # the stage uses its own project_path; nothing is created or cloned
+    create = "create"      # from scratch: Taskloom creates a private GitHub repo on the first push
+    existing = "existing"  # Taskloom clones `url` once and fetches it before every task
+
+
+class RepositoryConfig(BaseModel):
+    """The Git/GitHub repository one SDLC stage (agent) works in."""
+    mode: RepositoryMode = RepositoryMode.none
+    url: str = ""                 # https://github.com/<owner>/<name>; filled in after creation in `create` mode
+    name: str = ""                # repo name to create; defaults to <project-id>-<stage>
+    local_path: str = ""          # local clone; defaults to project_path, else ~/taskloom-workspaces/<project>/<stage>
+    default_branch: str = "main"
+    private: bool = True
+    github_token: str = ""        # write-only: moved into the encrypted secret store on save
+    token_saved: bool = False
+    clear_token: bool = False
+
+
+ProjectRepository = RepositoryConfig  # name used by the first (project-level) version
+
+
 class AgentConfig(BaseModel):
     """Configuration for a specific agent type within a project"""
     enabled: bool = True
@@ -361,6 +383,7 @@ class AgentConfig(BaseModel):
     timeout_seconds: int = 300  # Ollama request timeout
     cli_timeout_seconds: int = 3600  # Claude Code / Codex run timeout
     max_retries: int = 2
+    repository: RepositoryConfig = Field(default_factory=RepositoryConfig)
     github_config: dict[str, str | bool] = Field(default_factory=lambda: {
         "repository_url": "",
         "github_token": "",
@@ -382,25 +405,6 @@ class ProjectWorkflowConfig(BaseModel):
     auto_resume_interrupted: bool = False  # re-run a stage cut off by a server restart without asking
 
 
-class RepositoryMode(str, Enum):
-    none = "none"          # stages use their own project_path; nothing is published automatically
-    create = "create"      # from scratch: Taskloom creates a private GitHub repo on the first push
-    existing = "existing"  # Taskloom clones `url` once and fetches it before every task
-
-
-class ProjectRepository(BaseModel):
-    """The single Git/GitHub repository an SDLC project works in (monorepo: backend/, frontend/, ...)."""
-    mode: RepositoryMode = RepositoryMode.none
-    url: str = ""                 # https://github.com/<owner>/<name>; filled in after creation in `create` mode
-    name: str = ""                # repo name to create; defaults to the project id
-    local_path: str = ""          # local clone; defaults to ~/taskloom-workspaces/<project-id>
-    default_branch: str = "main"
-    private: bool = True
-    github_token: str = ""        # write-only: moved into the encrypted secret store on save
-    token_saved: bool = False
-    clear_token: bool = False
-
-
 class SDLCProjectConfig(BaseModel):
     """SDLC-specific project configuration"""
     id: str
@@ -410,18 +414,36 @@ class SDLCProjectConfig(BaseModel):
     sdlc_enabled: bool = True
     workflow: ProjectWorkflowConfig = Field(default_factory=ProjectWorkflowConfig)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
-    repository: ProjectRepository = Field(default_factory=ProjectRepository)
+    # Legacy project-level repository (one repo for all stages). On load it is moved into the
+    # agents that have neither their own folder nor their own repository; kept only for parsing.
+    repository: RepositoryConfig = Field(default_factory=RepositoryConfig)
 
-    def workspace_path(self) -> str:
-        """Local folder of the project repository ("" when the project has none)."""
-        if self.repository.mode == RepositoryMode.none:
-            return self.repository.local_path
-        return self.repository.local_path or str(Path.home() / "taskloom-workspaces" / self.id)
+    @model_validator(mode="after")
+    def move_project_repository_to_agents(self) -> "SDLCProjectConfig":
+        legacy = self.repository
+        if legacy.mode != RepositoryMode.none:
+            for config in self.agents.values():
+                if not config.project_path and config.repository.mode == RepositoryMode.none:
+                    config.repository = legacy.model_copy(update={"github_token": "", "clear_token": False})
+            self.repository = RepositoryConfig()
+        return self
+
+    def stage_repository(self, stage: str) -> RepositoryConfig:
+        config = self.agents.get(stage)
+        return config.repository if config else RepositoryConfig()
 
     def stage_path(self, stage: str) -> str:
-        """Where a stage works: its own project_path, else the project repository."""
+        """Where a stage works: its repository's folder, else its own project_path ("" if neither)."""
         config = self.agents.get(stage)
-        return (config.project_path if config else "") or self.workspace_path()
+        if not config:
+            return ""
+        if config.repository.mode != RepositoryMode.none:
+            return (config.repository.local_path or config.project_path
+                    or str(Path.home() / "taskloom-workspaces" / self.id / stage))
+        return config.project_path
+
+    def stage_repo_name(self, stage: str) -> str:
+        return (self.stage_repository(stage).name or f"{self.id}-{stage}").strip()
 
     @field_validator("id")
     @classmethod

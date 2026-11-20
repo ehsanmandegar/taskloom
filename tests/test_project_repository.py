@@ -1,7 +1,9 @@
-"""Project-level repository: clone/fetch for existing repos, create-on-first-push for new projects."""
+"""Per-stage repositories: each agent (analysis, backend, frontend, ...) has its own Git/GitHub repo.
+
+existing: clone once, fetch before every task; create: local repo first, private GitHub repo on first push.
+"""
 
 import asyncio
-import json
 import subprocess
 from pathlib import Path
 
@@ -11,11 +13,11 @@ from fastapi.testclient import TestClient
 from backend.app import main as main_module
 from backend.app import sdlc_git, sdlc_runner
 from backend.app.models import (
-    AgentConfig, AgentResult, ProjectRepository, RunStatus, SDLCProjectConfig, SDLCTask, StageRunner, TaskState,
+    AgentConfig, AgentResult, AgentType, RepositoryConfig, RunStatus, SDLCProjectConfig, SDLCTask, StageRunner, TaskState,
 )
-from backend.app.services import SDLCProjectManager, SDLCTaskManager
+from backend.app.services import SDLCProjectManager, SDLCTaskManager, initial_agent_args
 
-URL = "https://github.com/acme/shop"
+URL = "https://github.com/acme/shop-backend"
 TOKEN = "ghp_repo_token_for_tests_000000000"
 
 
@@ -36,7 +38,7 @@ def make_task(task_id: str = "t1") -> SDLCTask:
 
 @pytest.fixture
 def remote(tmp_path, monkeypatch):
-    """A bare repo standing in for github.com/acme/shop, with one commit on main."""
+    """A bare repo standing in for github.com/acme/shop-backend, with one commit on main."""
     bare = tmp_path / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
     seed = tmp_path / "seed"
@@ -48,43 +50,64 @@ def remote(tmp_path, monkeypatch):
     git(seed, "add", "-A")
     git(seed, "commit", "-q", "-m", "init")
     git(seed, "push", "-q", str(bare), "main")
-    # Route every "GitHub" URL to the local bare repo.
     monkeypatch.setattr(sdlc_git, "clean_github_url", lambda url: str(bare))
-    monkeypatch.setattr(sdlc_git, "parse_github_url", lambda url: ("acme", "shop"))
+    monkeypatch.setattr(sdlc_git, "parse_github_url", lambda url: ("acme", "shop-backend"))
     return bare, seed
 
 
-def existing_project(tmp_path) -> SDLCProjectConfig:
-    return SDLCProjectConfig(id="shop", name="Shop", repository=ProjectRepository(
-        mode="existing", url=URL, local_path=str(tmp_path / "ws" / "shop")))
+def project_with(tmp_path, **repos: RepositoryConfig) -> SDLCProjectConfig:
+    return SDLCProjectConfig(id="shop", name="Shop", agents={stage: AgentConfig(repository=repo) for stage, repo in repos.items()})
 
 
-def test_existing_repo_is_cloned_once(tmp_path, remote):
-    project = existing_project(tmp_path)
+def existing(tmp_path) -> RepositoryConfig:
+    return RepositoryConfig(mode="existing", url=URL, local_path=str(tmp_path / "ws" / "backend"))
 
-    path = run(sdlc_git.ensure_workspace(project, TOKEN))
+
+def test_each_stage_has_its_own_default_folder_and_repo_name():
+    project = SDLCProjectConfig(id="shop", name="Shop", agents={
+        "backend": AgentConfig(repository=RepositoryConfig(mode="create")),
+        "frontend": AgentConfig(repository=RepositoryConfig(mode="create", name="shop-web")),
+        "qa": AgentConfig(project_path="E:/qa"),
+    })
+    assert project.stage_path("backend") == str(Path.home() / "taskloom-workspaces" / "shop" / "backend")
+    assert project.stage_repo_name("backend") == "shop-backend"
+    assert project.stage_repo_name("frontend") == "shop-web"
+    assert project.stage_path("qa") == "E:/qa"
+
+
+def test_old_project_level_repository_moves_into_the_agents():
+    project = SDLCProjectConfig(id="shop", name="Shop", agents={"backend": {}, "qa": {"project_path": "E:/qa"}},
+                                repository={"mode": "existing", "url": URL})
+    assert project.agents["backend"].repository.url == URL
+    assert project.agents["qa"].repository.mode.value == "none"  # had its own folder
+    assert project.repository.mode.value == "none"
+
+
+def test_existing_repo_is_cloned_once_without_storing_the_token(tmp_path, remote):
+    project = project_with(tmp_path, backend=existing(tmp_path))
+
+    path = run(sdlc_git.ensure_workspace(project, "backend", TOKEN))
 
     assert (path / "app.py").read_text(encoding="utf-8") == "v = 1\n"
-    assert run(sdlc_git.ensure_workspace(project, TOKEN)) == path  # already cloned: no-op
+    assert run(sdlc_git.ensure_workspace(project, "backend", TOKEN)) == path
     assert TOKEN not in (path / ".git" / "config").read_text(encoding="utf-8")
 
 
 def test_clone_refuses_a_non_empty_unrelated_folder(tmp_path, remote):
-    project = existing_project(tmp_path)
-    folder = Path(project.repository.local_path)
+    project = project_with(tmp_path, backend=existing(tmp_path))
+    folder = Path(project.stage_path("backend"))
     folder.mkdir(parents=True)
     (folder / "notes.txt").write_text("mine", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="not empty"):
-        run(sdlc_git.ensure_workspace(project, TOKEN))
+        run(sdlc_git.ensure_workspace(project, "backend", TOKEN))
 
 
 def test_every_new_task_branches_from_the_latest_remote_main(tmp_path, remote):
     bare, seed = remote
-    project = existing_project(tmp_path)
-    path = run(sdlc_git.ensure_workspace(project, TOKEN))
-
-    (seed / "app.py").write_text("v = 2\n", encoding="utf-8")  # someone pushes after our clone
+    project = project_with(tmp_path, backend=existing(tmp_path))
+    path = run(sdlc_git.ensure_workspace(project, "backend", TOKEN))
+    (seed / "app.py").write_text("v = 2\n", encoding="utf-8")
     git(seed, "commit", "-qam", "v2")
     git(seed, "push", "-q", str(bare), "main")
 
@@ -94,45 +117,39 @@ def test_every_new_task_branches_from_the_latest_remote_main(tmp_path, remote):
     assert (path / "app.py").read_text(encoding="utf-8") == "v = 2\n"
 
 
-def test_new_project_starts_a_local_repo_with_an_initial_commit(tmp_path):
-    project = SDLCProjectConfig(id="fresh", name="Fresh Shop", description="from scratch", repository=ProjectRepository(
-        mode="create", local_path=str(tmp_path / "ws" / "fresh")))
+def test_new_stage_repo_starts_locally_with_an_initial_commit(tmp_path):
+    project = project_with(tmp_path, frontend=RepositoryConfig(mode="create", local_path=str(tmp_path / "ws" / "frontend")))
 
-    path = run(sdlc_git.ensure_workspace(project, None))
+    path = run(sdlc_git.ensure_workspace(project, "frontend", None))
 
     assert git(path, "branch", "--show-current") == "main"
     assert git(path, "log", "--format=%s") == "Initial commit"
-    assert "Fresh Shop" in (path / "README.md").read_text(encoding="utf-8")
+    assert "Shop — frontend" in (path / "README.md").read_text(encoding="utf-8")
 
 
-def test_github_repo_is_created_private_under_the_token_owner_and_main_pushed(tmp_path, remote, monkeypatch):
-    bare, _ = remote
-    project = SDLCProjectConfig(id="fresh", name="Fresh", repository=ProjectRepository(
-        mode="create", local_path=str(tmp_path / "ws" / "fresh")))
-    run(sdlc_git.ensure_workspace(project, None))
-    calls = []
-
-    async def fake_api(method, path, token, body=None):
-        calls.append((method, path, body))
-        if path == "/user":
-            return 200, {"login": "ehsan"}
-        return 201, {"html_url": "https://github.com/ehsan/fresh"}
-
-    monkeypatch.setattr(sdlc_git, "github_api", fake_api)
-    # The fixture's bare repo already has a main; use a fresh empty one for this new project.
+def test_stage_repo_is_created_private_with_its_own_name(tmp_path, monkeypatch):
+    project = project_with(tmp_path, frontend=RepositoryConfig(mode="create", local_path=str(tmp_path / "ws" / "frontend")))
+    run(sdlc_git.ensure_workspace(project, "frontend", None))
     empty = tmp_path / "empty.git"
     subprocess.run(["git", "init", "-q", "--bare", str(empty)], check=True)
     monkeypatch.setattr(sdlc_git, "clean_github_url", lambda url: str(empty))
+    calls = []
 
-    url = run(sdlc_git.create_github_repository(project, TOKEN))
+    async def fake_api(method, path, token, body=None):
+        calls.append((path, body))
+        return (200, {"login": "ehsan"}) if path == "/user" else (201, {"html_url": "https://github.com/ehsan/shop-frontend"})
 
-    assert url == "https://github.com/ehsan/fresh"
-    assert calls[1][1] == "/user/repos" and calls[1][2]["name"] == "fresh" and calls[1][2]["private"] is True
+    monkeypatch.setattr(sdlc_git, "github_api", fake_api)
+
+    url = run(sdlc_git.create_github_repository(project, "frontend", TOKEN))
+
+    assert url == "https://github.com/ehsan/shop-frontend"
+    assert calls[1][0] == "/user/repos" and calls[1][1]["name"] == "shop-frontend" and calls[1][1]["private"] is True
     assert git(empty, "log", "--format=%s", "main") == "Initial commit"
 
 
 def test_existing_name_on_github_gives_a_clear_error(tmp_path, monkeypatch):
-    project = SDLCProjectConfig(id="fresh", name="Fresh", repository=ProjectRepository(mode="create"))
+    project = project_with(tmp_path, backend=RepositoryConfig(mode="create"))
 
     async def fake_api(method, path, token, body=None):
         if path == "/user":
@@ -140,21 +157,41 @@ def test_existing_name_on_github_gives_a_clear_error(tmp_path, monkeypatch):
         return 422, {"message": "Repository creation failed.", "errors": [{"message": "name already exists on this account"}]}
 
     monkeypatch.setattr(sdlc_git, "github_api", fake_api)
-    with pytest.raises(sdlc_git.GitHubError, match="ehsan/fresh already exists"):
-        run(sdlc_git.create_github_repository(project, TOKEN))
+    with pytest.raises(sdlc_git.GitHubError, match="ehsan/shop-backend already exists"):
+        run(sdlc_git.create_github_repository(project, "backend", TOKEN))
 
 
-def test_repository_token_is_stored_encrypted_and_never_returned(tmp_path):
+def test_each_stage_token_is_stored_encrypted_and_never_returned(tmp_path):
     manager = SDLCProjectManager(tmp_path / "data" / "projects")
-    project = existing_project(tmp_path)
-    project.repository.github_token = TOKEN
+    project = project_with(tmp_path, backend=existing(tmp_path), frontend=RepositoryConfig(mode="create"))
+    project.agents["backend"].repository.github_token = TOKEN
+    project.agents["frontend"].repository.github_token = "ghp_other"
 
     manager.save_project(project)
 
-    assert TOKEN not in (tmp_path / "data" / "projects" / "shop.json").read_text(encoding="utf-8")
-    assert manager.repository_token("shop") == TOKEN
-    assert manager.get_project("shop").repository.token_saved is True
-    assert manager.get_project("shop").repository.github_token == ""
+    text = (tmp_path / "data" / "projects" / "shop.json").read_text(encoding="utf-8")
+    assert TOKEN not in text and "ghp_other" not in text
+    assert manager.github_token("shop", "backend") == TOKEN
+    assert manager.github_token("shop", "frontend") == "ghp_other"
+    assert manager.get_project("shop").agents["backend"].repository.token_saved is True
+
+
+def test_legacy_project_token_is_copied_to_the_migrated_agents(tmp_path):
+    manager = SDLCProjectManager(tmp_path / "data" / "projects")
+    manager.secrets.set("github:shop:repo", TOKEN)
+
+    manager.save_project(SDLCProjectConfig(id="shop", name="Shop", agents={"backend": {}},
+                                           repository={"mode": "create"}))
+
+    assert manager.github_token("shop", "backend") == TOKEN
+    assert manager.secrets.get("github:shop:repo") is None
+
+
+def test_claude_gets_the_other_stages_folders_as_readable_dirs(tmp_path):
+    args = initial_agent_args(AgentType.claude, "claude.exe", "do it", ["E:/a", "E:/b"])
+
+    assert args[-1] == "do it"
+    assert args[args.index("--add-dir"):args.index("--permission-mode")] == ["--add-dir", "E:/a", "--add-dir", "E:/b"]
 
 
 @pytest.fixture
@@ -166,12 +203,11 @@ def api(tmp_path, monkeypatch):
     return TestClient(main_module.app), projects, tasks
 
 
-def test_first_push_of_a_new_project_creates_the_repo_then_pushes_the_task(tmp_path, api, monkeypatch):
+def test_first_push_of_a_new_stage_repo_creates_it_then_pushes_the_task(tmp_path, api, monkeypatch):
     client, projects, tasks = api
-    project = SDLCProjectConfig(id="shop", name="Shop", repository=ProjectRepository(
-        mode="create", local_path=str(tmp_path / "ws" / "shop"), github_token=TOKEN))
+    project = project_with(tmp_path, backend=RepositoryConfig(mode="create", local_path=str(tmp_path / "ws" / "backend"), github_token=TOKEN))
     projects.save_project(project)
-    path = run(sdlc_git.ensure_workspace(project, None))
+    path = run(sdlc_git.ensure_workspace(project, "backend", None))
     task = make_task()
     run(sdlc_git.prepare_task_branch(task, path, "main"))
     (path / "cart.py").write_text("def cart(): ...\n", encoding="utf-8")
@@ -180,28 +216,27 @@ def test_first_push_of_a_new_project_creates_the_repo_then_pushes_the_task(tmp_p
     subprocess.run(["git", "init", "-q", "--bare", str(remote_repo)], check=True)
     monkeypatch.setattr(sdlc_git, "clean_github_url", lambda url: str(remote_repo))
     monkeypatch.setattr(sdlc_git, "push_url", lambda url, token: str(remote_repo))
-    seen_tokens = []
+    seen = []
 
     async def fake_api(method, path_, token, body=None):
-        seen_tokens.append(token)
-        return (200, {"login": "ehsan"}) if path_ == "/user" else (201, {"html_url": "https://github.com/ehsan/shop"})
+        seen.append((path_, token))
+        return (200, {"login": "ehsan"}) if path_ == "/user" else (201, {"html_url": "https://github.com/ehsan/shop-backend"})
 
     monkeypatch.setattr(sdlc_git, "github_api", fake_api)
 
-    response = client.post("/api/sdlc/tasks/t1/github/commit-push", json={})
+    response = client.post("/api/sdlc/tasks/t1/github/commit-push", json={"agent": "backend"})
 
     assert response.status_code == 200, response.text
-    assert response.json()["repository_url"] == "https://github.com/ehsan/shop"
-    assert seen_tokens == [TOKEN, TOKEN]  # the saved project token was used
-    assert projects.get_project("shop").repository.url == "https://github.com/ehsan/shop"
-    assert git(remote_repo, "log", "--format=%s", "main") == "Initial commit"
+    assert response.json()["repository_url"] == "https://github.com/ehsan/shop-backend"
+    assert seen == [("/user", TOKEN), ("/user/repos", TOKEN)]
+    assert projects.get_project("shop").agents["backend"].repository.url == "https://github.com/ehsan/shop-backend"
     assert "cart.py" in git(remote_repo, "show", "--stat", "--format=", "sdlc/t1")
     assert TOKEN not in response.text
 
 
-def test_validate_before_the_repo_exists_reports_the_future_owner(api, monkeypatch, tmp_path):
+def test_validate_before_a_stage_repo_exists_reports_the_future_owner(api, monkeypatch, tmp_path):
     client, projects, tasks = api
-    projects.save_project(SDLCProjectConfig(id="shop", name="Shop", repository=ProjectRepository(mode="create", github_token=TOKEN)))
+    projects.save_project(project_with(tmp_path, backend=RepositoryConfig(mode="create", github_token=TOKEN)))
     run(tasks.save_task(make_task()))
 
     async def fake_api(method, path, token, body=None):
@@ -209,32 +244,39 @@ def test_validate_before_the_repo_exists_reports_the_future_owner(api, monkeypat
 
     monkeypatch.setattr(sdlc_git, "github_api", fake_api)
 
-    body = client.post("/api/sdlc/tasks/t1/github/validate", json={}).json()
+    body = client.post("/api/sdlc/tasks/t1/github/validate", json={"agent": "backend"}).json()
 
-    assert body == {"status": "valid", "owner": "ehsan", "repo": "shop", "will_create": True, "private": True}
+    assert body == {"status": "valid", "owner": "ehsan", "repo": "shop-backend", "will_create": True, "private": True}
 
 
-def test_stage_without_its_own_folder_runs_in_the_cloned_repository(tmp_path, remote, monkeypatch):
-    project = existing_project(tmp_path)
-    project.agents["backend"] = AgentConfig()  # no project_path: use the project repository
+def test_stages_work_in_their_own_repos_and_see_each_other(tmp_path, remote, monkeypatch):
+    project = project_with(
+        tmp_path,
+        backend=existing(tmp_path),
+        frontend=RepositoryConfig(mode="create", local_path=str(tmp_path / "ws" / "frontend")),
+    )
+    run(sdlc_git.ensure_workspace(project, "backend", TOKEN))  # backend already cloned by an earlier stage
     seen = {}
 
     async def fake_agent(agent_type, args, repo, state, timeout):
-        seen["repo"] = repo
-        (Path(repo) / "cart.py").write_text("x = 1\n", encoding="utf-8")
-        return 0, 'Done.\n```json\n{"status": "completed", "summary": "cart"}\n```'
+        seen.update(repo=repo, args=args)
+        (Path(repo) / "App.tsx").write_text("x\n", encoding="utf-8")
+        return 0, 'Done.\n```json\n{"status": "completed", "summary": "ui"}\n```'
 
     monkeypatch.setattr(sdlc_runner, "agent_executable", lambda agent_type: "agent.exe")
     monkeypatch.setattr(sdlc_runner, "run_agent_command", fake_agent)
     monkeypatch.setattr(sdlc_runner, "agent_response", lambda agent_type, output: ("s", output))
     monkeypatch.setattr(sdlc_runner.shutil, "which", lambda name: "claude.exe" if name == "claude" else None)
     task = make_task()
+    frontend = project.agents["frontend"]
 
-    assert sdlc_runner.resolve_runner(project.agents["backend"], project.stage_path("backend")) == StageRunner.claude
-    result = run(sdlc_runner.run_cli_stage("backend", task, project, project.agents["backend"], StageRunner.claude, repo_token=TOKEN))
+    assert sdlc_runner.resolve_runner(frontend, project.stage_path("frontend")) == StageRunner.claude
+    result = run(sdlc_runner.run_cli_stage("frontend", task, project, frontend, StageRunner.claude, repo_token=TOKEN))
 
-    workspace = Path(project.repository.local_path).resolve()
-    assert seen["repo"] == workspace
-    assert [c.file for c in result.changes] == ["cart.py"]
-    assert git(workspace, "branch", "--show-current") == "sdlc/t1"
-    assert task.repos[str(workspace)].base_branch == "main"
+    frontend_repo = (tmp_path / "ws" / "frontend").resolve()
+    backend_repo = str((tmp_path / "ws" / "backend").resolve())
+    assert seen["repo"] == frontend_repo
+    assert [c.file for c in result.changes] == ["App.tsx"]
+    assert git(frontend_repo, "branch", "--show-current") == "sdlc/t1"
+    assert backend_repo in seen["args"][seen["args"].index("--add-dir") + 1]
+    assert f"backend: `{backend_repo}`" in seen["args"][-1]  # prompt lists the other stage's folder

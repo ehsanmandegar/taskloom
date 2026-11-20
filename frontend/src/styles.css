@@ -2944,3 +2944,7 @@ html[data-theme="dark"] .sdlc-project-repo-actions { background: #03110b; border
 .sdlc-repo-mode input[type="radio"], .sdlc-repo-settings input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 3px 0 0; }
 .sdlc-repo-mode span { flex: 1; text-align: start; }
 .sdlc-repo-settings .sdlc-checkbox-label { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.sdlc-stage-repos { display: grid; gap: 8px; margin-bottom: 12px; }
+.sdlc-stage-repo-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
+.sdlc-stage-repo-head strong { text-transform: capitalize; }
+.sdlc-agent-config .sdlc-repo-settings, .sdlc-repo-settings { margin-top: 12px; }

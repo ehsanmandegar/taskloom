@@ -114,20 +114,20 @@ def clean_github_url(repo_url: str) -> str:
     return f"https://github.com/{owner}/{name}.git"
 
 
-async def ensure_workspace(project, token: str | None) -> Path:
-    """Make sure the project's repository exists locally before a stage runs.
+async def ensure_workspace(project, stage: str, token: str | None) -> Path:
+    """Make sure the stage's repository exists locally before the stage runs.
 
     existing: clone `repository.url` into the workspace once (later tasks fetch it).
     create:   start a local repository with an initial commit; GitHub comes on the first push.
     """
-    repository = project.repository
-    path = Path(project.workspace_path()).expanduser()
+    repository = project.stage_repository(stage)
+    path = Path(project.stage_path(stage)).expanduser()
     token = resolve_token(token)
     is_repo = (path / ".git").exists()
 
     if repository.mode.value == "existing":
         if not repository.url:
-            raise RuntimeError("The project uses an existing repository but its URL is empty")
+            raise RuntimeError(f"Stage {stage} uses an existing repository but its URL is empty")
         clean = clean_github_url(repository.url)
         if not is_repo:
             if path.exists() and any(path.iterdir()):
@@ -149,7 +149,7 @@ async def ensure_workspace(project, token: str | None) -> Path:
         if code:
             raise RuntimeError(output.strip() or "git init failed")
         if not any(child.name != ".git" for child in path.iterdir()):
-            (path / "README.md").write_text(f"# {project.name}\n\n{project.description}\n", encoding="utf-8")
+            (path / "README.md").write_text(f"# {project.name} — {stage}\n\n{project.description}\n", encoding="utf-8")
         await command(["git", "add", "-A"], path)
         code, output = await command(["git", "commit", "-q", "-m", "Initial commit"], path)
         if code:
@@ -159,7 +159,7 @@ async def ensure_workspace(project, token: str | None) -> Path:
     return path
 
 
-async def describe_new_repository(project, token: str | None) -> dict:
+async def describe_new_repository(project, stage: str, token: str | None) -> dict:
     """Validate a token before the project's repository exists: who will own the new repo."""
     token = resolve_token(token)
     if not token:
@@ -167,33 +167,32 @@ async def describe_new_repository(project, token: str | None) -> dict:
     status, user = await github_api("GET", "/user", token)
     if status != 200:
         raise GitHubError("The GitHub token is invalid or expired" if status == 401 else _github_message(status, user))
-    name = (project.repository.name or project.id).strip()
-    return {"status": "valid", "owner": user["login"], "repo": name, "will_create": True,
-            "private": project.repository.private}
+    return {"status": "valid", "owner": user["login"], "repo": project.stage_repo_name(stage), "will_create": True,
+            "private": project.stage_repository(stage).private}
 
 
-async def create_github_repository(project, token: str | None) -> str:
-    """Create the project's private repo under the token's account, push the base branch, return its URL."""
+async def create_github_repository(project, stage: str, token: str | None) -> str:
+    """Create the stage's private repo under the token's account, push the base branch, return its URL."""
     token = resolve_token(token)
     if not token:
         raise GitHubError("A GitHub token is required to create the repository (save one in the project, or set GITHUB_TOKEN)")
-    repository = project.repository
-    name = (repository.name or project.id).strip()
+    repository = project.stage_repository(stage)
+    name = project.stage_repo_name(stage)
     status, user = await github_api("GET", "/user", token)
     if status != 200:
         raise GitHubError("The GitHub token is invalid or expired" if status == 401 else _github_message(status, user))
     owner = user["login"]
     status, payload = await github_api("POST", "/user/repos", token, {
         "name": name, "private": repository.private, "auto_init": False,
-        "description": (project.description or f"{project.name} (managed by Taskloom SDLC)")[:350],
+        "description": f"{project.name} — {stage} (managed by Taskloom SDLC)"[:350],
     })
     if status == 422 and "already exists" in json.dumps(payload):
-        raise GitHubError(f"{owner}/{name} already exists on GitHub. Use it as the project's existing repository, "
-                          "or set a different repository name.")
+        raise GitHubError(f"{owner}/{name} already exists on GitHub. Use it as the {stage} stage's existing "
+                          "repository, or set a different repository name.")
     if status != 201:
         raise GitHubError(_github_message(status, payload))
     url = payload["html_url"]
-    root = Path(project.workspace_path())
+    root = Path(project.stage_path(stage))
     if await has_remote(root, "origin"):
         await command(["git", "remote", "set-url", "origin", clean_github_url(url)], root)
     else:

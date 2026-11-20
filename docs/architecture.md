@@ -176,22 +176,23 @@ flowchart TD
 
 - token به این ترتیب پیدا می‌شود: فیلد درخواست ← token ذخیره‌شدهٔ همان agent ← `GITHUB_TOKEN`. در remote گیت ذخیره نمی‌شود و در پیام خطا با `***` پوشانده می‌شود.
 
-### ریپوی پروژه (`SDLCProjectConfig.repository`)
+### ریپوی هر مرحله (`AgentConfig.repository`)
 
-هر پروژه می‌تواند یک ریپوی واحد (monorepo: `backend/`، `frontend/`، `analysis/`، ...) داشته باشد؛ مرحله‌ای که `project_path` جدا ندارد در `local_path` آن کار می‌کند
-(پیش‌فرض `~/taskloom-workspaces/<project-id>`).
+هر مرحله (analysis، backend، frontend، qa، n8n) می‌تواند ریپوی Git/GitHub خودش را داشته باشد. پوشهٔ کار مرحله:
+`repository.local_path`، وگرنه `project_path`، وگرنه `~/taskloom-workspaces/<project>/<stage>`. نام پیش‌فرض ریپو: `<project-id>-<stage>`.
 
-| `mode` | قبل از اولین مرحله | قبل از هر تسک | اولین «Commit و Push» |
+| `mode` | قبل از اجرای مرحله | قبل از هر تسک | اولین «Commit و Push» آن مرحله |
 |---|---|---|---|
-| `none` | — | — | ریپوی هر agent (رفتار قبلی) |
-| `create` (پروژهٔ از صفر) | `git init` + commit اولیه در پوشهٔ محلی | اگر origin دارد: fetch | ساخت ریپوی **private** زیر حساب صاحب token (`POST /user/repos`)، push برنچ پایه، سپس push برنچ تسک |
+| `none` | — | — | `github_config` قدیمی همان agent |
+| `create` (از صفر) | `git init` + commit اولیه در پوشهٔ مرحله | اگر origin دارد: fetch | ساخت ریپوی **private** زیر حساب صاحب token، push برنچ پایه، سپس push برنچ تسک |
 | `existing` | `git clone` آدرس داده‌شده (یک بار) | `git fetch` و ساخت `sdlc/<task-id>` از آخرین `origin/<base>` | push برنچ تسک |
 
-- token ریپو مثل tokenهای agent با DPAPI در `data/secrets.json` (`github:<project>:repo`) نگه داشته می‌شود؛ git آن را فقط به‌صورت header همان یک فرمان
-  (`http.extraheader`) می‌گیرد، نه در URL یا `.git/config`، و در پیام‌های خطا پوشانده می‌شود.
-- `POST /api/sdlc/projects/{id}/repository/prepare` clone یا ساخت ریپوی محلی را همین حالا انجام می‌دهد (دکمهٔ «آماده‌سازی ریپو» در M4-1R).
-- `github/validate` پیش از ساخت ریپو، صاحب و نام ریپوی آینده را برمی‌گرداند.
-- دسترسی token: classic با scope `repo`، یا fine-grained با Contents و Pull requests (و Administration برای ساخت ریپو).
+- یک تسک در همهٔ ریپوهایی که مراحلش لمس می‌کنند برنچ هم‌نام `sdlc/<task-id>` دارد؛ commit، push و PR برای هر مرحله جدا انجام می‌شود (M3-F).
+- **دسترسی بین مراحل:** Claude Code در حالت `--print` بیرون از پوشهٔ کارش را نمی‌خواند؛ پوشه‌های مراحل دیگر و `knowledge_path` با `--add-dir`
+  به عامل داده می‌شوند و در prompt فهرست می‌شوند («بخوان، تغییر نده»). فقط تغییرات پوشهٔ خود مرحله در `changes` ثبت می‌شود.
+- token هر مرحله در همان جایگاه رمزشدهٔ agent (`github:<project>:<stage>`) نگه داشته می‌شود؛ git آن را فقط به‌صورت header همان یک فرمان می‌گیرد.
+- `POST /api/sdlc/projects/{id}/agents/{agent}/repository/prepare` همین حالا clone یا ریپوی محلی را می‌سازد (دکمه در M4-3R).
+- پیکربندی قدیمی یک‌ریپو برای کل پروژه (`project.repository`) هنگام بارگذاری به agentهایی که پوشهٔ جدا ندارند منتقل می‌شود.
 
 ### نگهداری token (`backend/app/secret_store.py`)
 

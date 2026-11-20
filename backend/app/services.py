@@ -1055,14 +1055,19 @@ def agent_executable(agent_type: AgentType) -> str:
     return executable
 
 
-def initial_agent_args(agent_type: AgentType, executable: str, prompt: str) -> list[str]:
+def initial_agent_args(agent_type: AgentType, executable: str, prompt: str,
+                       extra_dirs: list[str] | None = None) -> list[str]:
     if agent_type == AgentType.claude:
+        # --add-dir lets the agent read the other SDLC stages' repositories (it is variadic, so it
+        # must come before another option, never directly before the prompt).
+        add_dirs = [arg for directory in (extra_dirs or []) for arg in ("--add-dir", directory)]
         return [
             executable,
             "--print",
             "--output-format",
             "stream-json",
             "--verbose",
+            *add_dirs,
             "--permission-mode",
             "acceptEdits",
             prompt,
@@ -1616,34 +1621,32 @@ class SDLCProjectManager:
         return f"github:{project_id}:{agent}"
 
     def _move_tokens_to_store(self, project: SDLCProjectConfig) -> bool:
-        """Store any token from the config in the secret store and blank it; True if one was moved."""
+        """Store any token from the config in the secret store and blank it; True if one was moved.
+
+        Each agent has one token slot, shared by its repository settings and its legacy github_config.
+        """
         moved = False
+        legacy_name = self._token_name(project.id, "repo")  # old project-level repository token
+        legacy = self.secrets.get(legacy_name)
         for agent, config in project.agents.items():
-            github = config.github_config
+            github, repository = config.github_config, config.repository
             name = self._token_name(project.id, agent)
-            if github.pop("clear_token", False) is True:
+            if github.pop("clear_token", False) is True or repository.clear_token:
                 self.secrets.delete(name)
-            token = github.get("github_token")
-            if isinstance(token, str) and token.strip():
-                self.secrets.set(name, token.strip())
+            for token in (github.get("github_token"), repository.github_token):
+                if isinstance(token, str) and token.strip():
+                    self.secrets.set(name, token.strip())
+                    moved = True
+            if legacy and repository.mode.value != "none" and not self.secrets.has(name):
+                self.secrets.set(name, legacy)
                 moved = True
             github["github_token"] = ""
-            github["token_saved"] = self.secrets.has(name)
-        repository = project.repository
-        name = self._token_name(project.id, "repo")
-        if repository.clear_token:
-            self.secrets.delete(name)
-        if repository.github_token.strip():
-            self.secrets.set(name, repository.github_token.strip())
-            moved = True
-        repository.github_token = ""
-        repository.clear_token = False
-        repository.token_saved = self.secrets.has(name)
+            repository.github_token = ""
+            repository.clear_token = False
+            github["token_saved"] = repository.token_saved = self.secrets.has(name)
+        if legacy:
+            self.secrets.delete(legacy_name)
         return moved
-
-    def repository_token(self, project_id: str) -> str:
-        """Token for the project repository; falls back to GITHUB_TOKEN later (sdlc_git.resolve_token)."""
-        return self.secrets.get(self._token_name(project_id, "repo")) or ""
 
     def github_token(self, project_id: str, agent: str) -> str:
         return self.secrets.get(self._token_name(project_id, agent)) or ""
@@ -1885,8 +1888,8 @@ class SDLCTaskManager:
         if self._instance_lock is not None:
             self._instance_lock.release()
 
-    def repository_token(self, project_id: str) -> str:
-        return SDLCProjectManager(self.data_dir.parent / "projects").repository_token(project_id)
+    def agent_token(self, project_id: str, stage: str) -> str:
+        return SDLCProjectManager(self.data_dir.parent / "projects").github_token(project_id, stage)
 
     def agent_pid_file(self, task_id: str) -> Path:
 
@@ -2001,7 +2004,7 @@ class SDLCTaskManager:
                     result = await loop.run_in_executor(None, _ollama_runner.run_agent, stage, task, project, previous)
             else:
                 result = await run_cli_stage(stage, task, project, agent_cfg, runner, self.agent_pid_file(task_id),
-                                             self.repository_token(project.id))
+                                             self.agent_token(project.id, stage))
 
             print(f"[SDLC] {stage} finished for {task_id}: {result.status} - {result.summary[:120]}", flush=True)
 

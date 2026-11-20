@@ -101,6 +101,33 @@ def stage_feedback(task: SDLCTask, stage: str) -> list[str]:
     return sections
 
 
+def other_stage_folders(stage: str, project: SDLCProjectConfig) -> dict[str, str]:
+    """Existing folders of the other enabled stages (each stage may have its own repository)."""
+    folders = {}
+    for other, config in project.agents.items():
+        if other == stage or not config.enabled:
+            continue
+        path = project.stage_path(other)
+        if path and Path(path).expanduser().is_dir():
+            folders[other] = str(Path(path).expanduser().resolve())
+    return folders
+
+
+def readable_dirs(stage: str, project: SDLCProjectConfig, config: AgentConfig, workdir: Path) -> list[str]:
+    """Directories outside the working folder the agent needs to read: other stages and the knowledge path."""
+    dirs = []
+    candidates = [*other_stage_folders(stage, project).values()]
+    if config.knowledge_path:
+        candidates.append(config.knowledge_path)
+    for path in candidates:
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_dir() or resolved == workdir or workdir in resolved.parents:
+            continue
+        if str(resolved) not in dirs:
+            dirs.append(str(resolved))
+    return dirs
+
+
 def build_stage_prompt(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, workdir: Path) -> str:
     role = STAGE_ROLES.get(stage, stage)
     sections = [f"You are the {role} stage of an automated software delivery pipeline (Taskloom) for project \"{project.name}\"."]
@@ -146,6 +173,12 @@ def build_stage_prompt(stage: str, task: SDLCTask, project: SDLCProjectConfig, c
         )
     else:
         testing = "You may not be allowed to run shell commands, and no test command is configured for this stage; review tests by reading them."
+    others = other_stage_folders(stage, project)
+    if others:
+        sections.append(
+            "## Other stages' folders (read them, never change them)\n"
+            + "\n".join(f"- {name}: `{path}`" for name, path in others.items())
+        )
     sections.append(
         "## Rules\n"
         f"- Your working folder is `{workdir}`. Only create or modify files inside it.\n"
@@ -223,13 +256,14 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     """Run one SDLC stage with Claude Code or Codex inside the stage's folder (or the project repository)."""
     agent_type = AgentType.claude if runner == StageRunner.claude else AgentType.codex
     display_name = agent_name(agent_type)
-    uses_project_repo = project.repository.mode.value != "none" and not config.project_path
-    if project.repository.mode.value != "none":
-        # Clone (existing repo) or initialise (new project) the repository before the first stage.
-        await ensure_workspace(project, repo_token)
+    repository = project.stage_repository(stage)
+    has_repo = repository.mode.value != "none"
+    if has_repo:
+        # Clone (existing repo) or initialise (new repo) this stage's repository before it runs.
+        await ensure_workspace(project, stage, repo_token)
     stage_path = project.stage_path(stage)
     if not stage_path:
-        raise RuntimeError(f"Stage '{stage}' needs a project_path (or a project repository) to run {display_name}")
+        raise RuntimeError(f"Stage '{stage}' needs a project_path or a repository to run {display_name}")
     workdir = Path(stage_path).expanduser().resolve()
     if not workdir.is_dir():
         raise RuntimeError(f"Project folder for stage '{stage}' does not exist: {workdir}")
@@ -237,8 +271,8 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     executable = agent_executable(agent_type)
     # In a Git repository every task works on its own branch (sdlc/<task-id>), started from the
     # freshly fetched remote base branch when the repository has an origin.
-    base_branch = project.repository.default_branch if uses_project_repo else str(config.github_config.get("branch") or "main")
-    await prepare_task_branch(task, workdir, base_branch, resolve_token(repo_token) if project.repository.mode.value != "none" else None)
+    base_branch = repository.default_branch if has_repo else str(config.github_config.get("branch") or "main")
+    await prepare_task_branch(task, workdir, base_branch, resolve_token(repo_token) if has_repo else None)
     prompt = build_stage_prompt(stage, task, project, config, workdir)
     state = task.base_task
     state.step = f"{display_name} is running the {stage} stage"
@@ -246,7 +280,8 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     before = snapshot_folder(workdir)
     token = _command_started_handler.set(record_agent_process(pid_file, stage) if pid_file else None)
     try:
-        code, output = await run_agent_command(agent_type, initial_agent_args(agent_type, executable, prompt), workdir, state, config.cli_timeout_seconds)
+        args = initial_agent_args(agent_type, executable, prompt, readable_dirs(stage, project, config, workdir))
+        code, output = await run_agent_command(agent_type, args, workdir, state, config.cli_timeout_seconds)
     finally:
         _command_started_handler.reset(token)
         if pid_file:
