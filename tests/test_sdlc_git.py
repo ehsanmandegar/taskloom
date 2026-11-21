@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import main as main_module
 from backend.app import sdlc_git
+from backend.app.git_flow import SandboxMissingError  # noqa: F401
 from backend.app.models import AgentConfig, AgentResult, RunStatus, SDLCProjectConfig, SDLCTask, TaskState
 from backend.app.services import SDLCProjectManager, SDLCTaskManager
 
@@ -17,7 +18,7 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def make_repo(path: Path, branch: str = "main") -> Path:
+def make_repo(path: Path, branch: str = "main", sandbox: bool = True) -> Path:
     path.mkdir(parents=True)
     git(path, "init", "-q", "-b", branch)
     git(path, "config", "user.name", "Test")
@@ -25,11 +26,13 @@ def make_repo(path: Path, branch: str = "main") -> Path:
     (path / "app.py").write_text("x = 1\n", encoding="utf-8")
     git(path, "add", "-A")
     git(path, "commit", "-q", "-m", "init")
+    if sandbox:  # every task branch starts from `sandbox`
+        git(path, "branch", "sandbox")
     return path
 
 
 def make_task(task_id: str = "sdlc-git1") -> SDLCTask:
-    base = TaskState(id=task_id, task_id=task_id, project_path=".", branch=f"tasks/{task_id}", status=RunStatus.queued, step="sdlc")
+    base = TaskState(id=task_id, task_id=task_id, project_path=".", branch=task_id, status=RunStatus.queued, step="sdlc")
     task = SDLCTask(base_task=base, title="Add cart", description="Cart API", project_config_id="p")
     task.agent_results["backend"] = AgentResult(agent="backend", status="completed", summary="Added cart endpoint",
                                                 tests={"executed": True, "passed": True, "results": []})
@@ -48,13 +51,13 @@ def test_task_branch_is_created_from_base_and_reused(tmp_path):
 
     record = run(sdlc_git.prepare_task_branch(task, sub, "main"))
 
-    assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
-    assert record.branch == "sdlc/sdlc-git1" and record.base_branch == "main"
+    assert git(repo, "branch", "--show-current") == "sdlc-git1"
+    assert record.branch == "sdlc-git1" and record.base_branch == "sandbox"
     assert task.repos[str(repo.resolve())] is record
 
     (repo / "app.py").write_text("x = 2\n", encoding="utf-8")  # an earlier stage's uncommitted work
     assert run(sdlc_git.prepare_task_branch(task, repo, "main")) is record
-    assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
+    assert git(repo, "branch", "--show-current") == "sdlc-git1"
 
 
 def test_uncommitted_changes_on_another_branch_block_the_stage(tmp_path):
@@ -66,13 +69,16 @@ def test_uncommitted_changes_on_another_branch_block_the_stage(tmp_path):
     assert git(repo, "branch", "--show-current") == "main"
 
 
-def test_missing_base_branch_falls_back_to_current_branch(tmp_path):
-    repo = make_repo(tmp_path / "repo", branch="master")
+def test_missing_sandbox_is_an_error_not_a_fallback(tmp_path):
+    repo = make_repo(tmp_path / "repo", branch="master", sandbox=False)
+    task = make_task()
 
-    record = run(sdlc_git.prepare_task_branch(make_task(), repo, "main"))
+    with pytest.raises(SandboxMissingError, match="`sandbox` does not exist"):
+        run(sdlc_git.prepare_task_branch(task, repo, "main"))
 
-    assert record.base_branch == "master"
-    assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
+    assert git(repo, "branch", "--show-current") == "master"
+    assert git(repo, "branch", "--list", "sdlc-git1") == ""
+    assert task.repos == {}
 
 
 def test_plain_folder_has_no_branch(tmp_path):
@@ -124,8 +130,8 @@ def test_commit_push_commits_task_changes_and_pushes_the_branch(api):
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["branch"] == "sdlc/sdlc-git1" and body["message"] == "Committed and pushed"
-    assert git(remote, "rev-parse", "refs/heads/sdlc/sdlc-git1") == body["commit_sha"]
+    assert body["branch"] == "sdlc-git1" and body["message"] == "Committed and pushed"
+    assert git(remote, "rev-parse", "refs/heads/sdlc-git1") == body["commit_sha"]
     message = git(repo, "log", "-1", "--format=%B")
     assert message.startswith("feat(sdlc-git1): Add cart") and "backend: Added cart endpoint" in message
     saved = run(tasks.load_task("sdlc-git1"))
@@ -177,7 +183,7 @@ def test_create_pr_requires_push_then_opens_pr_with_stage_summary(api, monkeypat
     assert response.json() == {"message": "Pull request created", "pr_number": 7, "pr_url": "https://github.com/acme/shop/pull/7"}
     method, path, token, body = calls[-1]
     assert (method, path, token) == ("POST", "/repos/acme/shop/pulls", "tok")
-    assert body["head"] == "sdlc/sdlc-git1" and body["base"] == "main"
+    assert body["head"] == "sdlc-git1" and body["base"] == "develop"
     assert "Added cart endpoint" in body["body"] and "tests passed" in body["body"]
     assert run(tasks.load_task("sdlc-git1")).repos[str(repo.resolve())].pr_number == 7
 
@@ -187,7 +193,7 @@ def test_existing_pr_is_returned_instead_of_failing(api, monkeypatch):
 
     async def fake_api(method, path, token, body=None):
         if method == "POST":
-            return 422, {"message": "Validation Failed", "errors": [{"message": "A pull request already exists for acme:sdlc/sdlc-git1."}]}
+            return 422, {"message": "Validation Failed", "errors": [{"message": "A pull request already exists for acme:sdlc-git1."}]}
         return 200, [{"number": 3, "html_url": "https://github.com/acme/shop/pull/3"}]
 
     monkeypatch.setattr(sdlc_git, "github_api", fake_api)
@@ -215,15 +221,13 @@ def test_validate_reports_repo_access(api, monkeypatch, status, expected):
         assert body["status"] == "invalid" and expected in body["message"]
 
 
-def test_task_branch_in_a_repository_without_commits(tmp_path):
+def test_task_branch_in_a_repository_without_commits_reports_the_missing_sandbox(tmp_path):
     repo = tmp_path / "fresh"
     repo.mkdir()
-    git(repo, "init", "-q", "-b", "sandbox")  # the configured base branch exists only as an unborn branch
+    git(repo, "init", "-q", "-b", "sandbox")  # unborn: sandbox has no commit yet (ensure_workspace heals this for managed repos)
 
-    record = run(sdlc_git.prepare_task_branch(make_task(), repo, "sandbox"))
-
-    assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
-    assert record.branch == "sdlc/sdlc-git1"
+    with pytest.raises(SandboxMissingError):
+        run(sdlc_git.prepare_task_branch(make_task(), repo, "sandbox"))
 
 
 def test_managed_repo_sets_aside_uncommitted_leftovers_instead_of_failing(tmp_path):
@@ -237,7 +241,7 @@ def test_managed_repo_sets_aside_uncommitted_leftovers_instead_of_failing(tmp_pa
 
     run(sdlc_git.prepare_task_branch(task, repo, "main", auto_stash=True))
 
-    assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
+    assert git(repo, "branch", "--show-current") == "sdlc-git1"
     assert git(repo, "status", "--porcelain") == ""
     assert "taskloom: auto-stash" in git(repo, "stash", "list")
     assert any("Set aside uncommitted changes" in line for line in task.base_task.logs)

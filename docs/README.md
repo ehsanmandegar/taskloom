@@ -8,6 +8,7 @@ Taskloom یک پلتفرم SDLC محلی است (FastAPI + React) که یک در
 |---|---|
 | [architecture.md](architecture.md) | اجزای سیستم، جریان SDLC، ماشین وضعیت، ذخیره‌سازی |
 | [api.md](api.md) | Endpointها و اختلاف بین فرانت‌اند و بک‌اند |
+| [git-release-flow.md](git-release-flow.md) | استراتژی برنچ (`sandbox` / `develop` / برنچ هر تسک)، تأیید نهایی، مدیریت نسخه (release) — به انگلیسی |
 | [known-issues.md](known-issues.md) | ایرادهای پیدا‌شده در بازبینی کد، به ترتیب اولویت — نقطهٔ شروع بهبود |
 | [graphify/](graphify/) | گراف دانش کد (ساخته‌شده با graphify) |
 

@@ -1,0 +1,54 @@
+/* Release Management + task Git panel. Colours come from CSS variables so light and dark themes both work. */
+.rm,.rm-git-panel{--rm-surface:#fff;--rm-raised:#f6f8f4;--rm-border:#d3ddd1;--rm-text:#243e2b;--rm-muted:#829087;--rm-accent:#356043;--rm-green:#2f7a3f;--rm-red:#a14438;--rm-amber:#9a6a12;--rm-blue:#2f5f8f}
+html[data-theme="dark"] .rm,html[data-theme="dark"] .rm-git-panel{--rm-surface:var(--tg-surface,#17212b);--rm-raised:var(--tg-raised,#1e2c3a);--rm-border:var(--tg-border,#2b3b4c);--rm-text:var(--tg-text,#e7edf3);--rm-muted:var(--tg-muted,#91a4b7);--rm-accent:#a9c9ea;--rm-green:#6fd08a;--rm-red:#ff8f9c;--rm-amber:#f0c36b;--rm-blue:#8ec1f0}
+
+.rm-card{margin-bottom:20px;padding:18px 20px;border:1px solid var(--rm-border);border-radius:14px;background:var(--rm-surface);color:var(--rm-text)}
+.rm-card-title{display:flex;align-items:center;gap:10px;margin-bottom:14px}.rm-card-title h2{margin:0;font-size:15px}
+.rm-title-actions{display:flex;flex-wrap:wrap;gap:8px;margin-inline-start:auto}
+.rm-card h3{margin:18px 0 8px;font-size:13px}
+.rm-auth summary{cursor:pointer;font-size:12px;color:var(--rm-muted)}
+.rm-form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:14px}
+.rm label{display:block;font-size:12px;font-weight:600;color:var(--rm-text)}.rm label small{display:block;font-weight:400;color:var(--rm-muted)}
+.rm input:not([type=checkbox]),.rm select{width:100%;margin-top:6px;padding:9px 11px;border:1px solid var(--rm-border);border-radius:9px;background:var(--rm-raised);color:var(--rm-text);font:12px Vazirmatn,system-ui}
+.rm input[aria-invalid=true]{border-color:var(--rm-red)}
+.rm-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+.rm-filters select{width:auto;margin:0;min-width:150px}
+.rm-search{display:flex;align-items:center;gap:8px;flex:1 1 220px;padding:0 10px;border:1px solid var(--rm-border);border-radius:9px;background:var(--rm-raised)}
+.rm-search input{margin:0!important;border:0!important;background:transparent!important}
+.rm-check{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.rm-table-wrap{overflow-x:auto;border:1px solid var(--rm-border);border-radius:10px}
+.rm-table{width:100%;border-collapse:collapse;font-size:12px}
+.rm-table th{padding:9px 10px;text-align:start;background:var(--rm-raised);color:var(--rm-muted);font-weight:600;white-space:nowrap}
+.rm-table td{padding:9px 10px;border-top:1px solid var(--rm-border);vertical-align:middle}
+.rm-disabled{opacity:.55}.rm-row{cursor:pointer}.rm-row:hover,.rm-open{background:var(--rm-raised)}
+.rm-empty{padding:22px!important;text-align:center;color:var(--rm-muted)}
+.rm-actions{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap;font-size:12px;color:var(--rm-muted)}
+.rm-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 13px;border:1px solid var(--rm-border);border-radius:9px;background:var(--rm-surface);color:var(--rm-text);font:600 11px Vazirmatn,system-ui;cursor:pointer}
+.rm-btn:hover:not(:disabled){background:var(--rm-raised)}.rm-btn:disabled{opacity:.45;cursor:not-allowed}
+.rm-primary{background:var(--rm-accent);border-color:var(--rm-accent);color:#fff}html[data-theme="dark"] .rm-primary{color:#0e1621}
+.rm-primary:hover:not(:disabled){background:var(--rm-accent);filter:brightness(1.1)}
+.rm-danger{color:var(--rm-red);border-color:var(--rm-red)}
+.rm-link{border:0;background:none;padding:0;color:var(--rm-accent);font:700 12px system-ui;cursor:pointer}
+.rm-hint{margin:8px 0 0;font-size:11px;color:var(--rm-muted)}
+.rm-notice,.rm-warning,.rm-error{display:flex;align-items:center;gap:8px;margin:12px 0;padding:10px 13px;border-radius:10px;font-size:12px}
+.rm-notice{background:color-mix(in srgb,var(--rm-green) 14%,transparent);color:var(--rm-green)}
+.rm-warning{background:color-mix(in srgb,var(--rm-amber) 16%,transparent);color:var(--rm-amber)}
+.rm-error{background:color-mix(in srgb,var(--rm-red) 14%,transparent);color:var(--rm-red)}
+.rm-review{margin-top:14px;padding:14px 16px;border:1px dashed var(--rm-border);border-radius:12px;background:var(--rm-raised);font-size:12px}
+.rm-review h3{margin-top:0}.rm-review ul{margin:8px 0;padding-inline-start:20px}
+.rm-badge{display:inline-block;margin:1px 3px 1px 0;padding:2px 9px;border-radius:20px;font:700 10px Vazirmatn,system-ui;white-space:nowrap}
+.rm-gray{background:var(--rm-raised);color:var(--rm-muted)}.rm-green{background:color-mix(in srgb,var(--rm-green) 16%,transparent);color:var(--rm-green)}
+.rm-red{background:color-mix(in srgb,var(--rm-red) 16%,transparent);color:var(--rm-red)}.rm-amber{background:color-mix(in srgb,var(--rm-amber) 18%,transparent);color:var(--rm-amber)}
+.rm-blue{background:color-mix(in srgb,var(--rm-blue) 16%,transparent);color:var(--rm-blue)}
+.rm-sha{font:11px Consolas,monospace;color:var(--rm-muted)}
+.rm-meta,.rm-git-panel dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0;font-size:12px}
+.rm-meta dt,.rm-git-panel dt{color:var(--rm-muted)}.rm-meta dd,.rm-git-panel dd{margin:0;overflow-wrap:anywhere}
+.rm-task-list,.rm-validation{margin:0;padding:0;list-style:none;font-size:12px}
+.rm-task-list li{padding:6px 0;border-top:1px solid var(--rm-border)}
+.rm-validation li{padding:8px 10px;margin-bottom:6px;border-radius:9px;border:1px solid var(--rm-border)}
+.rm-pass{border-inline-start:3px solid var(--rm-green)!important}.rm-fail{border-inline-start:3px solid var(--rm-red)!important}
+.rm-validation pre,.rm-logs pre{max-height:260px;overflow:auto;margin:8px 0 0;padding:10px;border-radius:8px;background:#0e1621;color:#d7e3f0;font:11px/1.6 Consolas,monospace;white-space:pre-wrap}
+.rm-logs{margin-top:14px;font-size:12px}
+.rm-git-panel{margin:12px 0;padding:12px 14px;border:1px solid var(--rm-border);border-radius:12px;background:var(--rm-surface);color:var(--rm-text)}
+.rm-git-panel h4{display:flex;align-items:center;gap:8px;margin:0 0 10px;font-size:12px}
+@media(max-width:650px){.rm-card{padding:14px}.rm-meta,.rm-git-panel dl{grid-template-columns:1fr}.rm-title-actions{margin-inline-start:0;width:100%}}

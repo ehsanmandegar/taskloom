@@ -47,6 +47,10 @@
 | `GET /api/workspace/tree` | ❌ `workspace_tree` همگام است ولی `await` می‌شود → 500 | ✅ |
 | `GET /api/agents/{type}/status` | 🟡 در خطا mock برمی‌گرداند | ✅ |
 
+## برنچ‌بندی و نسخه‌ها
+
+جزئیات و جدول کامل Endpointهای `/api/releases/*` و رفتار جدید `approve` در [git-release-flow.md](git-release-flow.md) است.
+
 ## نمونه
 
 ```bash

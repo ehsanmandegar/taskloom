@@ -14,3 +14,17 @@ test('builds Git task rows from local and origin task branches',()=>{
     {taskId:'issue-13',branch:'tasks/issue-13',local:false,remote:true,current:false},
   ]);
 });
+
+test('lists branches named exactly like their task id, and ignores the fixed integration branches',()=>{
+  const rows=gitTaskRows({current:'DWS-1001',branches:[
+    {name:'sandbox',local:true,remote:true},
+    {name:'develop',local:true,remote:true},
+    {name:'release/1.0.1',local:true,remote:false},
+    {name:'DWS-1001',local:true,remote:true},
+    {name:'SDLC-1500',local:false,remote:true},
+  ]});
+  assert.deepEqual(rows,[
+    {taskId:'DWS-1001',branch:'DWS-1001',local:true,remote:true,current:true},
+    {taskId:'SDLC-1500',branch:'SDLC-1500',local:false,remote:true,current:false},
+  ]);
+});

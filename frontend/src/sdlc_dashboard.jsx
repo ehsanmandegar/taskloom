@@ -5,6 +5,8 @@ import {
   ChevronRight, ChevronDown, Filter, Search, Download, Upload, Settings, Plus, X, Square
 } from 'lucide-react';
 import { UiTag } from './ui_tag';
+import { GitPanel } from './release_management.jsx';
+import { storedAdminHeaders } from './releases.js';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -321,9 +323,10 @@ export default function SDLCDashboard() {
   // Final human sign-off for a task that finished every stage
   const handleApprove = async (taskId) => {
     try {
-      const response = await fetch(`${API}/api/sdlc/tasks/${taskId}/approve`, { method: 'POST' });
-      if (!response.ok) throw new Error('خطا در تأیید نهایی تسک');
-      const updated = await response.json();
+      // The server merges the task branch into develop first; a conflict or Git failure comes back as 409 and the
+      // task stays "waiting for final approval".
+      const response = await fetch(`${API}/api/sdlc/tasks/${taskId}/approve`, { method: 'POST', headers: storedAdminHeaders() });
+      const updated = await readJsonOrThrow(response);
       setSelectedTask(current => (current && current.base_task.task_id === taskId ? updated : current));
       await loadSDLCData();
     } catch (err) {
@@ -1166,7 +1169,7 @@ export default function SDLCDashboard() {
                 )}
                 {selectedTask.sdlc_status === 'pending_approval' && (
                   <button type="button" className="sdlc-btn sdlc-btn-primary" onClick={() => handleApprove(selectedTask.base_task.task_id)}>
-                    <CheckCircle size={14} /> تأیید نهایی
+                    <CheckCircle size={14} /> تأیید نهایی و ادغام در develop
                   </button>
                 )}
                 {selectedTask.sdlc_status === 'failed' && (
@@ -1182,6 +1185,11 @@ export default function SDLCDashboard() {
                   </>
                 )}
               </div>
+
+              {Object.entries(selectedTask.repos || {}).map(([path, repo]) => (
+                <GitPanel key={path} taskId={selectedTask.base_task.task_id} repoPath={path} branch={repo.branch}
+                  baseBranch={repo.base_branch || 'sandbox'} commitSha={repo.commit_sha} integration={repo.integration} />
+              ))}
 
               {(selectedTask.transition_reason || selectedTask.revision_count > 0) && (
                 <div className="sdlc-detail-section sdlc-detail-status">

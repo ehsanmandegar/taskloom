@@ -16,10 +16,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .git_flow import (  # noqa: F401  (auth_args / redact_auth are re-exported for existing callers)
+    DEVELOP, SANDBOX, GitRepo, assert_not_protected, auth_args, create_task_branch, redact_auth, task_branch_name,
+)
 from .models import SDLCTask, TaskRepo
-from .services import base_branch_ref, command, task_branch_preflight
+from .services import command, task_branch_preflight
 
-BRANCH_PREFIX = "sdlc/"
 GITHUB_API = "https://api.github.com"
 _GITHUB_URL = re.compile(r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:)([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
 
@@ -29,7 +31,9 @@ class GitHubError(RuntimeError):
 
 
 def task_branch(task: SDLCTask) -> str:
-    return f"{BRANCH_PREFIX}{task.base_task.task_id}"
+    """The task's branch: its identifier (SDLC-1001). Tasks created by older versions keep the branch
+    recorded in `task.repos` (see prepare_task_branch)."""
+    return task_branch_name(task.base_task.task_id)
 
 
 async def git_root(path: Path) -> Path | None:
@@ -38,56 +42,34 @@ async def git_root(path: Path) -> Path | None:
     return Path(output.strip()).resolve() if code == 0 and output.strip() else None
 
 
-async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str,
+async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str = SANDBOX,
                               token: str | None = None, auto_stash: bool = False) -> TaskRepo | None:
-    """Put the repository containing `workdir` on the task's branch, creating it from the base once.
+    """Put the repository containing `workdir` on the task's branch, creating it from the latest `sandbox` once.
 
-    When the task branch is new and the repository has an `origin`, fetch first and branch from the
-    latest `origin/<base>`, so every task starts from current remote code.
+    `base_branch` is accepted for compatibility and ignored: every task branch starts from `sandbox`, and a
+    missing `sandbox` is an error (SandboxMissingError), never a silent fallback to develop/main/HEAD.
     Raises RuntimeError when the repository has uncommitted changes on another branch, so work from
     different tasks (or from the user) is never mixed into one branch.
     """
     root = await git_root(workdir)
     if root is None:
         return None
-    branch = task_branch(task)
     key = str(root)
+    recorded = task.repos.get(key)
+    branch = recorded.branch if recorded else task_branch(task)
     if auto_stash:
         await stash_leftovers(task, root, branch)
     current, _ = await task_branch_preflight(root, branch, confirmed_dirty_worktree=True)
-    code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], root)
-    branch_exists = code == 0
-    if not branch_exists and await has_remote(root, "origin"):
-        await fetch_origin(root, token)
-    # Branch from the configured base: origin/<base> after a fetch, else local <base>, else the current branch.
-    source, base = current or "HEAD", current or "main"
-    if base_branch:
-        remote_ref = f"refs/remotes/origin/{base_branch}"
-        code, _ = await command(["git", "rev-parse", "--verify", "--quiet", f"{remote_ref}^{{commit}}"], root)
-        if code == 0:
-            source, base = f"origin/{base_branch}", base_branch
-        else:
-            try:
-                source, base = await base_branch_ref(root, base_branch), base_branch
-            except RuntimeError:
-                pass
-    # A brand-new repository has no commits, so its base branch (e.g. `sandbox`) is not a valid ref yet:
-    # `git switch -c <branch> sandbox` fails with "invalid reference". Rename the unborn branch instead.
-    code, _ = await command(["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], root)
-    unborn = code != 0
+    repo = GitRepo(root, token)
+    info = await create_task_branch(repo, task.base_task.task_id, branch if recorded else None)
+    if info.created:
+        task.base_task.logs.append(f"Created `{branch}` from the latest `{SANDBOX}` ({info.base_sha[:10]})")
     if current != branch:
-        if branch_exists:
-            args = ["git", "switch", branch]
-        elif unborn:
-            args = ["git", "switch", "-c", branch]
-        else:
-            args = ["git", "switch", "-c", branch, source]
-        code, output = await command(args, root)
+        code, output = await command(["git", "switch", branch], root)
         if code:
             raise RuntimeError(output.strip() or f"Could not switch {root} to {branch}")
-    recorded = task.repos.get(key)
     if recorded is None:
-        recorded = TaskRepo(path=key, branch=branch, base_branch=base)
+        recorded = TaskRepo(path=key, branch=branch, base_branch=SANDBOX, base_commit_sha=info.base_sha)
         task.repos[key] = recorded
     return recorded
 
@@ -110,23 +92,6 @@ async def stash_leftovers(task: SDLCTask, root: Path, branch: str) -> None:
 async def has_remote(root: Path, name: str) -> bool:
     code, output = await command(["git", "remote"], root)
     return code == 0 and name in output.split()
-
-
-def auth_args(token: str | None) -> list[str]:
-    """git -c options that send the token as an HTTP header for this one command only.
-
-    The token never lands in a URL, in .git/config, or in the remote's name."""
-    if not token:
-        return []
-    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}"]
-
-
-def redact_auth(text: str, token: str | None) -> str:
-    if not token:
-        return text
-    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return text.replace(token, "***").replace(basic, "***")
 
 
 async def fetch_origin(root: Path, token: str | None) -> None:
@@ -171,11 +136,12 @@ async def heal_local_repository(path: Path, project, stage: str, base: str) -> N
             code, output = await commit_with_fallback(path, "Initial commit", allow_empty=True)
         if code:
             raise RuntimeError("Initial commit failed: " + output.strip())
-    code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{base}"], path)
-    if code:
-        code, output = await command(["git", "branch", base], path)
+    for name in dict.fromkeys([base, SANDBOX]):  # a from-scratch repository also gets the fixed task base
+        code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"], path)
         if code:
-            raise RuntimeError(f"Could not create the base branch `{base}`: {output.strip()}")
+            code, output = await command(["git", "branch", name], path)
+            if code:
+                raise RuntimeError(f"Could not create the base branch `{name}`: {output.strip()}")
 
 
 async def ensure_workspace(project, stage: str, token: str | None, persist=None, log=None) -> Path:
@@ -292,9 +258,10 @@ async def create_github_repository(project, stage: str, token: str | None, allow
     else:
         await command(["git", "remote", "add", "origin", clean_github_url(url)], root)
     base = repository.default_branch or "main"
-    code, output = await command(["git", *auth_args(token), "push", "origin", f"refs/heads/{base}:refs/heads/{base}"], root, 300)
-    if code:
-        raise GitHubError(f"Created {url}, but pushing `{base}` failed: " + redact_auth(output.strip(), token))
+    for name in dict.fromkeys([base, SANDBOX]):
+        code, output = await command(["git", *auth_args(token), "push", "origin", f"refs/heads/{name}:refs/heads/{name}"], root, 300)
+        if code:
+            raise GitHubError(f"Created {url}, but pushing `{name}` failed: " + redact_auth(output.strip(), token))
     return url
 
 
@@ -395,6 +362,7 @@ async def commit_and_push(task: SDLCTask, repo: TaskRepo, repo_url: str, token: 
     """Commit everything on the task branch and push it to `repo_url`."""
     root = Path(repo.path)
     token = resolve_token(token)
+    assert_not_protected(repo.branch)
     code, current = await command(["git", "branch", "--show-current"], root)
     if code or current.strip() != repo.branch:
         raise GitHubError(f"{root} is on `{current.strip() or 'detached HEAD'}`, not the task branch `{repo.branch}`")
@@ -452,7 +420,7 @@ async def create_pull_request(task: SDLCTask, repo: TaskRepo, repo_url: str, tok
     status, payload = await github_api("POST", f"/repos/{owner}/{name}/pulls", token, {
         "title": (title or f"{task.title} ({task.base_task.task_id})")[:250],
         "head": repo.branch,
-        "base": repo.base_branch,
+        "base": DEVELOP,  # never sandbox: sandbox only receives validated releases
         "body": body or pull_request_body(task),
     })
     if status == 422 and "already exists" in json.dumps(payload):

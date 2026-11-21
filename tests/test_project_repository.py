@@ -30,7 +30,7 @@ def run(coro):
 
 
 def make_task(task_id: str = "t1") -> SDLCTask:
-    base = TaskState(id=task_id, task_id=task_id, project_path=".", branch=f"tasks/{task_id}", status=RunStatus.queued, step="sdlc")
+    base = TaskState(id=task_id, task_id=task_id, project_path=".", branch=task_id, status=RunStatus.queued, step="sdlc")
     task = SDLCTask(base_task=base, title="Add cart", description="Cart API", project_config_id="shop")
     task.agent_results["backend"] = AgentResult(agent="backend", status="completed", summary="Added cart")
     return task
@@ -49,7 +49,8 @@ def remote(tmp_path, monkeypatch):
     (seed / "app.py").write_text("v = 1\n", encoding="utf-8")
     git(seed, "add", "-A")
     git(seed, "commit", "-q", "-m", "init")
-    git(seed, "push", "-q", str(bare), "main")
+    git(seed, "branch", "sandbox")  # the fixed base of every task branch
+    git(seed, "push", "-q", str(bare), "main", "sandbox")
     monkeypatch.setattr(sdlc_git, "clean_github_url", lambda url: str(bare))
     monkeypatch.setattr(sdlc_git, "parse_github_url", lambda url: ("acme", "shop-backend"))
     return bare, seed
@@ -103,17 +104,17 @@ def test_clone_refuses_a_non_empty_unrelated_folder(tmp_path, remote):
         run(sdlc_git.ensure_workspace(project, "backend", TOKEN))
 
 
-def test_every_new_task_branches_from_the_latest_remote_main(tmp_path, remote):
+def test_every_new_task_branches_from_the_latest_remote_sandbox(tmp_path, remote):
     bare, seed = remote
     project = project_with(tmp_path, backend=existing(tmp_path))
     path = run(sdlc_git.ensure_workspace(project, "backend", TOKEN))
     (seed / "app.py").write_text("v = 2\n", encoding="utf-8")
     git(seed, "commit", "-qam", "v2")
-    git(seed, "push", "-q", str(bare), "main")
+    git(seed, "push", "-q", str(bare), "main", "main:sandbox")
 
     run(sdlc_git.prepare_task_branch(make_task(), path, "main", TOKEN))
 
-    assert git(path, "branch", "--show-current") == "sdlc/t1"
+    assert git(path, "branch", "--show-current") == "t1"
     assert (path / "app.py").read_text(encoding="utf-8") == "v = 2\n"
 
 
@@ -230,7 +231,7 @@ def test_first_push_of_a_new_stage_repo_creates_it_then_pushes_the_task(tmp_path
     assert response.json()["repository_url"] == "https://github.com/ehsan/shop-backend"
     assert seen == [("/user", TOKEN), ("/user/repos", TOKEN)]
     assert projects.get_project("shop").agents["backend"].repository.url == "https://github.com/ehsan/shop-backend"
-    assert "cart.py" in git(remote_repo, "show", "--stat", "--format=", "sdlc/t1")
+    assert "cart.py" in git(remote_repo, "show", "--stat", "--format=", "t1")
     assert TOKEN not in response.text
 
 
@@ -277,7 +278,7 @@ def test_stages_work_in_their_own_repos_and_see_each_other(tmp_path, remote, mon
     backend_repo = str((tmp_path / "ws" / "backend").resolve())
     assert seen["repo"] == frontend_repo
     assert [c.file for c in result.changes] == ["App.tsx"]
-    assert git(frontend_repo, "branch", "--show-current") == "sdlc/t1"
+    assert git(frontend_repo, "branch", "--show-current") == "t1"
     assert backend_repo in seen["args"][seen["args"].index("--add-dir") + 1]
     assert f"backend: `{backend_repo}`" in seen["args"][-1]  # prompt lists the other stage's folder
 
@@ -315,7 +316,7 @@ def test_create_mode_heals_an_unborn_repo_names_itself_and_creates_the_remote(tm
     assert git(empty, "log", "--format=%s", "sandbox") == "Initial commit"
     # a task can now branch from the base
     run(sdlc_git.prepare_task_branch(make_task(), path, "sandbox"))
-    assert git(path, "branch", "--show-current") == "sdlc/t1"
+    assert git(path, "branch", "--show-current") == "t1"
 
 
 def test_create_mode_without_a_token_stays_local_but_still_gets_its_base_branch(tmp_path, monkeypatch):
@@ -340,7 +341,7 @@ def test_sdlc_stages_may_run_test_and_build_commands_but_not_arbitrary_shell():
     assert "--allowedTools" not in initial_agent_args(AgentType.claude, "claude.exe", "do it")
 
 
-def test_final_approval_commits_pushes_and_opens_a_pull_request_into_the_base_branch(tmp_path, api, monkeypatch):
+def test_final_approval_merges_into_develop_pushes_the_branch_and_opens_no_pull_request(tmp_path, api, monkeypatch):
     client, projects, tasks = api
     folder = tmp_path / "ws" / "backend"
     project = project_with(tmp_path, backend=RepositoryConfig(
@@ -358,11 +359,11 @@ def test_final_approval_commits_pushes_and_opens_a_pull_request_into_the_base_br
     run(tasks.save_task(task))
     monkeypatch.setattr(sdlc_git, "push_url", lambda url, token: str(remote_repo))
     monkeypatch.setattr(sdlc_git, "resolve_token", lambda token: "tok")
-    prs = []
+    calls = []
 
     async def fake_api(method, path_, token, body=None):
-        prs.append((method, path_, body))
-        return 201, {"number": 7, "html_url": "https://github.com/ehsan/shop-backend/pull/7"}
+        calls.append((method, path_))
+        return 201, {}
 
     monkeypatch.setattr(sdlc_git, "github_api", fake_api)
 
@@ -371,15 +372,17 @@ def test_final_approval_commits_pushes_and_opens_a_pull_request_into_the_base_br
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["sdlc_status"] == "done"
-    assert "pull/7" in body["transition_reason"] and "`sandbox`" in body["transition_reason"]
-    assert prs[0][1] == "/repos/ehsan/shop-backend/pulls" and prs[0][2]["base"] == "sandbox" and prs[0][2]["head"] == "sdlc/t1"
-    assert "cart.py" in git(remote_repo, "show", "--stat", "--format=", "sdlc/t1")
+    assert "merged into develop" in body["transition_reason"]
+    assert calls == []  # sandbox only ever receives releases: no pull request is opened for a task
+    assert "cart.py" in git(remote_repo, "ls-tree", "-r", "--name-only", "develop")
+    assert "cart.py" in git(remote_repo, "ls-tree", "-r", "--name-only", "t1")
     saved = run(tasks.load_task("t1"))
     repo = saved.repos[str(path.resolve())]
-    assert repo.pushed and repo.pr_number == 7
+    assert repo.pushed and repo.integration.merged_into_develop and repo.integration.status == "merged"
+    assert repo.integration.merge_commit_sha == git(path, "rev-parse", "develop")
 
 
-def test_final_approval_still_succeeds_when_publishing_fails(tmp_path, api, monkeypatch):
+def test_final_approval_still_succeeds_when_pushing_the_task_branch_fails(tmp_path, api, monkeypatch):
     client, projects, tasks = api
     project = project_with(tmp_path, backend=RepositoryConfig(
         mode="create", local_path=str(tmp_path / "ws" / "backend"), url="https://github.com/ehsan/shop-backend"))
@@ -397,4 +400,4 @@ def test_final_approval_still_succeeds_when_publishing_fails(tmp_path, api, monk
     response = client.post("/api/sdlc/tasks/t1/approve")
 
     assert response.status_code == 200 and response.json()["sdlc_status"] == "done"
-    assert "could not publish" in response.json()["transition_reason"]
+    assert "could not push" in response.json()["transition_reason"]
