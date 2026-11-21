@@ -1176,27 +1176,20 @@ async def execute_task(req: TaskRequest, state: TaskState) -> None:
         current_branch, dirty_worktree = await task_branch_preflight(
             repo, state.branch, req.confirm_dirty_worktree
         )
-        state.base_branch = req.base_branch
+        from .git_flow import SANDBOX, GitRepo, create_task_branch  # local import: git_flow imports this module
+
+        state.base_branch = SANDBOX  # every task branch starts from the latest sandbox, whatever the request said
+        info = await create_task_branch(GitRepo(repo), req.task_id, state.branch)
         if current_branch == state.branch:
-            args = None
             message = f"Using current task branch {state.branch}"
             if dirty_worktree:
                 message += " with the user's confirmed uncommitted changes"
         else:
-            code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{state.branch}"], repo)
-        if current_branch != state.branch and not code:
-            args, message = ["git", "switch", state.branch], f"Checked out existing task branch {state.branch}"
-        elif current_branch != state.branch:
-            code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{state.branch}"], repo)
-            if not code:
-                args, message = ["git", "switch", "--track", "-c", state.branch, f"origin/{state.branch}"], f"Checked out existing remote task branch {state.branch}"
-            else:
-                source_branch = await base_branch_ref(repo, req.base_branch)
-                args, message = ["git", "switch", "-c", state.branch, source_branch], f"Created {state.branch} from {source_branch}"
-        if args:
-            code, output = await command(args, repo)
+            code, output = await command(["git", "switch", state.branch], repo)
             if code:
                 raise RuntimeError(output.strip() or "Could not prepare task branch")
+            message = (f"Created {state.branch} from the latest {SANDBOX} ({info.base_sha[:10]})" if info.created
+                       else f"Checked out existing task branch {state.branch}")
         state.logs.append(message)
         state.step = f"{display_name} is implementing the request"
         args = initial_agent_args(req.agent_type, executable, build_prompt(req, guides, active_mcp))
@@ -1739,6 +1732,26 @@ class SDLCTaskManager:
     def generate_task_id(self) -> str:
         """Generate a unique task ID"""
         return f"TASK-{uuid.uuid4().hex[:8].upper()}"
+
+    def next_task_id(self, prefix: str = "SDLC", start: int = 1001) -> str:
+        """The next human-readable identifier for a workflow (SDLC-1001, SDLC-1002, ...), also the task's Git branch.
+
+        Numbers never repeat: the counter lives next to the tasks and is also kept above every task folder
+        that already exists. A cross-process lock makes concurrent creations get different numbers."""
+        pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$", re.IGNORECASE)
+        with FileLock(self.data_dir / ".task-counters.lock", timeout=10):
+            counters_file = self.data_dir / ".task-counters.json"
+            try:
+                counters = json.loads(counters_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                counters = {}
+            highest = max([int(counters.get(prefix, start - 1)), start - 1] +
+                          [int(match.group(1)) for child in self.data_dir.iterdir() if (match := pattern.match(child.name))])
+            counters[prefix] = highest + 1
+            temporary = counters_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps(counters), encoding="utf-8")
+            replace_with_retry(temporary, counters_file)
+            return f"{prefix}-{highest + 1}"
     
     async def create_task(self, request: SDLCTaskRequest, 
                          project_config: SDLCProjectConfig,

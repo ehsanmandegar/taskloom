@@ -9,7 +9,7 @@ export const stages=[
 ];
 
 const taskTitle=task=>task.session_name||task.task_id||'تسک بدون نام';
-const statusLabel=status=>({queued:'در صف',running:'در حال اجرا',testing:'در حال آزمون',passed:'موفق',failed:'ناموفق',blocked:'متوقف‌شده',stopped:'متوقف‌شده'})[status]||status||'نامشخص';
+const statusLabel=status=>({queued:'در صف',running:'در حال اجرا',testing:'در حال آزمون',passed:'موفق (منتظر تأیید نهایی)',done:'تأییدشده',failed:'ناموفق',blocked:'متوقف‌شده',stopped:'متوقف‌شده'})[status]||status||'نامشخص';
 
 export default function DashboardPages({view,tasks,assignments,onMove,loading,error,onRefresh,roleKnowledge={},onRoleKnowledgeChange,onSaveRoleKnowledge,roleKnowledgeSaving=false,roleKnowledgeNotice=''}){
   const counts=stages.map(stage=>tasks.filter(task=>(assignments[task.id]||task.role||'analyst')===stage.id).length);

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RunStatus(str, Enum):
+    done = "done"  # final approval given and the branch merged into develop
     queued = "queued"
     running = "running"
     testing = "testing"
@@ -78,7 +79,7 @@ class TaskRequest(BaseModel):
     task_id: str = Field(min_length=2, max_length=80)
     session_name: str | None = Field(default=None, max_length=120)
     request: str = Field(min_length=5, max_length=20_000)
-    base_branch: str = Field(default="main", min_length=1, max_length=240)
+    base_branch: str = Field(default="sandbox", min_length=1, max_length=240)  # informational: tasks always start from sandbox
     test_command: str | None = Field(default=None, max_length=500)
     test_working_directory: str | None = Field(default=None, max_length=500)
     test_setup_enabled: bool = False
@@ -96,8 +97,8 @@ class TaskRequest(BaseModel):
     @field_validator("task_id")
     @classmethod
     def valid_task_id(cls, value: str) -> str:
-        value = value.strip().lower()
-        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", value):
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
             raise ValueError("Task ID may only contain letters, numbers, dot, dash and underscore")
         return value
 
@@ -275,6 +276,24 @@ class TodoItem(BaseModel):
         return value.astimezone(timezone.utc)
 
 
+class GitIntegration(BaseModel):
+    """What happened when a task branch was merged into `develop` at final approval (one per task+repository).
+
+    `history` keeps every successful merge, so a task that is changed and approved again can be released
+    again: each entry is a separate, exactly-isolatable piece of work (its own merge commit)."""
+    status: str = "none"  # none, merging, merged, conflict, failed
+    merged_into_develop: bool = False
+    repo_root: str = ""
+    merge_commit_sha: str = ""      # latest merge commit on develop
+    merged_branch_head: str = ""    # tip of the task branch that merge brought in
+    develop_before_sha: str = ""
+    merged_at: datetime | None = None
+    conflicts: list[str] = Field(default_factory=list)
+    error: str = ""
+    history: list[dict] = Field(default_factory=list)  # {merge_commit_sha, branch_head, merged_at, files}
+    log: list[str] = Field(default_factory=list)       # Git operation log of the last attempt
+
+
 class TaskState(BaseModel):
     id: str
     task_id: str
@@ -316,6 +335,7 @@ class TaskState(BaseModel):
     codex_thread_id: str = ""
     messages: list[ChatMessage] = Field(default_factory=list)
     todos: list[TodoItem] = Field(default_factory=list)
+    git_integration: GitIntegration = Field(default_factory=GitIntegration)  # DWS tasks; SDLC tasks keep it per repo
 
 
 # ===== SDLC PLATFORM MODELS =====
@@ -528,6 +548,8 @@ class TaskRepo(BaseModel):
     pushed: bool = False
     pr_url: str = ""
     pr_number: int | None = None
+    base_commit_sha: str = ""  # sandbox commit the branch was created from
+    integration: GitIntegration = Field(default_factory=GitIntegration)
 
 
 class SDLCTaskContext(BaseModel):

@@ -20,6 +20,17 @@ from backend.app.services import ClaudeEventStream, CodexEventStream, agent_erro
 client = TestClient(app)
 
 
+@pytest.fixture
+def fake_branch_creation(monkeypatch):
+    """For tests that mock every Git command: branch creation itself is covered by tests/test_git_flow.py."""
+    from backend.app import git_flow
+
+    async def create(repo, task_id, branch=None):
+        return git_flow.TaskBranch(branch or task_id, False, "", "")
+
+    monkeypatch.setattr(git_flow, "create_task_branch", create)
+
+
 def test_role_knowledge_settings_persist_and_follow_task_role(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TASKLOOM_ROLE_KNOWLEDGE_PATH", str(tmp_path / "roles.json"))
     monkeypatch.setenv("TASKLOOM_SESSIONS_PATH", str(tmp_path / "sessions.json"))
@@ -232,25 +243,6 @@ def test_branch_list_exposes_local_and_origin_branches(monkeypatch, tmp_path: Pa
     assert response.status_code == 200
     assert response.json()["current"] == "feature/local"
     assert response.json()["branches"][1] == {"name": "feature/remote", "local": False, "remote": True}
-
-
-def test_branch_switch_uses_existing_branch_or_creates_a_missing_one(monkeypatch, tmp_path: Path):
-    (tmp_path / ".git").mkdir()
-    calls = []
-
-    async def fake_switch(repo, branch, base_branch):
-        calls.append((repo, branch, base_branch))
-        return {"current": branch, "branches": [{"name": branch, "local": True, "remote": False}], "created": branch == "feature/new", "message": "done"}
-
-    monkeypatch.setattr(main_module, "switch_git_branch", fake_switch)
-    existing = client.post("/api/branches/switch", json={"project_path": str(tmp_path), "branch": "feature/existing", "base_branch": "develop"})
-    missing = client.post("/api/branches/switch", json={"project_path": str(tmp_path), "branch": "feature/new", "base_branch": "develop"})
-
-    assert existing.status_code == 200
-    assert existing.json()["created"] is False
-    assert missing.status_code == 200
-    assert missing.json()["created"] is True
-    assert [(branch, base) for _, branch, base in calls] == [("feature/existing", "develop"), ("feature/new", "develop")]
 
 
 def test_branch_switch_rejects_invalid_branch_name(tmp_path: Path):
@@ -585,12 +577,12 @@ def test_invalid_base_branch_is_rejected(tmp_path: Path):
     assert response.status_code == 422
 
 
-def test_new_tasks_use_the_tasks_branch_prefix(monkeypatch, tmp_path: Path):
+def test_new_tasks_use_their_identifier_as_branch(monkeypatch, tmp_path: Path):
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(main_module, "save_tasks", lambda states: None)
 
     async def clean_preflight(repo, branch, confirmed):
-        assert (repo, branch, confirmed) == (tmp_path.resolve(), "tasks/podw-225", False)
+        assert (repo, branch, confirmed) == (tmp_path.resolve(), "DWS-225", False)
         return "main", False
 
     monkeypatch.setattr(main_module, "task_branch_preflight", clean_preflight)
@@ -601,14 +593,14 @@ def test_new_tasks_use_the_tasks_branch_prefix(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(main_module.asyncio, "create_task", discard_background_task)
     request = TaskRequest(
         project_path=str(tmp_path),
-        task_id="podw-225",
+        task_id="DWS-225",
         request="add a useful feature",
-        base_branch="sandbox",
+        base_branch="main",  # ignored: every task starts from sandbox
     )
 
     state = asyncio.run(main_module.create_task(request))
 
-    assert state.branch == "tasks/podw-225"
+    assert state.branch == "DWS-225"
     assert state.base_branch == "sandbox"
     tasks.pop(state.id)
 
@@ -662,7 +654,7 @@ def test_create_task_returns_a_confirmation_code_for_a_dirty_current_branch(monk
     assert response.json()["detail"]["code"] == "dirty_worktree_confirmation_required"
 
 
-def test_execute_task_reuses_confirmed_dirty_current_branch_without_switching(monkeypatch, tmp_path: Path):
+def test_execute_task_reuses_confirmed_dirty_current_branch_without_switching(fake_branch_creation, monkeypatch, tmp_path: Path):
     (tmp_path / ".git").mkdir()
     request = TaskRequest(
         project_path=str(tmp_path),
@@ -722,79 +714,6 @@ def test_parallel_tasks_require_separate_project_or_worktree_paths(monkeypatch, 
     finally:
         tasks.clear()
         tasks.update(original)
-
-
-def test_execute_task_creates_the_task_branch_from_selected_base(monkeypatch):
-    project_root = Path(__file__).parents[1].resolve()
-    request = TaskRequest(
-        project_path=str(project_root),
-        task_id="podw-base",
-        request="add a useful feature",
-        base_branch="sandbox",
-    )
-    state = TaskState(
-        id="base-branch",
-        task_id=request.task_id,
-        project_path=str(project_root),
-        branch="tasks/podw-base",
-        base_branch=request.base_branch,
-        status=RunStatus.queued,
-        step="Queued",
-    )
-    calls = []
-
-    async def fake_command(args, cwd, timeout=900):
-        calls.append(args)
-        if args[:2] == ["git", "show-ref"]:
-            return 1, ""
-        if args[:3] == ["git", "switch", "-c"]:
-            return 1, "stop after branch assertion"
-        return 0, ""
-
-    monkeypatch.setattr(services, "command", fake_command)
-    monkeypatch.setattr(services.shutil, "which", lambda name: "codex")
-
-    asyncio.run(execute_task(request, state))
-
-    assert ["git", "rev-parse", "--verify", "--quiet", "refs/heads/sandbox^{commit}"] in calls
-    assert ["git", "switch", "-c", "tasks/podw-base", "sandbox"] in calls
-
-
-def test_execute_task_checks_out_an_existing_task_branch(monkeypatch):
-    project_root = Path(__file__).parents[1].resolve()
-    request = TaskRequest(
-        project_path=str(project_root),
-        task_id="podw-existing",
-        request="continue the existing task",
-        base_branch="sandbox",
-    )
-    state = TaskState(
-        id="existing-branch",
-        task_id=request.task_id,
-        project_path=str(project_root),
-        branch="tasks/podw-existing",
-        base_branch=request.base_branch,
-        status=RunStatus.queued,
-        step="Queued",
-    )
-    calls = []
-
-    async def fake_command(args, cwd, timeout=900):
-        calls.append(args)
-        if args == ["git", "show-ref", "--verify", "--quiet", "refs/heads/tasks/podw-existing"]:
-            return 0, ""
-        if args == ["git", "switch", "tasks/podw-existing"]:
-            return 1, "stop after branch assertion"
-        return 0, ""
-
-    monkeypatch.setattr(services, "command", fake_command)
-    monkeypatch.setattr(services.shutil, "which", lambda name: "codex")
-
-    asyncio.run(execute_task(request, state))
-
-    assert ["git", "switch", "tasks/podw-existing"] in calls
-    assert not any(args[:3] == ["git", "switch", "-c"] for args in calls)
-    assert not any(args[:2] == ["git", "rev-parse"] for args in calls)
 
 
 def local_test_setup_repo(tmp_path: Path) -> Path:
@@ -1162,7 +1081,7 @@ def test_required_mcp_blocks_before_creating_a_branch(monkeypatch):
     assert calls == [["codex", "mcp", "get", "dws_project", "--json"]]
 
 
-def test_required_mcp_initialization_failure_blocks_without_thread_id(monkeypatch):
+def test_required_mcp_initialization_failure_blocks_without_thread_id(fake_branch_creation, monkeypatch):
     project_root = Path(__file__).parents[1].resolve()
     request = TaskRequest(
         project_path=str(project_root),
@@ -1944,7 +1863,7 @@ def test_continue_task_resumes_same_codex_session_and_retests(monkeypatch):
     assert [message.model_dump() for message in state.messages] == [{"role": "assistant", "content": "Improved it."}]
 
 
-def test_execute_task_keeps_the_complete_failed_test_output(monkeypatch):
+def test_execute_task_keeps_the_complete_failed_test_output(fake_branch_creation, monkeypatch):
     project_root = Path(__file__).parents[1].resolve()
     request = TaskRequest(project_path=str(project_root), task_id="full-test-output", request="make a small change")
     state = TaskState(id="full-test-output", task_id=request.task_id, project_path=str(project_root), branch="tasks/full-test-output", status=RunStatus.queued, step="Queued")

@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 import json
@@ -9,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,8 +23,10 @@ from . import run_guides, run_processes
 from .services import agent_executable
 from .sdlc_git import (
     GitHubError, commit_and_push, create_github_repository, create_pull_request, describe_new_repository,
-    ensure_workspace, git_root, validate_repository,
+    commit_message, ensure_workspace, git_root, validate_repository,
 )
+from .git_flow import SANDBOX, GitBusyError, GitRepo, create_task_branch, GitFlowError, MergeConflictError, commit_task_work, integrate_task, record_failure, record_merge, task_branch_name
+from .releases import IntegratedTask, MergeEntry, ReleaseError, ReleaseInputError, ReleaseManager, ReleaseStore, repository_id_for
 from pydantic import BaseModel
 
 scheduler_worker: asyncio.Task | None = None
@@ -38,6 +41,7 @@ async def lifespan(_: FastAPI):
     if manager.claim_data_dir():
         try:
             await manager.recover_interrupted_tasks()
+            await release_manager.recover_interrupted()
         except Exception as exc:  # recovery must never keep the server from starting
             print(f"[SDLC] Recovery after restart failed: {exc}", flush=True)
     else:
@@ -424,10 +428,20 @@ async def switch_branch(request: BranchSwitchRequest):
         for state in tasks.values()
     ):
         raise HTTPException(409, "Stop the active agent task for this project before switching branches")
+    # A task branch that does not exist yet is always created from the latest `sandbox` (the request's
+    # base_branch is only validated, not used); a missing sandbox is an error, never a fallback.
+    git_repo = GitRepo(repo)
     try:
-        return await switch_git_branch(repo, request.branch, request.base_branch)
-    except RuntimeError as exc:
+        created = False
+        if not (await git_repo.rev(f"refs/heads/{request.branch}") or await git_repo.rev(f"refs/remotes/origin/{request.branch}")):
+            await create_task_branch(git_repo, request.branch, request.branch)
+            created = True
+        result = await switch_git_branch(repo, request.branch, SANDBOX)
+    except (GitFlowError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
+    if created:
+        result = {**result, "created": True, "message": f"Created `{request.branch}` from the latest `{SANDBOX}` and checked it out"}
+    return result
 
 
 @app.put("/api/profiles/{name}", response_model=ProjectProfile)
@@ -464,7 +478,10 @@ async def create_task(request: TaskRequest):
             409,
             "Another task is already running in this project path. Use a separate Git worktree path for parallel tasks.",
         )
-    task_branch = f"tasks/{request.task_id}"
+    try:
+        task_branch = task_branch_name(request.task_id)
+    except GitFlowError as exc:
+        raise HTTPException(422, str(exc)) from exc
     try:
         await task_branch_preflight(repo, task_branch, request.confirm_dirty_worktree)
     except RuntimeError as exc:
@@ -482,7 +499,7 @@ async def create_task(request: TaskRequest):
         session_name=request.session_name or request.task_id,
         project_path=str(repo),
         branch=task_branch,
-        base_branch=request.base_branch,
+        base_branch=SANDBOX,
         guide_paths=request.guide_paths,
         role=request.role,
         role_knowledge_path=getattr(load_role_knowledge(), request.role.value),
@@ -1136,13 +1153,14 @@ async def create_sdlc_task(request: SDLCTaskRequest):
         raise HTTPException(400, f"Project {request.project_id} does not have SDLC enabled")
 
     task_uuid = uuid.uuid4().hex
+    sdlc_task_id = sdlc_task_manager.next_task_id("SDLC")  # SDLC-1001, ...: also the task's Git branch
     base_task_state = TaskState(
         id=task_uuid[:12],
-        task_id=f"sdlc-{task_uuid[:8]}",
+        task_id=sdlc_task_id,
         session_name=request.title[:100],
         project_path=project.agents.get("backend", AgentConfig()).project_path or "",
-        branch="",
-        base_branch="main",
+        branch=sdlc_task_id,
+        base_branch=SANDBOX,
         guide_paths=[],
         role="analyst",
         role_knowledge_path="",
@@ -1217,52 +1235,110 @@ async def transition_sdlc_task(task_id: str, transition: StageTransitionRequest)
         raise HTTPException(500, f"Failed to transition task: {exc}") from exc
 
 
-@app.post("/api/sdlc/tasks/{task_id}/approve", response_model=SDLCTask)
-async def approve_sdlc_task(task_id: str):
-    """Human sign-off: move a task that finished every stage from pending_approval to done."""
-    def approve(task: SDLCTask) -> None:
-        if task.sdlc_status != SDLCStatus.pending_approval:
-            raise ValueError(f"Task status is {task.sdlc_status.value}, not pending_approval")
-        task.previous_status = task.sdlc_status
-        task.sdlc_status = SDLCStatus.done
-        task.transition_reason = "Approved by human"
-        task.updated_at = datetime.now(timezone.utc)
+def require_admin(request: Request) -> str:
+    """Authorisation for final approvals and release actions. Taskloom has no user accounts: set TASKLOOM_ADMIN_TOKEN
+    and every such request must send it in `X-Taskloom-Admin-Token` (the dashboard asks for it once). The optional
+    `X-Taskloom-User` header names the person for the audit fields (created_by / approved_by)."""
+    expected = os.environ.get("TASKLOOM_ADMIN_TOKEN", "").strip()
+    if expected and not hmac.compare_digest(request.headers.get("X-Taskloom-Admin-Token", ""), expected):
+        raise HTTPException(403, "An administrator token is required for this action")
+    return (request.headers.get("X-Taskloom-User") or "admin").strip()[:80] or "admin"
 
-    try:
-        task = await sdlc_task_manager.update_task(task_id, approve)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+
+_integrating: set[str] = set()  # task ids whose final approval is running right now (no duplicate merges)
+
+
+async def stage_for_repository(project, root_text: str) -> str | None:
+    """The stage whose configured repository lives at `root_text` (None when no stage manages it)."""
+    for name, config in project.agents.items():
+        folder = project.stage_path(name)
+        if config.enabled and config.repository.mode.value != "none" and folder:
+            root = await git_root(Path(folder).expanduser())
+            if root is not None and str(root) == root_text:
+                return name
+    return None
+
+
+async def integrate_sdlc_task(task: SDLCTask, project: SDLCProjectConfig | None) -> list[str]:
+    """Commit the task's work and merge its branch into `develop` in every repository it touched.
+
+    Returns the problems found (empty when everything merged). Each repository's result is written to the
+    task as soon as Git has confirmed it; a failure never marks anything as merged."""
+    problems: list[str] = []
+    for key, repo in list(task.repos.items()):
+        root = Path(key)
+        stage = await stage_for_repository(project, key) if project else None
+        token = sdlc_project_manager.github_token(project.id, stage) if project and stage else None
+        try:
+            await commit_task_work(root, repo.branch, commit_message(task))
+            result = await integrate_task(root, task.base_task.task_id, repo.branch, token)
+            record = lambda latest, key=key, result=result: record_merge(latest.repos[key].integration, Path(key), result)
+        except (GitFlowError, RuntimeError) as exc:
+            problems.append(f"{root.name}: {exc}")
+            record = lambda latest, key=key, exc=exc: record_failure(latest.repos[key].integration, Path(key), exc)
+        await sdlc_task_manager.update_task(task.base_task.task_id, record)
+    return problems
+
+
+@app.post("/api/sdlc/tasks/{task_id}/approve", response_model=SDLCTask)
+async def approve_sdlc_task(task_id: str, _: str = Depends(require_admin)):
+    """Final human approval: merge the task branch into `develop`, and only after Git confirmed every merge
+    move the task from pending_approval to done. A conflict or any Git failure leaves it pending_approval."""
+    task = await sdlc_task_manager.load_task(task_id)
     if not task:
         raise HTTPException(404, f"SDLC task {task_id} not found")
-    notes = await publish_approved_task(task_id)
-    if notes:
-        task = await sdlc_task_manager.update_task(task_id, lambda latest: (
-            setattr(latest, "transition_reason", "Approved by human. " + " ".join(notes)),
-            latest.base_task.logs.extend(notes),
-        )) or task
-    return task
+    if task.sdlc_status != SDLCStatus.pending_approval:
+        raise HTTPException(409, f"Task status is {task.sdlc_status.value}, not pending_approval")
+    if task_id in _integrating:
+        raise HTTPException(409, f"Task {task_id} is already being integrated into develop")
+    _integrating.add(task_id)
+    try:
+        project = sdlc_project_manager.get_project(task.project_config_id)
+        problems = await integrate_sdlc_task(task, project)
+        if problems:
+            message = "Final approval did not complete; the task is still waiting for approval. " + " ".join(problems)
+            await sdlc_task_manager.update_task(task_id, lambda latest: (
+                setattr(latest, "transition_reason", message[:1000]), latest.base_task.logs.append(message[:2000])))
+            raise HTTPException(409, message)
+
+        def approve(latest: SDLCTask) -> None:
+            if latest.sdlc_status != SDLCStatus.pending_approval:
+                raise ValueError(f"Task status is {latest.sdlc_status.value}, not pending_approval")
+            latest.previous_status = latest.sdlc_status
+            latest.sdlc_status = SDLCStatus.done
+            latest.transition_reason = "Approved by human; merged into develop" if latest.repos else "Approved by human"
+            latest.updated_at = datetime.now(timezone.utc)
+
+        try:
+            task = await sdlc_task_manager.update_task(task_id, approve)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not task:
+            raise HTTPException(404, f"SDLC task {task_id} not found")
+        notes = await publish_approved_task(task_id)
+        if notes:
+            task = await sdlc_task_manager.update_task(task_id, lambda latest: (
+                setattr(latest, "transition_reason", latest.transition_reason + ". " + " ".join(notes)),
+                latest.base_task.logs.extend(notes),
+            )) or task
+        return task
+    finally:
+        _integrating.discard(task_id)
 
 
 async def publish_approved_task(task_id: str) -> list[str]:
-    """After the human's final approval: commit and push the task branch of every repository the task
-    worked in and open a pull request into that stage's base branch. Never raises: what could not be
-    published is reported in the returned notes (the dashboard's manual GitHub buttons still work)."""
+    """After the final approval and the merge into develop: push the task branch of every repository the task
+    worked in so the work is on GitHub. Never opens a pull request into sandbox: sandbox only receives
+    releases. Never raises: what could not be published is reported in the returned notes."""
     task = await sdlc_task_manager.load_task(task_id)
     project = sdlc_project_manager.get_project(task.project_config_id) if task else None
     if not task or not project:
         return []
     notes: list[str] = []
     for root_text, repo in list(task.repos.items()):
-        stage = None
-        for name, config in project.agents.items():
-            folder = project.stage_path(name)
-            if config.enabled and config.repository.mode.value != "none" and folder:
-                root = await git_root(Path(folder).expanduser())
-                if root is not None and str(root) == root_text:
-                    stage = name
-                    break
+        stage = await stage_for_repository(project, root_text)
         if stage is None:
-            notes.append(f"{Path(root_text).name}: no GitHub repository is configured for it, so nothing was published.")
+            notes.append(f"{Path(root_text).name}: no GitHub repository is configured for it, so the task branch was not pushed.")
             continue
         repository = project.stage_repository(stage)
         token = sdlc_project_manager.github_token(project.id, stage)
@@ -1275,12 +1351,49 @@ async def publish_approved_task(task_id: str) -> list[str]:
             if not repo_url:
                 raise GitHubError("Repository URL is required")
             await commit_and_push(task, repo, repo_url, token)
-            pr = await create_pull_request(task, repo, repo_url, token)
-            notes.append(f"{stage}: pull request into `{repo.base_branch}`: {pr['pr_url']}")
+            notes.append(f"{stage}: pushed `{repo.branch}`.")
         except (GitHubError, RuntimeError) as exc:
-            notes.append(f"{stage}: could not publish ({exc}).")
-        await sdlc_task_manager.update_task(task_id, lambda latest, key=root_text, value=repo: latest.repos.__setitem__(key, value))
+            notes.append(f"{stage}: could not push `{repo.branch}` ({exc}).")
+        await sdlc_task_manager.update_task(task_id, lambda latest, key=root_text, value=repo: (
+            setattr(latest.repos[key], "pushed", value.pushed), setattr(latest.repos[key], "commit_sha", value.commit_sha)))
     return notes
+
+
+@app.post("/api/tasks/{run_id}/approve", response_model=TaskState)
+async def approve_task(run_id: str, _: str = Depends(require_admin)):
+    """Final human approval of a classic (DWS) task: merge its branch into `develop`; `done` only after Git confirmed it."""
+    state = tasks.get(run_id)
+    if not state:
+        raise HTTPException(404, "Task not found")
+    if state.status != RunStatus.passed:
+        raise HTTPException(409, f"Task status is {state.status.value}; only a task whose run passed can be approved")
+    if run_id in _integrating:
+        raise HTTPException(409, "This task is already being integrated into develop")
+    _integrating.add(run_id)
+    try:
+        root = Path(state.project_path)
+        try:
+            if state.branch == await _current_branch(root):  # work lives in the checked-out branch: commit it first
+                await commit_task_work(root, state.branch, state.commit_message or f"feat({state.task_id}): implement requested changes")
+            result = await integrate_task(root, state.task_id, state.branch)
+        except (GitFlowError, RuntimeError) as exc:
+            record_failure(state.git_integration, root, exc)
+            state.logs.append(f"Final approval failed: {exc}")
+            save_tasks(tasks)
+            raise HTTPException(409, str(exc)) from exc
+        record_merge(state.git_integration, root, result)
+        state.committed = True
+        state.status, state.step = RunStatus.done, "Approved and merged into develop"
+        state.logs.append(f"Merged `{state.branch}` into develop ({result.merge_commit_sha[:10] or 'already merged'})")
+        save_tasks(tasks)
+        return state
+    finally:
+        _integrating.discard(run_id)
+
+
+async def _current_branch(root: Path) -> str:
+    code, output = await command(["git", "branch", "--show-current"], root)
+    return output.strip() if code == 0 else ""
 
 
 class GitHubActionRequest(BaseModel):
@@ -1434,6 +1547,190 @@ async def list_pending_human_interventions():
 
 
 # ===== END SDLC API ENDPOINTS =====
+
+# ===== RELEASE MANAGEMENT API =====
+
+async def collect_integrated_tasks() -> list[IntegratedTask]:
+    """Every DWS and SDLC task whose branch was merged into develop, one entry per (task, repository)."""
+    found: list[IntegratedTask] = []
+    for task in await sdlc_task_manager.list_tasks():
+        for key, repo in task.repos.items():
+            integration = repo.integration
+            if integration.merged_into_develop and integration.history:
+                found.append(IntegratedTask(
+                    task_id=task.base_task.task_id, workflow="SDLC", title=task.title, status=task.sdlc_status.value,
+                    project_id=task.project_config_id, repository_id=repository_id_for(key), repository_path=key,
+                    repository_name=Path(key).name, branch=repo.branch,
+                    merges=[MergeEntry.model_validate(entry) for entry in integration.history]))
+    for state in tasks.values():
+        integration = state.git_integration
+        if integration.merged_into_develop and integration.history and integration.repo_root:
+            found.append(IntegratedTask(
+                task_id=state.task_id, workflow="DWS", title=state.session_name or state.task_id, status=state.status.value,
+                repository_id=repository_id_for(integration.repo_root), repository_path=integration.repo_root,
+                repository_name=Path(integration.repo_root).name, branch=state.branch,
+                merges=[MergeEntry.model_validate(entry) for entry in integration.history]))
+    return found
+
+
+async def validation_plan_for(repository_path: str, task_ids: list[str]) -> list[dict]:
+    """The project's own setup/test commands for this repository, as paths relative to the repository root."""
+    root = Path(repository_path)
+    plan: list[dict] = []
+
+    def add(kind: str, command_text: str, folder: Path) -> None:
+        try:
+            relative = folder.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            relative = ""
+        step = {"kind": kind, "command": command_text.strip(), "working_directory": "" if relative == "." else relative}
+        if step["command"] and step not in plan:
+            plan.append(step)
+
+    for task_id in task_ids:
+        sdlc = await sdlc_task_manager.load_task(task_id)
+        if sdlc:
+            project = sdlc_project_manager.get_project(sdlc.project_config_id)
+            for stage, config in (project.agents.items() if project else []):
+                folder_text = project.stage_path(stage)
+                if not config.enabled or not folder_text:
+                    continue
+                folder = Path(folder_text).expanduser()
+                stage_root = await git_root(folder)
+                if stage_root is None or str(stage_root) != repository_path:
+                    continue
+                add("setup", config.setup_command or "", folder)
+                configured = (config.test_instructions or {}).get("working_directory") or ""
+                add("test", (config.test_instructions or {}).get("command") or "", folder / configured)
+            continue
+        for state in tasks.values():
+            if state.task_id == task_id and state.test_command:
+                add("test", state.test_command, root / (state.test_working_directory or ""))
+    return plan
+
+
+def release_token(repository_path: str) -> str | None:
+    """GitHub token for fetch/push of a repository: the one saved on the stage that manages it, else GITHUB_TOKEN."""
+    for project in sdlc_project_manager.list_projects():
+        for stage, config in project.agents.items():
+            folder = project.stage_path(stage)
+            if config.repository.mode.value != "none" and folder and str(Path(folder).expanduser().resolve()) == str(Path(repository_path).resolve()):
+                return sdlc_project_manager.github_token(project.id, stage) or None
+    return None
+
+
+release_manager = ReleaseManager(ReleaseStore(Path("data/releases")), collect_integrated_tasks, validation_plan_for, release_token)
+
+
+class ReleaseCreateRequest(BaseModel):
+    version: str
+    repository_id: str
+    task_ids: list[str]
+    start: bool = True
+
+
+def _release_or_404(release_id: str):
+    release = release_manager.store.get(release_id)
+    if release is None:
+        raise HTTPException(404, f"Release {release_id} not found")
+    return release
+
+
+def _release_action(action):
+    try:
+        return action()
+    except ReleaseInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except ReleaseError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/releases/repositories")
+async def list_release_repositories():
+    """Repositories that have at least one task merged into develop."""
+    return await release_manager.repositories()
+
+
+@app.get("/api/releases/eligible-tasks")
+async def list_release_tasks(repository_id: str = "", q: str = "", workflow: str = "", status: str = "", eligible_only: bool = False):
+    """Tasks merged into develop, with their unreleased changes; searchable by id/title, workflow and task status."""
+    rows = await release_manager.eligible_tasks()
+    needle = q.strip().lower()
+    return [row for row in rows
+            if (not repository_id or row["repository_id"] == repository_id)
+            and (not workflow or row["workflow"].lower() == workflow.lower())
+            and (not status or row["status"] == status)
+            and (not eligible_only or row["eligible"])
+            and (not needle or needle in row["task_id"].lower() or needle in row["title"].lower() or needle in row["branch"].lower())]
+
+
+@app.get("/api/releases/by-task/{task_id}")
+async def releases_of_task(task_id: str):
+    """Release versions a task participates in (any status except cancelled)."""
+    return release_manager.releases_for_task(task_id)
+
+
+@app.get("/api/releases")
+async def list_releases(status: str = "", repository_id: str = "", q: str = ""):
+    needle = q.strip().lower()
+    return [release for release in release_manager.store.list()
+            if (not status or release.status.value == status)
+            and (not repository_id or release.repository_id == repository_id)
+            and (not needle or needle in release.version.lower() or any(needle in task.task_id.lower() for task in release.tasks))]
+
+
+@app.post("/api/releases", status_code=202)
+async def create_release(body: ReleaseCreateRequest, user: str = Depends(require_admin)):
+    """Create a release from selected tasks and start building/validating its branch in the background."""
+    try:
+        return await release_manager.create(body.version, body.repository_id, body.task_ids, user, body.start)
+    except ReleaseInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except ReleaseError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/releases/{release_id}")
+async def get_release(release_id: str):
+    return _release_or_404(release_id)
+
+
+@app.post("/api/releases/{release_id}/start", status_code=202)
+async def start_release(release_id: str, _: str = Depends(require_admin)):
+    _release_or_404(release_id)
+    try:
+        return await release_manager.start(release_id)
+    except ReleaseError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/releases/{release_id}/approve", status_code=202)
+async def approve_release(release_id: str, user: str = Depends(require_admin)):
+    """The human release approval: only now is the release branch merged into sandbox (in the background)."""
+    _release_or_404(release_id)
+    return _release_action(lambda: release_manager.approve(release_id, user))
+
+
+@app.post("/api/releases/{release_id}/retry", status_code=202)
+async def retry_release(release_id: str, _: str = Depends(require_admin)):
+    _release_or_404(release_id)
+    return _release_action(lambda: release_manager.retry(release_id))
+
+
+@app.post("/api/releases/{release_id}/rebuild", status_code=202)
+async def rebuild_release(release_id: str, _: str = Depends(require_admin)):
+    _release_or_404(release_id)
+    return _release_action(lambda: release_manager.rebuild(release_id))
+
+
+@app.post("/api/releases/{release_id}/cancel")
+async def cancel_release(release_id: str, _: str = Depends(require_admin)):
+    _release_or_404(release_id)
+    return _release_action(lambda: release_manager.cancel(release_id))
+
+
+# ===== END RELEASE MANAGEMENT API =====
+
 
 # The Windows registry often maps .js to text/plain, which browsers refuse to run as a module script.
 mimetypes.add_type("text/javascript", ".js")
