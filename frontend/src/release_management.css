@@ -52,3 +52,9 @@ html[data-theme="dark"] .rm,html[data-theme="dark"] .rm-git-panel{--rm-surface:v
 .rm-git-panel{margin:12px 0;padding:12px 14px;border:1px solid var(--rm-border);border-radius:12px;background:var(--rm-surface);color:var(--rm-text)}
 .rm-git-panel h4{display:flex;align-items:center;gap:8px;margin:0 0 10px;font-size:12px}
 @media(max-width:650px){.rm-card{padding:14px}.rm-meta,.rm-git-panel dl{grid-template-columns:1fr}.rm-title-actions{margin-inline-start:0;width:100%}}
+
+/* global `input{width:100%}` would stretch checkboxes and push their labels out of the row */
+.rm input[type=checkbox]{width:auto;margin:0;flex:none}
+.rm-check{flex:0 0 auto}
+.rm-search input{padding:9px 0!important}
+.rm-meta,.rm-git-panel dl{grid-template-columns:max-content max-content;justify-content:start}
