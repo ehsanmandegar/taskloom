@@ -1930,6 +1930,7 @@ export default function SDLCDashboard() {
 
                   <div className="sdlc-project-actions">
                     <button className="sdlc-action-btn" onClick={() => handleEditProject(project)}>ویرایش</button>
+                    <RunGuideButton project={project} />
                     <button className="sdlc-action-btn" onClick={() => handleViewProject(project)}>مشاهده</button>
                     <button className="sdlc-action-btn" onClick={() => handleCreateTaskFromProject(project)}>ایجاد تسک</button>
                     <button className="sdlc-action-btn sdlc-action-btn-danger" onClick={() => handleDeleteProject(project.id)}>حذف</button>
@@ -1940,6 +1941,127 @@ export default function SDLCDashboard() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// M5: "Run" dialog — edit RUN_TEST.md / RUN_REAL.md of the backend/frontend stages, then let Claude Code follow it.
+function RunGuideButton({ project }) {
+  const [open, setOpen] = useState(false);
+  const stages = ['backend', 'frontend'].filter(s => project.agents?.[s]?.enabled);
+  if (stages.length === 0) return null;
+  return (
+    <>
+      <button className="sdlc-action-btn" onClick={() => setOpen(true)}><Play size={12} /> اجرا</button>
+      {open && <RunGuideDialog project={project} stages={stages} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function RunGuideDialog({ project, stages, onClose }) {
+  const [stage, setStage] = useState(stages[0]);
+  const [mode, setMode] = useState('test');
+  const [drafts, setDrafts] = useState({});      // `${stage}:${mode}` -> edited text
+  const [guides, setGuides] = useState({});      // stage -> { folder, guides } as saved on disk
+  const [run, setRun] = useState({});
+  const [loadError, setLoadError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const base = `${API}/api/sdlc/projects/${project.id}/agents/${stage}`;
+  const draftKey = `${stage}:${mode}`;
+  const saved = guides[stage]?.guides?.[mode];
+  const text = drafts[draftKey] ?? saved?.content ?? '';
+  const dirty = saved && text !== saved.content;
+
+  useEffect(() => {
+    setLoadError('');
+    fetch(`${base}/run-guide`).then(readJsonOrThrow)
+      .then(data => { setGuides(current => ({ ...current, [stage]: data })); })
+      .catch(err => setLoadError(err.message));
+  }, [stage]);
+
+  useEffect(() => {
+    let alive = true;
+    const poll = () => fetch(`${base}/run`).then(readJsonOrThrow).then(d => { if (alive) setRun(d); }).catch(() => {});
+    setRun({});
+    poll();
+    const timer = setInterval(poll, 2000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [stage]);
+
+  const save = async () => {
+    await readJsonOrThrow(await fetch(`${base}/run-guide/${mode}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: text }),
+    }));
+    setGuides(current => {
+      const entry = current[stage];
+      return { ...current, [stage]: { ...entry, guides: { ...entry.guides, [mode]: { ...entry.guides[mode], exists: true, content: text } } } };
+    });
+  };
+  const guarded = async (fn) => {
+    setBusy(true);
+    try { await fn(); } catch (err) { alert(`[M5 Run] ❌ ${err.message}`); } finally { setBusy(false); }
+  };
+  const saveOnly = () => guarded(save);
+  const saveAndStart = () => guarded(async () => {
+    await save();
+    setRun(await readJsonOrThrow(await fetch(`${base}/run/start`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }),
+    })));
+  });
+  const stop = () => guarded(async () => setRun(await readJsonOrThrow(await fetch(`${base}/run/stop`, { method: 'POST' }))));
+
+  return (
+    <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="sdlc-task-detail-modal" data-ui="M5">
+        <div className="sdlc-form-header">
+          <div>
+            <h3>اجرای پروژه — {project.name} <UiTag id="M5" name="RunGuide" /></h3>
+            <small style={{ fontSize: 11, color: '#899087' }}>راهنمای اجرا را ویرایش کنید؛ Claude Code آن را مرحله‌به‌مرحله اجرا می‌کند.</small>
+          </div>
+          <button type="button" className="sdlc-form-close" onClick={onClose}><X size={20} /></button>
+        </div>
+        <div className="sdlc-form-body">
+          <div className="sdlc-agent-tabs">
+            {stages.map(s => (
+              <button key={s} className={`sdlc-agent-tab ${stage === s ? 'active' : ''}`} onClick={() => setStage(s)}>{s}</button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 8, margin: '10px 0' }}>
+            {[['test', 'Test — اجرای تست‌ها'], ['real', 'Real — اجرای واقعی']].map(([m, label]) => (
+              <button key={m} className={`sdlc-btn ${mode === m ? 'sdlc-btn-primary' : 'sdlc-btn-secondary'}`} onClick={() => setMode(m)}>{label}</button>
+            ))}
+          </div>
+          {loadError && <p className="sdlc-error">{loadError}</p>}
+          {saved && (
+            <>
+              <small className="sdlc-intervention-hint" dir="ltr">
+                {guides[stage].folder}\{saved.file} {saved.exists ? '' : '(هنوز ذخیره نشده — قالب اولیه)'}
+              </small>
+              <textarea
+                dir="ltr" rows={14} value={text} spellCheck={false}
+                style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
+                onChange={e => setDrafts(current => ({ ...current, [draftKey]: e.target.value }))}
+              />
+            </>
+          )}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '10px 0', flexWrap: 'wrap' }}>
+            <button className="sdlc-btn sdlc-btn-secondary" disabled={busy || !dirty} onClick={saveOnly}>ذخیره</button>
+            {run.running ? (
+              <button className="sdlc-btn sdlc-btn-secondary" disabled={busy} onClick={stop}><Square size={14} /> توقف</button>
+            ) : (
+              <button className="sdlc-btn sdlc-btn-primary" disabled={busy || !saved} onClick={saveAndStart}><Play size={14} /> ذخیره و اجرا</button>
+            )}
+            <span className={`sdlc-badge ${run.running ? 'green' : 'gray'}`}>
+              {run.running
+                ? (run.agent_running ? `agent در حال اجرا (${run.mode})` : `سرورها در حال اجرا (${(run.detached_pids || []).join(', ')})`)
+                : run.exit_code != null ? `پایان (کد ${run.exit_code})` : 'متوقف'}
+            </span>
+          </div>
+          {run.log !== undefined && run.log !== '' && (
+            <pre className="sdlc-live-output" dir="ltr" style={{ maxHeight: 260, overflow: 'auto' }}>{run.log}</pre>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

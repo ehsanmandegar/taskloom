@@ -18,7 +18,8 @@ from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, Co
 from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse
 from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
 from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError, command
-from . import run_processes
+from . import run_guides, run_processes
+from .services import agent_executable
 from .sdlc_git import (
     GitHubError, commit_and_push, create_github_repository, create_pull_request, describe_new_repository,
     ensure_workspace, git_root, validate_repository,
@@ -1000,18 +1001,47 @@ async def delete_sdlc_project(project_id: str):
     return {"project_id": project_id, "deleted_tasks": deleted}
 
 
-def _run_target(project_id: str, stage: str) -> tuple[str, str]:
-    """(command, folder) of a stage's ▶ Run button."""
+def _stage_folder(project_id: str, stage: str) -> tuple[SDLCProjectConfig, Path]:
     project = sdlc_project_manager.get_project(project_id)
     if not project or stage not in project.agents:
         raise HTTPException(404, f"Project {project_id} or its agent {stage} not found")
-    cmd = project.agents[stage].run_command.strip()
-    if not cmd:
-        raise HTTPException(400, f"The {stage} stage has no run command; set one in the project settings")
     folder = project.stage_path(stage)
     if not folder or not Path(folder).expanduser().is_dir():
         raise HTTPException(400, f"The {stage} stage's folder does not exist: {folder or '(no project path set)'}")
-    return cmd, str(Path(folder).expanduser())
+    return project, Path(folder).expanduser().resolve()
+
+
+def _run_target(project_id: str, stage: str) -> tuple[str, str]:
+    """(command, folder) of a stage's ▶ Run button."""
+    project, folder = _stage_folder(project_id, stage)
+    cmd = project.agents[stage].run_command.strip()
+    if not cmd:
+        raise HTTPException(400, f"The {stage} stage has no run command; set one in the project settings")
+    return cmd, str(folder)
+
+
+class RunStartRequest(BaseModel):
+    mode: Optional[str] = None  # "test" | "real": let Claude Code follow the guide; None: the plain run command
+
+
+class RunGuideRequest(BaseModel):
+    content: str
+
+
+@app.get("/api/sdlc/projects/{project_id}/agents/{stage}/run-guide")
+async def get_run_guides(project_id: str, stage: str):
+    """The stage's RUN_TEST.md / RUN_REAL.md (a starter template where the file does not exist yet)."""
+    _, folder = _stage_folder(project_id, stage)
+    return {"folder": str(folder), "guides": run_guides.read_guides(folder, stage)}
+
+
+@app.put("/api/sdlc/projects/{project_id}/agents/{stage}/run-guide/{mode}")
+async def save_run_guide(project_id: str, stage: str, mode: str, body: RunGuideRequest):
+    if mode not in run_guides.GUIDE_FILES:
+        raise HTTPException(400, "mode must be 'test' or 'real'")
+    _, folder = _stage_folder(project_id, stage)
+    run_guides.write_guide(folder, mode, body.content)
+    return {"file": run_guides.GUIDE_FILES[mode], "saved": True}
 
 
 @app.get("/api/sdlc/projects/{project_id}/run")
@@ -1021,10 +1051,29 @@ async def sdlc_run_overview(project_id: str):
 
 
 @app.post("/api/sdlc/projects/{project_id}/agents/{stage}/run/start")
-async def start_stage_run(project_id: str, stage: str):
-    cmd, folder = _run_target(project_id, stage)
+async def start_stage_run(project_id: str, stage: str, body: Optional[RunStartRequest] = None):
+    mode = body.mode if body else None
     try:
-        return run_processes.start(project_id, stage, cmd, folder)
+        if mode is None:
+            cmd, folder = _run_target(project_id, stage)
+            return run_processes.start(project_id, stage, cmd, folder)
+        if mode not in run_guides.GUIDE_FILES:
+            raise HTTPException(400, "mode must be 'test' or 'real'")
+        project, folder = _stage_folder(project_id, stage)
+        guide = run_guides.guide_path(folder, mode)
+        if not guide.is_file() or not guide.read_text(encoding="utf-8", errors="replace").strip():
+            raise HTTPException(400, f"Write and save {guide.name} first")
+        try:
+            executable = agent_executable(AgentType.claude)
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        pid_file = Path("data/run-pids") / f"{project_id}-{stage}.pids"
+        prompt = run_guides.build_run_prompt(mode, stage, project.name, folder, pid_file.resolve())
+        args = [executable, "--print", "--verbose", "--output-format", "stream-json",
+                "--permission-mode", "acceptEdits", "--allowedTools", "Bash", "Read", "Edit", "Write"]
+        return run_processes.start_process(project_id, stage, lambda key: run_processes.RunProcess(
+            key, f"{guide.name} (Claude Code)", args, str(folder), mode=mode, stdin_text=prompt,
+            pid_file=pid_file.resolve(), formatter=run_processes.format_claude_event))
     except OSError as exc:
         raise HTTPException(400, f"Could not start the command: {exc}") from exc
 
