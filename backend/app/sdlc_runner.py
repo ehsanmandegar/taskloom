@@ -274,7 +274,7 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     # In a Git repository every task works on its own branch (sdlc/<task-id>), started from the
     # freshly fetched remote base branch when the repository has an origin.
     base_branch = repository.default_branch if has_repo else str(config.github_config.get("branch") or "main")
-    await prepare_task_branch(task, workdir, base_branch, resolve_token(repo_token) if has_repo else None)
+    await prepare_task_branch(task, workdir, base_branch, resolve_token(repo_token) if has_repo else None, auto_stash=has_repo)
     prompt = build_stage_prompt(stage, task, project, config, workdir)
     state = task.base_task
     state.step = f"{display_name} is running the {stage} stage"

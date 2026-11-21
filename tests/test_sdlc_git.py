@@ -224,3 +224,20 @@ def test_task_branch_in_a_repository_without_commits(tmp_path):
 
     assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
     assert record.branch == "sdlc/sdlc-git1"
+
+
+def test_managed_repo_sets_aside_uncommitted_leftovers_instead_of_failing(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    (repo / "app.py").write_text("npm rewrote me\n", encoding="utf-8")
+    (repo / "new.txt").write_text("untracked\n", encoding="utf-8")
+    task = make_task()
+
+    with pytest.raises(RuntimeError, match="uncommitted changes"):  # a user's own folder is never touched
+        run(sdlc_git.prepare_task_branch(task, repo, "main"))
+
+    run(sdlc_git.prepare_task_branch(task, repo, "main", auto_stash=True))
+
+    assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
+    assert git(repo, "status", "--porcelain") == ""
+    assert "taskloom: auto-stash" in git(repo, "stash", "list")
+    assert any("Set aside uncommitted changes" in line for line in task.base_task.logs)

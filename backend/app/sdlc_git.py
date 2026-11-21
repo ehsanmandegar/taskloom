@@ -39,7 +39,7 @@ async def git_root(path: Path) -> Path | None:
 
 
 async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str,
-                              token: str | None = None) -> TaskRepo | None:
+                              token: str | None = None, auto_stash: bool = False) -> TaskRepo | None:
     """Put the repository containing `workdir` on the task's branch, creating it from the base once.
 
     When the task branch is new and the repository has an `origin`, fetch first and branch from the
@@ -52,6 +52,8 @@ async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str,
         return None
     branch = task_branch(task)
     key = str(root)
+    if auto_stash:
+        await stash_leftovers(task, root, branch)
     current, _ = await task_branch_preflight(root, branch, confirmed_dirty_worktree=True)
     code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], root)
     branch_exists = code == 0
@@ -88,6 +90,21 @@ async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str,
         recorded = TaskRepo(path=key, branch=branch, base_branch=base)
         task.repos[key] = recorded
     return recorded
+
+
+async def stash_leftovers(task: SDLCTask, root: Path, branch: str) -> None:
+    """In a Taskloom-managed clone, set aside uncommitted leftovers (e.g. a lockfile rewritten by `npm install`)
+    instead of failing: the task starts from a clean tree and the stash stays recoverable with `git stash list`."""
+    code, current = await command(["git", "branch", "--show-current"], root)
+    code2, status = await command(["git", "status", "--porcelain"], root)
+    if code or code2 or current.strip() == branch or not status.strip():
+        return
+    code, output = await command(["git", "stash", "push", "--include-untracked", "-m",
+                                  f"taskloom: auto-stash before {branch}"], root)
+    if code:
+        raise RuntimeError("Could not set aside uncommitted changes: " + output.strip())
+    task.base_task.logs.append(f"Set aside uncommitted changes on `{current.strip() or 'detached HEAD'}` "
+                               f"({len(status.strip().splitlines())} file(s)) with git stash before starting `{branch}`")
 
 
 async def has_remote(root: Path, name: str) -> bool:
