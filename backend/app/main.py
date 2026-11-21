@@ -1234,7 +1234,53 @@ async def approve_sdlc_task(task_id: str):
         raise HTTPException(409, str(exc)) from exc
     if not task:
         raise HTTPException(404, f"SDLC task {task_id} not found")
+    notes = await publish_approved_task(task_id)
+    if notes:
+        task = await sdlc_task_manager.update_task(task_id, lambda latest: (
+            setattr(latest, "transition_reason", "Approved by human. " + " ".join(notes)),
+            latest.base_task.logs.extend(notes),
+        )) or task
     return task
+
+
+async def publish_approved_task(task_id: str) -> list[str]:
+    """After the human's final approval: commit and push the task branch of every repository the task
+    worked in and open a pull request into that stage's base branch. Never raises: what could not be
+    published is reported in the returned notes (the dashboard's manual GitHub buttons still work)."""
+    task = await sdlc_task_manager.load_task(task_id)
+    project = sdlc_project_manager.get_project(task.project_config_id) if task else None
+    if not task or not project:
+        return []
+    notes: list[str] = []
+    for root_text, repo in list(task.repos.items()):
+        stage = None
+        for name, config in project.agents.items():
+            folder = project.stage_path(name)
+            if config.enabled and config.repository.mode.value != "none" and folder:
+                root = await git_root(Path(folder).expanduser())
+                if root is not None and str(root) == root_text:
+                    stage = name
+                    break
+        if stage is None:
+            notes.append(f"{Path(root_text).name}: no GitHub repository is configured for it, so nothing was published.")
+            continue
+        repository = project.stage_repository(stage)
+        token = sdlc_project_manager.github_token(project.id, stage)
+        try:
+            repo_url = repository.url
+            if not repo_url and repository.mode.value == "create":
+                repo_url = await create_github_repository(project, stage, token, allow_rename=True)
+                repository.url = repo_url
+                sdlc_project_manager.save_project(project)
+            if not repo_url:
+                raise GitHubError("Repository URL is required")
+            await commit_and_push(task, repo, repo_url, token)
+            pr = await create_pull_request(task, repo, repo_url, token)
+            notes.append(f"{stage}: pull request into `{repo.base_branch}`: {pr['pr_url']}")
+        except (GitHubError, RuntimeError) as exc:
+            notes.append(f"{stage}: could not publish ({exc}).")
+        await sdlc_task_manager.update_task(task_id, lambda latest, key=root_text, value=repo: latest.repos.__setitem__(key, value))
+    return notes
 
 
 class GitHubActionRequest(BaseModel):

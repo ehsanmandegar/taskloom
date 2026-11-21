@@ -1190,6 +1190,25 @@ export default function SDLCDashboard() {
                 </div>
               )}
 
+              {/* Questions stages asked the analyst (and the human, through the analyst) */}
+              {(selectedTask.stage_questions || []).length > 0 && (
+                <div className="sdlc-detail-section">
+                  <h4>پرسش و پاسخ بین مرحله‌ها ({selectedTask.stage_questions.length}) <UiTag id="M3-Q" name="StageQuestions"/></h4>
+                  {selectedTask.stage_questions.map(q => (
+                    <div key={q.id} className="sdlc-agent-result-card">
+                      <div className="sdlc-agent-result-header">
+                        <span className="sdlc-agent-result-badge">{q.asking_stage} ← analysis</span>
+                        <span className="sdlc-agent-result-status">
+                          {q.status === 'answered' ? (q.answered_by === 'human' ? 'پاسخ اپراتور (از طریق تحلیل‌گر)' : 'پاسخ تحلیل‌گر') : 'در انتظار پاسخ'}
+                        </span>
+                      </div>
+                      <p className="sdlc-agent-result-summary" dir="auto"><b>سؤال:</b> {q.question}</p>
+                      {q.answer && <p className="sdlc-agent-result-summary" dir="auto"><b>پاسخ:</b> {q.answer}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Live output of the agent that is running right now */}
               {selectedTask.base_task?.live_output && (
                 <div className="sdlc-detail-section">

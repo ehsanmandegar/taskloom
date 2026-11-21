@@ -103,6 +103,32 @@ def stage_feedback(task: SDLCTask, stage: str) -> list[str]:
     return sections
 
 
+def consult_sections(task: SDLCTask, stage: str) -> list[str]:
+    """Questions this stage asked the analyst (and the answers) or, for the analyst, the question to answer."""
+    sections = []
+    if stage == "analysis" and task.consult_question_id:
+        asked = next((q for q in task.stage_questions if q.id == task.consult_question_id), None)
+        if asked:
+            sections.append(
+                f"## Question from the {asked.asking_stage} stage — answer it now\n"
+                f"The {asked.asking_stage} stage cannot continue without an answer:\n\n{asked.question}\n\n"
+                "Answer from the code, the documents and your analysis; a human's answers above (if any) are binding. "
+                "In this reply the `summary` must contain your numbered answers. Use status `completed` only when EVERY "
+                "question is answered with confidence. If anything is still ambiguous, do not guess: use status "
+                "`needs_human` and put in `question_for_human` a numbered list of ONLY the still-unanswered questions "
+                "(a human operator will answer them)."
+            )
+    answered = [q for q in task.stage_questions if q.asking_stage == stage and q.status == "answered"][-5:]
+    if answered:
+        sections.append(
+            "## Answers to your earlier questions — follow them\n" + "\n\n".join(
+                f"Question: {q.question}\nAnswer ({'human operator via the analyst' if q.answered_by == 'human' else 'analyst'}): {q.answer}"
+                for q in answered
+            )
+        )
+    return sections
+
+
 def other_stage_folders(stage: str, project: SDLCProjectConfig) -> dict[str, str]:
     """Existing folders of the other enabled stages (each stage may have its own repository)."""
     folders = {}
@@ -157,6 +183,7 @@ def build_stage_prompt(stage: str, task: SDLCTask, project: SDLCProjectConfig, c
     if previous:
         sections.append("## Results from earlier stages\n" + "\n\n".join(previous))
     sections.extend(stage_feedback(task, stage))
+    sections.extend(consult_sections(task, stage))
     if stage in REPORT_ONLY_STAGES:
         work = (
             "Investigate the existing code and documents in your working folder and produce your report. "
@@ -187,7 +214,14 @@ def build_stage_prompt(stage: str, task: SDLCTask, project: SDLCProjectConfig, c
         "- Do not commit, push, or switch Git branches; a human reviews the result.\n"
         f"- {work}\n"
         f"- {testing}\n"
-        "- If you cannot proceed without a decision from a human, stop and ask (status `needs_human`).\n"
+        + (
+            "- If anything in the task or the code is ambiguous and you cannot resolve it yourself, do not guess: stop and "
+            "ask with status `needs_human`, listing every open question, numbered, in `question_for_human`. A human operator answers.\n"
+            if stage == "analysis" else
+            "- If anything in the task is ambiguous or you lack information, do not guess: stop and ask with status "
+            "`needs_human`, listing every open question, numbered, in `question_for_human`. The analyst answers them "
+            "(asking a human when needed) and you are re-run with the answers.\n"
+        ) +
         "- If an earlier stage's output is wrong or incomplete and blocks you, report it (status `needs_revision`)."
     )
     sections.append(

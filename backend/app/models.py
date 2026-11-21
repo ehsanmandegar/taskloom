@@ -541,6 +541,18 @@ class SDLCTaskContext(BaseModel):
     system_prompt: str = ""
 
 
+class StageQuestion(BaseModel):
+    """A question a development/QA stage could not resolve alone. The analyst answers it; what the
+    analyst cannot answer goes to a human operator, and the answer comes back through the analyst."""
+    id: str
+    asking_stage: str
+    question: str
+    answer: str = ""
+    answered_by: str = ""  # "analysis" or "human" (the analyst needed an operator's answer)
+    status: str = "open"  # open, answered
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class SDLCTask(BaseModel):
     """SDLC-specific task model extending TaskState"""
     # Inherit all TaskState fields
@@ -568,6 +580,8 @@ class SDLCTask(BaseModel):
     agent_results: dict[str, AgentResult] = Field(default_factory=dict)
     human_interventions: list[HumanIntervention] = Field(default_factory=list)
     revisions: list[RevisionRequest] = Field(default_factory=list)
+    stage_questions: list[StageQuestion] = Field(default_factory=list)
+    consult_question_id: str = ""  # while set, the analysis stage is answering that StageQuestion
     test_results: dict[str, TestResults] = Field(default_factory=dict)
     repos: dict[str, TaskRepo] = Field(default_factory=dict)  # keyed by repository root path
     version: int = 0  # optimistic-concurrency counter, bumped on every save

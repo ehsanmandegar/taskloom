@@ -338,3 +338,63 @@ def test_sdlc_stages_may_run_test_and_build_commands_but_not_arbitrary_shell():
     assert args.index("--allowedTools") < args.index("--permission-mode")  # the variadic flag never touches the prompt
     assert args[-1] == "do it"
     assert "--allowedTools" not in initial_agent_args(AgentType.claude, "claude.exe", "do it")
+
+
+def test_final_approval_commits_pushes_and_opens_a_pull_request_into_the_base_branch(tmp_path, api, monkeypatch):
+    client, projects, tasks = api
+    folder = tmp_path / "ws" / "backend"
+    project = project_with(tmp_path, backend=RepositoryConfig(
+        mode="create", local_path=str(folder), default_branch="sandbox", url="https://github.com/ehsan/shop-backend", name="shop-backend"))
+    projects.save_project(project)
+    remote_repo = tmp_path / "gh.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote_repo)], check=True)
+    monkeypatch.setattr(sdlc_git, "clean_github_url", lambda url: str(remote_repo))
+    path = run(sdlc_git.ensure_workspace(project, "backend", None))
+    git(path, "push", "-q", str(remote_repo), "sandbox")
+    task = make_task()
+    run(sdlc_git.prepare_task_branch(task, path, "sandbox"))
+    (path / "cart.py").write_text("def cart(): ...\n", encoding="utf-8")
+    task.sdlc_status = main_module.SDLCStatus.pending_approval
+    run(tasks.save_task(task))
+    monkeypatch.setattr(sdlc_git, "push_url", lambda url, token: str(remote_repo))
+    monkeypatch.setattr(sdlc_git, "resolve_token", lambda token: "tok")
+    prs = []
+
+    async def fake_api(method, path_, token, body=None):
+        prs.append((method, path_, body))
+        return 201, {"number": 7, "html_url": "https://github.com/ehsan/shop-backend/pull/7"}
+
+    monkeypatch.setattr(sdlc_git, "github_api", fake_api)
+
+    response = client.post("/api/sdlc/tasks/t1/approve")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["sdlc_status"] == "done"
+    assert "pull/7" in body["transition_reason"] and "`sandbox`" in body["transition_reason"]
+    assert prs[0][1] == "/repos/ehsan/shop-backend/pulls" and prs[0][2]["base"] == "sandbox" and prs[0][2]["head"] == "sdlc/t1"
+    assert "cart.py" in git(remote_repo, "show", "--stat", "--format=", "sdlc/t1")
+    saved = run(tasks.load_task("t1"))
+    repo = saved.repos[str(path.resolve())]
+    assert repo.pushed and repo.pr_number == 7
+
+
+def test_final_approval_still_succeeds_when_publishing_fails(tmp_path, api, monkeypatch):
+    client, projects, tasks = api
+    project = project_with(tmp_path, backend=RepositoryConfig(
+        mode="create", local_path=str(tmp_path / "ws" / "backend"), url="https://github.com/ehsan/shop-backend"))
+    projects.save_project(project)
+    remote_repo = tmp_path / "gh.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote_repo)], check=True)
+    monkeypatch.setattr(sdlc_git, "clean_github_url", lambda url: str(remote_repo))
+    path = run(sdlc_git.ensure_workspace(project, "backend", None))
+    task = make_task()
+    run(sdlc_git.prepare_task_branch(task, path, "main"))
+    task.sdlc_status = main_module.SDLCStatus.pending_approval
+    run(tasks.save_task(task))
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    response = client.post("/api/sdlc/tasks/t1/approve")
+
+    assert response.status_code == 200 and response.json()["sdlc_status"] == "done"
+    assert "could not publish" in response.json()["transition_reason"]

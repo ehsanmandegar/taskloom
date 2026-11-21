@@ -1444,7 +1444,7 @@ from .secret_store import SecretStore
 from .models import (
     SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig,
     SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention,
-    RevisionRequest, SDLCTaskContext, TaskState, RunStatus, StageRunner
+    RevisionRequest, SDLCTaskContext, TaskState, RunStatus, StageRunner, StageQuestion
 )
 
 from .config import OLLAMA_BASE_URL, OLLAMA_MODEL
@@ -2020,7 +2020,8 @@ class SDLCTaskManager:
             for attempt in range(5):
                 # Reload: the task may have changed (e.g. a GitHub action) while the agent ran.
                 fresh_task = await self.load_task(task_id) or task
-                fresh_task.agent_results[stage] = result
+                # While the analyst answers another stage's question, keep the original analysis result.
+                fresh_task.agent_results["analysis_consult" if stage == "analysis" and fresh_task.consult_question_id else stage] = result
                 fresh_task.base_task.codex_thread_id = task.base_task.codex_thread_id
                 for key, repo in task.repos.items():
                     fresh_task.repos.setdefault(key, repo)
@@ -2050,14 +2051,19 @@ class SDLCTaskManager:
     async def _route_result(self, task: SDLCTask, stage: str, result: AgentResult,
                             project: SDLCProjectConfig) -> None:
         """Save a finished stage's result and move the workflow on accordingly."""
-        if result.status == "completed":
+        question = result.human_intervention.description if result.human_intervention else result.summary
+        kind = result.human_intervention.context.get("kind", "agent_question") if result.human_intervention else "agent_question"
+        if (stage == "analysis" and task.consult_question_id and kind != "agent_unavailable"
+                and result.status in ("completed", "needs_human")):
+            await self._finish_analyst_consult(task, result, question, project)
+        elif result.status == "completed":
             await self.save_task(task)
             await self._advance_or_complete(task, project)
         elif result.status == "needs_human":
-            question = result.human_intervention.description if result.human_intervention else result.summary
-            kind = result.human_intervention.context.get("kind", "agent_question") if result.human_intervention else "agent_question"
             if kind == "agent_unavailable":
                 await self._ask_human(task, stage, kind, f"{stage}: agent unavailable", question, ["resume", "stop"])
+            elif self._analyst_can_answer(task, stage, project):
+                await self._consult_analyst(task, stage, question, project)
             else:
                 await self._ask_human(task, stage, "agent_question", f"{stage} needs a human decision", question, ["stop"])
         elif result.status == "needs_revision" and result.revision_request:
@@ -2066,6 +2072,58 @@ class SDLCTaskManager:
             task.sdlc_status = SDLCStatus.failed
             task.transition_reason = f"{stage} {result.status}: " + ("; ".join(result.issues) or result.summary)
             await self.save_task(task)
+
+    MAX_ANALYST_QUESTIONS = 4  # per asking stage and task; after that the stage's question goes straight to a human
+
+    def _analyst_can_answer(self, task: SDLCTask, stage: str, project: SDLCProjectConfig) -> bool:
+        """Only the analyst talks to humans: every other stage asks the analyst first."""
+        from .sdlc_runner import resolve_runner
+        if stage == "analysis" or "analysis" not in self.enabled_stages(project):
+            return False
+        if resolve_runner(project.agents.get("analysis", AgentConfig()), project.stage_path("analysis")) == StageRunner.ollama:
+            return False  # a text-only report cannot answer a question
+        return sum(1 for q in task.stage_questions if q.asking_stage == stage) < self.MAX_ANALYST_QUESTIONS
+
+    async def _consult_analyst(self, task: SDLCTask, stage: str, question: str, project: SDLCProjectConfig) -> None:
+        """A stage is stuck on a question: record it and let the analysis stage answer it."""
+        asked = StageQuestion(id=f"Q-{uuid.uuid4().hex[:6].upper()}", asking_stage=stage, question=question.strip())
+        task.stage_questions.append(asked)
+        task.consult_question_id = asked.id
+        task.previous_status = task.sdlc_status
+        task.transition_reason = f"{stage} asked the analyst: {asked.question[:300]}"
+        task.updated_at = datetime.now(timezone.utc)
+        await self.save_task(task)
+        print(f"[SDLC] {task.base_task.task_id}: {stage} asks the analyst ({asked.id})", flush=True)
+        await self.execute_stage(task.base_task.task_id, "analysis", project)
+
+    async def _finish_analyst_consult(self, task: SDLCTask, result: AgentResult, question: str,
+                                      project: SDLCProjectConfig) -> None:
+        """The analyst replied to a stage's question: pass the answer back, or ask a human what it cannot answer."""
+        asked = next((q for q in task.stage_questions if q.id == task.consult_question_id), None)
+        if asked is None:
+            task.consult_question_id = ""
+            await self.save_task(task)
+            await self._advance_or_complete(task, project)
+            return
+        if result.status == "completed":
+            asked.answer = result.summary.strip()
+            asked.status = "answered"
+            asked.answered_by = "human" if any(
+                item.status == "responded" and item.context.get("consult_id") == asked.id
+                for item in task.human_interventions
+            ) else "analysis"
+            task.consult_question_id = ""
+            task.transition_reason = f"Analyst answered {asked.asking_stage}; re-running {asked.asking_stage}"
+            task.updated_at = datetime.now(timezone.utc)
+            await self.save_task(task)
+            await self.execute_stage(task.base_task.task_id, asked.asking_stage, project)
+            return
+        # The analyst could not answer everything: the human operator gets what is still open.
+        await self._ask_human(
+            task, "analysis", "agent_question", f"analysis needs a human answer (question from {asked.asking_stage})",
+            f"Question from the {asked.asking_stage} stage:\n{asked.question}\n\nThe analyst could not answer:\n{question}",
+            ["stop"], {"consult_id": asked.id},
+        )
 
     @staticmethod
     def enabled_stages(project: SDLCProjectConfig) -> List[str]:
