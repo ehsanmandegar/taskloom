@@ -327,3 +327,14 @@ def test_create_mode_without_a_token_stays_local_but_still_gets_its_base_branch(
 
     assert git(path, "branch", "--list", "sandbox").strip().endswith("sandbox")
     assert project.stage_repository("analysis").name == "shop-analysis" and saved == [project]
+
+
+def test_sdlc_stages_may_run_test_and_build_commands_but_not_arbitrary_shell():
+    args = initial_agent_args(AgentType.claude, "claude.exe", "do it", ["E:/a"], sdlc_runner.SDLC_ALLOWED_TOOLS)
+
+    tools = args[args.index("--allowedTools") + 1]
+    assert "Bash(python -m pytest:*)" in tools and "Bash(npm run:*)" in tools
+    assert "Bash(rm" not in tools and "Bash(*" not in tools and "Bash)" not in tools
+    assert args.index("--allowedTools") < args.index("--permission-mode")  # the variadic flag never touches the prompt
+    assert args[-1] == "do it"
+    assert "--allowedTools" not in initial_agent_args(AgentType.claude, "claude.exe", "do it")

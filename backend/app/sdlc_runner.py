@@ -253,6 +253,15 @@ def record_agent_process(pid_file: Path, stage: str):
     return started
 
 
+# Claude Code in acceptEdits mode may edit files but is refused every shell command, so QA could never run the tests.
+# These prefixes (and only these) are allowed: test/build/install tools and read-only git.
+SDLC_ALLOWED_TOOLS = [
+    "Bash(python -m pytest:*)", "Bash(pytest:*)", "Bash(python -m pip install:*)", "Bash(pip install:*)",
+    "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npm install:*)", "Bash(npm ci:*)", "Bash(node --test:*)",
+    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+]
+
+
 async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, runner: StageRunner,
                         pid_file: Path | None = None, repo_token: str | None = None, persist_project=None) -> AgentResult:
     """Run one SDLC stage with Claude Code or Codex inside the stage's folder (or the project repository)."""
@@ -282,7 +291,7 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     before = snapshot_folder(workdir)
     token = _command_started_handler.set(record_agent_process(pid_file, stage) if pid_file else None)
     try:
-        args = initial_agent_args(agent_type, executable, prompt, readable_dirs(stage, project, config, workdir))
+        args = initial_agent_args(agent_type, executable, prompt, readable_dirs(stage, project, config, workdir), SDLC_ALLOWED_TOOLS)
         code, output = await run_agent_command(agent_type, args, workdir, state, config.cli_timeout_seconds)
     finally:
         _command_started_handler.reset(token)

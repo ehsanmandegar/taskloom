@@ -331,6 +331,36 @@ export default function SDLCDashboard() {
     }
   };
 
+  // Re-run the stage a failed task stopped in ("restore" the task to work).
+  const handleRetryStage = async (task) => {
+    const taskId = task.base_task.task_id;
+    try {
+      const response = await fetch(`${API}/api/sdlc/tasks/${taskId}/transition`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: taskId, stage: task.current_stage, force: true }),
+      });
+      const updated = await readJsonOrThrow(response);
+      setSelectedTask(current => (current && current.base_task.task_id === taskId ? updated : current));
+      await loadSDLCData();
+    } catch (err) {
+      setError(`خطا در اجرای مجدد مرحله: ${err.message}`);
+    }
+  };
+
+  // Delete one task (refused by the server while one of its stages is running).
+  const handleDeleteTask = async (task) => {
+    const taskId = task.base_task.task_id;
+    if (!window.confirm(`تسک «${task.title || taskId}» برای همیشه حذف شود؟
+شاخهٔ Git و ریپوها دست‌نخورده می‌مانند.`)) return;
+    try {
+      await readJsonOrThrow(await fetch(`${API}/api/sdlc/tasks/${taskId}`, { method: 'DELETE' }));
+      setSelectedTask(null);
+      await loadSDLCData();
+    } catch (err) {
+      setError(`خطا در حذف تسک: ${err.message}`);
+    }
+  };
+
   // Handle human intervention response
   const handleInterventionResponse = async (interventionId, response) => {
     try {
@@ -1138,6 +1168,18 @@ export default function SDLCDashboard() {
                   <button type="button" className="sdlc-btn sdlc-btn-primary" onClick={() => handleApprove(selectedTask.base_task.task_id)}>
                     <CheckCircle size={14} /> تأیید نهایی
                   </button>
+                )}
+                {selectedTask.sdlc_status === 'failed' && (
+                  <>
+                    {selectedTask.current_stage && (
+                      <button type="button" className="sdlc-btn sdlc-btn-primary" onClick={() => handleRetryStage(selectedTask)}>
+                        <RefreshCw size={14} /> اجرای مجدد مرحلهٔ {selectedTask.current_stage}
+                      </button>
+                    )}
+                    <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => handleDeleteTask(selectedTask)}>
+                      <X size={14} /> حذف تسک
+                    </button>
+                  </>
                 )}
               </div>
 

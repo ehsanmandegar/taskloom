@@ -1056,7 +1056,7 @@ def agent_executable(agent_type: AgentType) -> str:
 
 
 def initial_agent_args(agent_type: AgentType, executable: str, prompt: str,
-                       extra_dirs: list[str] | None = None) -> list[str]:
+                       extra_dirs: list[str] | None = None, allowed_tools: list[str] | None = None) -> list[str]:
     if agent_type == AgentType.claude:
         # --add-dir lets the agent read the other SDLC stages' repositories (it is variadic, so it
         # must come before another option, never directly before the prompt).
@@ -1068,6 +1068,8 @@ def initial_agent_args(agent_type: AgentType, executable: str, prompt: str,
             "stream-json",
             "--verbose",
             *add_dirs,
+            # One comma-separated value: --allowedTools is variadic and must not swallow the next option.
+            *(["--allowedTools", ",".join(allowed_tools)] if allowed_tools else []),
             "--permission-mode",
             "acceptEdits",
             prompt,
