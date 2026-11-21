@@ -425,6 +425,13 @@ class ProjectWorkflowConfig(BaseModel):
     require_analysis_approval: bool = False
     require_final_human_approval: bool = False
     auto_resume_interrupted: bool = False  # re-run a stage cut off by a server restart without asking
+    # --- autonomy policy: everything defaults to the old behaviour (a human decides); each switch hands one decision to Taskloom
+    auto_analysis_approval: bool = False   # skip the analysis gate when the analysis is clean (no issues, no open questions)
+    auto_final_approval: bool = False      # approve + merge into develop by itself when the task's risk is low enough
+    auto_approval_max_risk: str = "low"    # low | medium: the highest risk level that may be approved without a human
+    auto_retry_failed_stages: int = 0      # automatic re-runs of a failed stage before it is escalated to a human
+    auto_release: bool = False             # draft + validate a release when enough merged tasks are waiting (a human still approves it)
+    auto_release_min_tasks: int = 2
 
 
 class SDLCProjectConfig(BaseModel):
@@ -563,6 +570,23 @@ class SDLCTaskContext(BaseModel):
     system_prompt: str = ""
 
 
+class TimelineEvent(BaseModel):
+    """One entry of a task's audit trail: what happened, who/what did it, and when."""
+    at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    kind: str          # created, stage_started, stage_completed, stage_failed, auto_retry, escalated, human_response, approved, merged, ...
+    message: str = ""
+    stage: str = ""
+    actor: str = "system"  # system | human | <stage agent>
+    duration_seconds: float | None = None
+
+
+class RiskAssessment(BaseModel):
+    level: str = "low"  # low | medium | high
+    score: int = 0
+    reasons: list[str] = Field(default_factory=list)
+    blocking: bool = False  # e.g. failing tests: never auto-approved
+
+
 class StageQuestion(BaseModel):
     """A question a development/QA stage could not resolve alone. The analyst answers it; what the
     analyst cannot answer goes to a human operator, and the answer comes back through the analyst."""
@@ -603,6 +627,9 @@ class SDLCTask(BaseModel):
     human_interventions: list[HumanIntervention] = Field(default_factory=list)
     revisions: list[RevisionRequest] = Field(default_factory=list)
     stage_questions: list[StageQuestion] = Field(default_factory=list)
+    timeline: list[TimelineEvent] = Field(default_factory=list)
+    risk: RiskAssessment | None = None
+    stage_attempts: dict[str, int] = Field(default_factory=dict)  # automatic retries used per stage
     consult_question_id: str = ""  # while set, the analysis stage is answering that StageQuestion
     test_results: dict[str, TestResults] = Field(default_factory=dict)
     repos: dict[str, TaskRepo] = Field(default_factory=dict)  # keyed by repository root path

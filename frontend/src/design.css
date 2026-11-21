@@ -15,3 +15,15 @@ body:before,body:after{display:none!important}
 @keyframes ui-fade{from{opacity:0}}
 @keyframes ui-pop{from{opacity:0;transform:translateY(8px) scale(.985)}}
 @media(prefers-reduced-motion:reduce){.sdlc-modal-overlay,.sdlc-modal-overlay>[role=dialog]{animation:none}}
+
+/* SDLC automation: audit trail + risk */
+.sdlc-timeline{margin:14px 0;padding:12px 14px;border:1px solid var(--gray-6);border-radius:12px;background:var(--color-panel-solid)}
+.sdlc-timeline h4{display:flex;align-items:center;gap:6px;margin:0 0 10px;font-size:12px}
+.sdlc-timeline ol{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto;display:grid;gap:8px}
+.sdlc-timeline li{display:grid;grid-template-columns:auto auto 1fr;gap:4px 8px;align-items:center;padding-bottom:8px;border-bottom:1px dashed var(--gray-5);font-size:12px}
+.sdlc-timeline li small{grid-column:1/-1;display:flex;align-items:center;gap:4px;color:var(--gray-10)}
+.sdlc-risk{margin:12px 0}
+.sdlc-autonomy{margin-top:14px}
+.sdlc-metrics{padding:6px 0 30px}
+.sdlc-risk-reasons{margin:4px 0 0;padding-inline-start:18px;font-size:12px}
+.sdlc-timeline li{grid-template-columns:auto 1fr}

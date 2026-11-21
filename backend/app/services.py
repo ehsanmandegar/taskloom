@@ -1434,6 +1434,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from .file_lock import FileLock, LockTimeout, replace_with_retry
 from .secret_store import SecretStore
+from . import sdlc_policy as policy
 from .models import (
     SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig,
     SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention,
@@ -1726,9 +1727,14 @@ class SDLCTaskManager:
         self.active_tasks: Dict[str, SDLCTask] = {}
         self.task_workers: Dict[str, asyncio.Task] = {}
         self.live_states: Dict[str, TaskState] = {}
+        # Set by the API layer: approves + integrates a finished task without a human (see sdlc_policy.can_auto_approve).
+        # Called as `await auto_approver(task_id, reason) -> bool`; False leaves the task waiting for a human.
+        self.auto_approver = None
         self.read_only = False  # True when another server process owns data_dir
         self._instance_lock: Optional[FileLock] = None
     
+    AUTO_RETRY_DELAY = 5.0  # seconds * attempt number before an automatic stage retry (tests set 0)
+
     def generate_task_id(self) -> str:
         """Generate a unique task ID"""
         return f"TASK-{uuid.uuid4().hex[:8].upper()}"
@@ -1776,6 +1782,7 @@ class SDLCTaskManager:
             updated_at=datetime.now(timezone.utc)
         )
         
+        policy.record_event(sdlc_task, "created", f"Task created: {request.title[:120]}", actor="human")
         # Save task to disk
         await self.save_task(sdlc_task)
         
@@ -1992,6 +1999,7 @@ class SDLCTaskManager:
         if stage in self.STAGE_STATUS:
             task.sdlc_status = self.STAGE_STATUS[stage]
         task.updated_at = datetime.now(timezone.utc)
+        policy.record_event(task, "stage_started", f"Started {stage}", stage, actor=stage)
         await self.save_task(task)
         print(f"[SDLC] Starting {stage} stage for task {task_id}", flush=True)
 
@@ -2051,12 +2059,21 @@ class SDLCTaskManager:
             print(f"[SDLC] Agent {stage} error for {task_id}: {exc}", flush=True)
             traceback.print_exc()
 
-            def mark_failed(failed: SDLCTask) -> None:
-                failed.sdlc_status = SDLCStatus.failed
-                failed.transition_reason = f"{stage} error: {exc}"
-                failed.updated_at = datetime.now(timezone.utc)
+            current = await self.load_task(task_id)
+            if current is not None and policy.retries_left(current, stage, project) > 0:
+                self.task_workers.pop(task_id, None)
+                self.live_states.pop(task_id, None)
+                await self._fail_or_retry(current, stage, project, f"{stage} error: {exc}")
+            else:
+                def mark_failed(failed: SDLCTask) -> None:
+                    failed.sdlc_status = SDLCStatus.failed
+                    failed.transition_reason = f"{stage} error: {exc}"
+                    failed.updated_at = datetime.now(timezone.utc)
+                    policy.record_event(failed, "stage_failed", f"{stage} error: {exc}", stage, actor=stage,
+                                        duration_seconds=policy.stage_duration(failed, stage))
+                    policy.record_event(failed, "escalated", "The stage failed; a human has to decide what to do", stage)
 
-            await self.update_task(task_id, mark_failed)
+                await self.update_task(task_id, mark_failed)
         finally:
             if self.live_states.get(task_id) is task.base_task:
                 self.live_states.pop(task_id, None)
@@ -2070,6 +2087,8 @@ class SDLCTaskManager:
                 and result.status in ("completed", "needs_human")):
             await self._finish_analyst_consult(task, result, question, project)
         elif result.status == "completed":
+            policy.record_event(task, "stage_completed", result.summary.strip().splitlines()[0][:200] if result.summary.strip() else "",
+                                stage, actor=stage, duration_seconds=policy.stage_duration(task, stage))
             await self.save_task(task)
             await self._advance_or_complete(task, project)
         elif result.status == "needs_human":
@@ -2082,9 +2101,28 @@ class SDLCTaskManager:
         elif result.status == "needs_revision" and result.revision_request:
             await self._request_revision(task, stage, result.revision_request, project)
         else:  # blocked / failed / needs_revision without details
-            task.sdlc_status = SDLCStatus.failed
-            task.transition_reason = f"{stage} {result.status}: " + ("; ".join(result.issues) or result.summary)
+            await self._fail_or_retry(task, stage, project, f"{stage} {result.status}: " + ("; ".join(result.issues) or result.summary))
+
+    async def _fail_or_retry(self, task: SDLCTask, stage: str, project: SDLCProjectConfig, reason: str) -> None:
+        """A stage failed: re-run it automatically while the project's retry budget lasts, else escalate to a human."""
+        task_id = task.base_task.task_id
+        duration = policy.stage_duration(task, stage)
+        policy.record_event(task, "stage_failed", reason, stage, actor=stage, duration_seconds=duration)
+        if policy.retries_left(task, stage, project) > 0:
+            attempt = task.stage_attempts.get(stage, 0) + 1
+            task.stage_attempts[stage] = attempt
+            budget = project.workflow.auto_retry_failed_stages
+            task.transition_reason = f"{reason} - automatic retry {attempt}/{budget}"
+            policy.record_event(task, "auto_retry", f"Automatic retry {attempt}/{budget} of {stage}: {reason[:200]}", stage)
             await self.save_task(task)
+            await asyncio.sleep(self.AUTO_RETRY_DELAY * attempt)
+            await self.execute_stage(task_id, stage, project)
+            return
+        task.sdlc_status = SDLCStatus.failed
+        task.transition_reason = reason
+        policy.record_event(task, "escalated", "Out of automatic retries; a human has to decide what to do"
+                            if project.workflow.auto_retry_failed_stages else "The stage failed; a human has to decide what to do", stage)
+        await self.save_task(task)
 
     MAX_ANALYST_QUESTIONS = 4  # per asking stage and task; after that the stage's question goes straight to a human
 
@@ -2178,13 +2216,23 @@ class SDLCTaskManager:
         if (task.current_stage == "analysis" and project.workflow.require_analysis_approval
                 and task.sdlc_status != SDLCStatus.analysis_approved):
             analysis = task.agent_results.get("analysis")
-            await self._ask_human(
-                task, "analysis", "analysis_approval", "Approve the analysis",
-                (analysis.summary if analysis else "")
-                + "\n\nApprove to start development, write feedback to redo the analysis, or 'stop'.",
-                ["approve", "stop"],
-            )
-            return
+            clean, why = policy.analysis_is_clean(task) if project.workflow.auto_analysis_approval else (False, "")
+            if clean:
+                policy.record_event(task, "auto_approved", f"Analysis approved automatically: {why}", "analysis")
+                task.sdlc_status = SDLCStatus.analysis_approved
+                task.transition_reason = "Analysis approved automatically"
+                await self.save_task(task)  # the next stage reloads the task from disk
+            else:
+                if project.workflow.auto_analysis_approval:
+                    policy.record_event(task, "escalated", f"Analysis needs a human: {why}", "analysis")
+                await self._ask_human(
+                    task, "analysis", "analysis_approval", "Approve the analysis",
+                    (analysis.summary if analysis else "")
+                    + (f"\n\n(Automatic approval was not possible: {why}.)" if why else "")
+                    + "\n\nApprove to start development, write feedback to redo the analysis, or 'stop'.",
+                    ["approve", "stop"],
+                )
+                return
 
         stages = project.workflow.stages or ["analysis", "backend", "n8n", "frontend", "qa"]
         try:
@@ -2200,9 +2248,29 @@ class SDLCTaskManager:
             return
 
         task.previous_status = task.sdlc_status
+        task.risk = policy.assess_risk(task)
+        policy.record_event(task, "all_stages_completed", f"All stages finished; risk {task.risk.level} (score {task.risk.score})")
+        auto_ok, auto_why = policy.can_auto_approve(task, project)
+        if self.auto_approver is not None and auto_ok:
+            # Taskloom decides: park the task where a human would approve it, then run exactly that approval.
+            task.sdlc_status = SDLCStatus.pending_approval
+            task.transition_reason = f"All stages finished; approving automatically ({auto_why})"
+            task.updated_at = datetime.now(timezone.utc)
+            await self.save_task(task)
+            approved, detail = False, ""
+            try:
+                approved = bool(await self.auto_approver(task.base_task.task_id, auto_why))
+            except Exception as exc:  # the human gate is the safe fallback for anything unexpected
+                detail = str(exc)
+            if not approved:
+                await self.update_task(task.base_task.task_id, lambda latest: policy.record_event(
+                    latest, "escalated", "Automatic approval did not complete; waiting for a human" + (f": {detail}" if detail else "")))
+            return
         if project.workflow.require_final_human_approval:
             task.sdlc_status = SDLCStatus.pending_approval
             task.transition_reason = "All stages finished; waiting for final approval"
+            if project.workflow.auto_final_approval:
+                policy.record_event(task, "escalated", f"Final approval needs a human: {auto_why}")
         else:
             task.sdlc_status = SDLCStatus.done
             task.transition_reason = "All stages finished"
@@ -2234,6 +2302,7 @@ class SDLCTaskManager:
             response_options=response_options,
         )
         task.human_interventions.append(intervention)
+        policy.record_event(task, "escalated", f"Waiting for a human: {reason}", agent)
         task.previous_status = task.sdlc_status
         task.sdlc_status = SDLCStatus.human_review
         task.transition_reason = reason
@@ -2345,6 +2414,7 @@ class SDLCTaskManager:
         answer = intervention.response.casefold()
         kind = intervention.context.get("kind", "manual")
         stage = intervention.context.get("stage") or intervention.requesting_agent
+        policy.record_event(task, "human_response", f"{kind}: {intervention.response[:200]}", stage, actor="human")
         task.updated_at = datetime.now(timezone.utc)
 
         if answer in self.STOP_WORDS:

@@ -26,7 +26,9 @@ from .sdlc_git import (
     commit_message, ensure_workspace, git_root, validate_repository,
 )
 from .git_flow import SANDBOX, GitBusyError, GitRepo, create_task_branch, GitFlowError, MergeConflictError, commit_task_work, integrate_task, record_failure, record_merge, task_branch_name
-from .releases import IntegratedTask, MergeEntry, ReleaseError, ReleaseInputError, ReleaseManager, ReleaseStore, repository_id_for
+from . import sdlc_policy as policy
+from .sdlc_policy import compute_metrics, next_release_version
+from .releases import HOLDING, ReleaseStatus, IntegratedTask, MergeEntry, ReleaseError, ReleaseInputError, ReleaseManager, ReleaseStore, repository_id_for
 from pydantic import BaseModel
 
 scheduler_worker: asyncio.Task | None = None
@@ -1272,7 +1274,10 @@ async def integrate_sdlc_task(task: SDLCTask, project: SDLCProjectConfig | None)
         try:
             await commit_task_work(root, repo.branch, commit_message(task))
             result = await integrate_task(root, task.base_task.task_id, repo.branch, token)
-            record = lambda latest, key=key, result=result: record_merge(latest.repos[key].integration, Path(key), result)
+            def record(latest, key=key, result=result):
+                record_merge(latest.repos[key].integration, Path(key), result)
+                policy.record_event(latest, "merged", f"{Path(key).name}: `{latest.repos[key].branch}` merged into develop "
+                                    f"({result.merge_commit_sha[:10] or 'already merged'})")
         except (GitFlowError, RuntimeError) as exc:
             problems.append(f"{root.name}: {exc}")
             record = lambda latest, key=key, exc=exc: record_failure(latest.repos[key].integration, Path(key), exc)
@@ -1280,10 +1285,10 @@ async def integrate_sdlc_task(task: SDLCTask, project: SDLCProjectConfig | None)
     return problems
 
 
-@app.post("/api/sdlc/tasks/{task_id}/approve", response_model=SDLCTask)
-async def approve_sdlc_task(task_id: str, _: str = Depends(require_admin)):
-    """Final human approval: merge the task branch into `develop`, and only after Git confirmed every merge
-    move the task from pending_approval to done. A conflict or any Git failure leaves it pending_approval."""
+async def finalize_approval(task_id: str, actor: str = "human", reason: str = "") -> SDLCTask:
+    """The final approval, shared by the human button and the automatic policy: merge the task branch into `develop`
+    and only after Git confirmed every merge move the task from pending_approval to done. A conflict or any Git
+    failure leaves it pending_approval (HTTP 409 with the reason)."""
     task = await sdlc_task_manager.load_task(task_id)
     if not task:
         raise HTTPException(404, f"SDLC task {task_id} not found")
@@ -1298,7 +1303,8 @@ async def approve_sdlc_task(task_id: str, _: str = Depends(require_admin)):
         if problems:
             message = "Final approval did not complete; the task is still waiting for approval. " + " ".join(problems)
             await sdlc_task_manager.update_task(task_id, lambda latest: (
-                setattr(latest, "transition_reason", message[:1000]), latest.base_task.logs.append(message[:2000])))
+                setattr(latest, "transition_reason", message[:1000]), latest.base_task.logs.append(message[:2000]),
+                policy.record_event(latest, "escalated", "Merge into develop failed: " + " ".join(problems)[:300], actor=actor)))
             raise HTTPException(409, message)
 
         def approve(latest: SDLCTask) -> None:
@@ -1307,6 +1313,10 @@ async def approve_sdlc_task(task_id: str, _: str = Depends(require_admin)):
             latest.previous_status = latest.sdlc_status
             latest.sdlc_status = SDLCStatus.done
             latest.transition_reason = "Approved by human; merged into develop" if latest.repos else "Approved by human"
+            if actor != "human":
+                latest.transition_reason = latest.transition_reason.replace("Approved by human", "Approved automatically")
+            policy.record_event(latest, "approved" if actor == "human" else "auto_approved",
+                                reason or "Final approval", actor=actor)
             latest.updated_at = datetime.now(timezone.utc)
 
         try:
@@ -1321,9 +1331,67 @@ async def approve_sdlc_task(task_id: str, _: str = Depends(require_admin)):
                 setattr(latest, "transition_reason", latest.transition_reason + ". " + " ".join(notes)),
                 latest.base_task.logs.extend(notes),
             )) or task
-        return task
     finally:
         _integrating.discard(task_id)
+    if project:
+        await maybe_auto_release(project)
+    return task
+
+
+@app.post("/api/sdlc/tasks/{task_id}/approve", response_model=SDLCTask)
+async def approve_sdlc_task(task_id: str, _: str = Depends(require_admin)):
+    """Final human approval (see finalize_approval)."""
+    return await finalize_approval(task_id, actor="human", reason="Approved by the administrator")
+
+
+async def auto_approve_task(task_id: str, reason: str) -> bool:
+    """The policy hook of SDLCTaskManager: approve a low-risk task without a human. False = a human must decide."""
+    try:
+        await finalize_approval(task_id, actor="taskloom", reason=reason)
+    except HTTPException as exc:
+        print(f"[SDLC] Automatic approval of {task_id} did not complete: {exc.detail}", flush=True)
+        return False
+    return True
+
+
+sdlc_task_manager.auto_approver = auto_approve_task
+
+
+async def maybe_auto_release(project: SDLCProjectConfig) -> str | None:
+    """Policy `auto_release`: when enough of this project's tasks sit unreleased in develop, build and validate a release.
+    The release then waits for a human approval like any other: Taskloom never merges into sandbox by itself."""
+    workflow = project.workflow
+    if not workflow.auto_release:
+        return None
+    try:
+        rows = [row for row in await release_manager.eligible_tasks()
+                if row["eligible"] and row["workflow"] == "SDLC" and row["project_id"] == project.id]
+        by_repository: dict[str, list[dict]] = {}
+        for row in rows:
+            by_repository.setdefault(row["repository_id"], []).append(row)
+        for repository_id, items in by_repository.items():
+            if len(items) < max(1, workflow.auto_release_min_tasks):
+                continue
+            releases = [r for r in release_manager.store.list() if r.repository_id == repository_id]
+            if any(r.status in (ReleaseStatus.draft, ReleaseStatus.preparing, ReleaseStatus.testing, ReleaseStatus.waiting_approval,
+                                ReleaseStatus.approved, ReleaseStatus.merging) for r in releases):
+                continue  # one release at a time per repository: finish (or cancel) the open one first
+            version = next_release_version([r.version for r in releases if r.status in HOLDING])
+            items.sort(key=lambda item: min((m.get("merged_at") or "") for m in item["pending_merges"]))  # oldest merge first
+            release = await release_manager.create(version, repository_id, [item["task_id"] for item in items], "taskloom-auto")
+            release_manager.store.update(release.id, lambda r: r.logs.append(
+                f"Created automatically: {len(items)} tasks reached develop (policy auto_release). A human approves the merge into sandbox."))
+            return release.id
+    except Exception as exc:  # a release draft is a convenience: never let it break the task's approval
+        print(f"[SDLC] Automatic release draft failed: {exc}", flush=True)
+    return None
+
+
+@app.get("/api/sdlc/metrics")
+async def sdlc_metrics(project: str = ""):
+    """Delivery metrics: throughput, cycle time, first-pass and automation rates, stage timings, risk mix."""
+    tasks_ = await sdlc_task_manager.list_tasks(project_filter=project or None)
+    return compute_metrics(tasks_)
 
 
 async def publish_approved_task(task_id: str) -> list[str]:

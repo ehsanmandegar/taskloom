@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   BarChart3, ClipboardList, RefreshCw, Users, Play, Pause, CheckCircle, XCircle, 
   Clock, AlertCircle, FileCode, GitBranch, GitPullRequest, MessageCircle, Eye,
-  ChevronRight, ChevronDown, Filter, Search, Download, Upload, Settings, Plus, X, Square
+  ChevronRight, ChevronDown, Filter, Gauge, Search, Download, Upload, Settings, Plus, X, Square
 } from 'lucide-react';
 import { UiTag } from './ui_tag';
 import { ModalShell, confirmDialog } from './ui.jsx';
+import { AutonomyFields, MetricsPanel, RiskBadge, Timeline } from './sdlc_automation.jsx';
+import { withAutonomyDefaults, autonomySummary } from './sdlc_automation.js';
 import { GitPanel } from './release_management.jsx';
 import { storedAdminHeaders } from './releases.js';
 
@@ -861,6 +863,14 @@ export default function SDLCDashboard() {
           <Settings size={16} />
           پروژه‌ها
         </button>
+
+        <button
+          className={`sdlc-tab ${activeTab === 'metrics' ? 'active' : ''}`}
+          onClick={() => setActiveTab('metrics')}
+        >
+          <Gauge size={16} />
+          آمار و خودکارسازی
+        </button>
       </div>
       
       {/* Filters */}
@@ -1192,12 +1202,16 @@ export default function SDLCDashboard() {
                   baseBranch={repo.base_branch || 'sandbox'} commitSha={repo.commit_sha} integration={repo.integration} />
               ))}
 
+              <RiskBadge risk={selectedTask.risk} />
+
               {(selectedTask.transition_reason || selectedTask.revision_count > 0) && (
                 <div className="sdlc-detail-section sdlc-detail-status">
                   {selectedTask.transition_reason && <p>{selectedTask.transition_reason}</p>}
                   {selectedTask.revision_count > 0 && <p>دفعات بازبینی: {selectedTask.revision_count}</p>}
                 </div>
               )}
+
+              <Timeline events={selectedTask.timeline} />
 
               {/* Questions stages asked the analyst (and the human, through the analyst) */}
               {(selectedTask.stage_questions || []).length > 0 && (
@@ -1455,6 +1469,8 @@ export default function SDLCDashboard() {
       )}
 
       {/* Projects view */}
+      {activeTab === 'metrics' && <MetricsPanel project={selectedProject} />}
+
       {activeTab === 'projects' && (
         <div className="sdlc-projects">
           <div className="sdlc-projects-header">
@@ -1722,6 +1738,11 @@ export default function SDLCDashboard() {
                         <span>تأیید نهایی توسط انسان</span>
                       </label>
                     </div>
+
+                    <AutonomyFields
+                      workflow={withAutonomyDefaults(newProject.workflow)}
+                      onChange={(patch) => setNewProject({...newProject, workflow: {...withAutonomyDefaults(newProject.workflow), ...patch}})}
+                    />
                   </>
                 )}
 
@@ -1911,6 +1932,7 @@ export default function SDLCDashboard() {
                       <div className="sdlc-review-row"><span>اجرای ترتیبی</span><span>{newProject.workflow.sequential ? 'بله' : 'خیر'}</span></div>
                       <div className="sdlc-review-row"><span>حداکثر Revision</span><span>{newProject.workflow.max_revision_attempts}</span></div>
                       <div className="sdlc-review-row"><span>تأیید تحلیل</span><span>{newProject.workflow.require_analysis_approval ? 'الزامی' : 'اختیاری'}</span></div>
+                      <div className="sdlc-review-row"><span>تصمیم‌های خودکار</span><span>{autonomySummary(newProject.workflow)}</span></div>
                       <div className="sdlc-review-row"><span>تأیید نهایی</span><span>{newProject.workflow.require_final_human_approval ? 'الزامی' : 'اختیاری'}</span></div>
                     </div>
 
