@@ -18,6 +18,7 @@ from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, Co
 from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse
 from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
 from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError, command
+from . import run_processes
 from .sdlc_git import (
     GitHubError, commit_and_push, create_github_repository, create_pull_request, describe_new_repository,
     ensure_workspace, git_root, validate_repository,
@@ -43,6 +44,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        run_processes.stop_all()
         manager.release_data_dir()
         scheduler_worker.cancel()
         with suppress(asyncio.CancelledError):
@@ -993,8 +995,48 @@ async def delete_sdlc_project(project_id: str):
         deleted = await sdlc_task_manager.delete_project_tasks(project_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    run_processes.stop_project(project_id)
     sdlc_project_manager.delete_project(project_id)
     return {"project_id": project_id, "deleted_tasks": deleted}
+
+
+def _run_target(project_id: str, stage: str) -> tuple[str, str]:
+    """(command, folder) of a stage's ▶ Run button."""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project or stage not in project.agents:
+        raise HTTPException(404, f"Project {project_id} or its agent {stage} not found")
+    cmd = project.agents[stage].run_command.strip()
+    if not cmd:
+        raise HTTPException(400, f"The {stage} stage has no run command; set one in the project settings")
+    folder = project.stage_path(stage)
+    if not folder or not Path(folder).expanduser().is_dir():
+        raise HTTPException(400, f"The {stage} stage's folder does not exist: {folder or '(no project path set)'}")
+    return cmd, str(Path(folder).expanduser())
+
+
+@app.get("/api/sdlc/projects/{project_id}/run")
+async def sdlc_run_overview(project_id: str):
+    """Which stages of a project are running their run command right now."""
+    return {"running": run_processes.running_stages(project_id)}
+
+
+@app.post("/api/sdlc/projects/{project_id}/agents/{stage}/run/start")
+async def start_stage_run(project_id: str, stage: str):
+    cmd, folder = _run_target(project_id, stage)
+    try:
+        return run_processes.start(project_id, stage, cmd, folder)
+    except OSError as exc:
+        raise HTTPException(400, f"Could not start the command: {exc}") from exc
+
+
+@app.post("/api/sdlc/projects/{project_id}/agents/{stage}/run/stop")
+async def stop_stage_run(project_id: str, stage: str):
+    return await asyncio.to_thread(run_processes.stop, project_id, stage)
+
+
+@app.get("/api/sdlc/projects/{project_id}/agents/{stage}/run")
+async def stage_run_status(project_id: str, stage: str):
+    return run_processes.status(project_id, stage)
 
 
 @app.delete("/api/sdlc/tasks/{task_id}")

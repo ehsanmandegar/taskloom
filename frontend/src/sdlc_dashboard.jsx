@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   BarChart3, ClipboardList, RefreshCw, Users, Play, Pause, CheckCircle, XCircle, 
   Clock, AlertCircle, FileCode, GitBranch, GitPullRequest, MessageCircle, Eye,
-  ChevronRight, ChevronDown, Filter, Search, Download, Upload, Settings, Plus, X
+  ChevronRight, ChevronDown, Filter, Search, Download, Upload, Settings, Plus, X, Square
 } from 'lucide-react';
 import { UiTag } from './ui_tag';
 
@@ -1772,6 +1772,19 @@ export default function SDLCDashboard() {
                                 </div>
                               </div>
 
+                              <div className="sdlc-form-group">
+                                <label>Run Command (دکمهٔ ▶) <UiTag id="M4-3C" name="RunCommand" /></label>
+                                <input
+                                  type="text" dir="ltr"
+                                  value={newProject.agents[key].run_command || ''}
+                                  onChange={(e) => updateAgent(key, 'run_command', e.target.value)}
+                                  placeholder={key === 'frontend' ? 'npm run dev' : key === 'backend' ? 'uvicorn app.main:app --reload' : ''}
+                                />
+                                <small className="sdlc-intervention-hint">
+                                  در پوشهٔ همین agent (ریپو یا Project Path) اجرا می‌شود. در کارت پروژه دکمهٔ ▶ / ■ نمایش داده می‌شود.
+                                </small>
+                              </div>
+
                               <RepositorySettings
                                 project={newProject}
                                 stage={key}
@@ -1913,6 +1926,8 @@ export default function SDLCDashboard() {
                     </div>
                   </div>
                   
+                  <ProjectRunControls project={project} />
+
                   <div className="sdlc-project-actions">
                     <button className="sdlc-action-btn" onClick={() => handleEditProject(project)}>ویرایش</button>
                     <button className="sdlc-action-btn" onClick={() => handleViewProject(project)}>مشاهده</button>
@@ -1925,6 +1940,79 @@ export default function SDLCDashboard() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// M4-3C: ▶ / ■ buttons for the stages of a project that have a run command (dev servers etc.).
+function ProjectRunControls({ project }) {
+  const stages = Object.entries(project.agents || {}).filter(([, a]) => a.enabled && (a.run_command || '').trim());
+  const [runs, setRuns] = useState({});   // stage -> status from the server
+  const [busy, setBusy] = useState({});
+  const [openLog, setOpenLog] = useState('');
+  const stageKey = stages.map(([s]) => s).join(',');
+
+  useEffect(() => {
+    if (!stageKey) return undefined;
+    let alive = true;
+    const poll = async () => {
+      for (const stage of stageKey.split(',')) {
+        try {
+          const data = await readJsonOrThrow(await fetch(`${API}/api/sdlc/projects/${project.id}/agents/${stage}/run`));
+          if (alive) setRuns(current => ({ ...current, [stage]: data }));
+        } catch { /* backend briefly unavailable */ }
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [project.id, stageKey]);
+
+  if (stages.length === 0) return null;
+
+  const act = async (stage, action) => {
+    setBusy(current => ({ ...current, [stage]: true }));
+    try {
+      const data = await readJsonOrThrow(await fetch(`${API}/api/sdlc/projects/${project.id}/agents/${stage}/run/${action}`, { method: 'POST' }));
+      setRuns(current => ({ ...current, [stage]: data }));
+      if (action === 'start') setOpenLog(stage);
+    } catch (err) {
+      alert(`[M4-3C Run] ❌ ${err.message}`);
+    } finally {
+      setBusy(current => ({ ...current, [stage]: false }));
+    }
+  };
+
+  return (
+    <div className="sdlc-run-controls" data-ui="M4-3C">
+      {stages.map(([stage, agent]) => {
+        const run = runs[stage] || {};
+        return (
+          <div key={stage} className="sdlc-run-row" style={{ marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {run.running ? (
+                <button className="sdlc-btn sdlc-btn-secondary" disabled={busy[stage]} onClick={() => act(stage, 'stop')} title="توقف">
+                  <Square size={14} /> {stage}
+                </button>
+              ) : (
+                <button className="sdlc-btn sdlc-btn-primary" disabled={busy[stage]} onClick={() => act(stage, 'start')} title="اجرا">
+                  <Play size={14} /> {stage}
+                </button>
+              )}
+              <code dir="ltr" style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{agent.run_command}</code>
+              <span className={`sdlc-badge ${run.running ? 'green' : 'gray'}`}>
+                {run.running ? 'در حال اجرا' : run.exit_code != null ? `پایان (${run.exit_code})` : 'متوقف'}
+              </span>
+              {run.log !== undefined && (
+                <button className="sdlc-action-btn" onClick={() => setOpenLog(openLog === stage ? '' : stage)}>لاگ</button>
+              )}
+            </div>
+            {openLog === stage && (
+              <pre className="sdlc-live-output" dir="ltr" style={{ maxHeight: 180, overflow: 'auto' }}>{run.log || '(بدون خروجی)'}</pre>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
