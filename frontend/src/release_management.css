@@ -58,3 +58,7 @@ html[data-theme="dark"] .rm,html[data-theme="dark"] .rm-git-panel{--rm-surface:v
 .rm-check{flex:0 0 auto}
 .rm-search input{padding:9px 0!important}
 .rm-meta,.rm-git-panel dl{grid-template-columns:max-content max-content;justify-content:start}
+
+/* `.rm label{display:block}` outranked `.rm-search{display:flex}`, stacking the icon above the input (58px tall) */
+.rm .rm-search{display:flex;align-items:center;min-height:40px}
+.rm .rm-check{display:flex;align-items:center}
