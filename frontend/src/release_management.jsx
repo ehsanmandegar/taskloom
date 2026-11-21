@@ -1,6 +1,7 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {AlertTriangle, CheckCircle2, GitBranch, GitMerge, Package, RefreshCw, Search, XCircle} from 'lucide-react';
 import './release_management.css';
+import {confirmDialog} from './ui.jsx';
 import {
   adminHeaders, createBlocker, filterTasks, gitIntegrationSummary, hasBusyRelease, pruneSelection, releaseActions,
   releaseStatusLabel, releaseStatusTone, shortSha, toggleSelection,
@@ -136,9 +137,9 @@ export default function ReleaseManagement() {
     if (created) { setOpenId(created.id); setSelected([]); setVersion(''); setReviewing(false); }
   }
 
-  function approve(release) {
+  async function approve(release) {
     const ids = release.tasks.map(task => task.task_id).join('، ');
-    if (!window.confirm(`تأیید نهایی نسخهٔ ${release.version}؟\nبا تأیید، برنچ ${release.release_branch} (شامل ${ids}) در ${release.target_branch} ادغام می‌شود.`)) return;
+    if (!await confirmDialog(`تأیید نهایی نسخهٔ ${release.version}؟\nبا تأیید، برنچ ${release.release_branch} (شامل ${ids}) در ${release.target_branch} ادغام می‌شود.`)) return;
     act('approve', `/api/releases/${release.id}/approve`, null, () => `نسخهٔ ${release.version} تأیید شد؛ ادغام در ${release.target_branch} در حال انجام است.`);
   }
 
@@ -266,7 +267,7 @@ function ReleaseDetails({release, busy, onApprove, onAct}) {
           {actions.start && <button type="button" className="rm-btn" disabled={!!busy} onClick={() => onAct('start', 'start', () => 'آماده‌سازی نسخه شروع شد.')}>شروع</button>}
           {actions.retry && <button type="button" className="rm-btn" disabled={!!busy} onClick={() => onAct('retry', 'retry', () => 'تلاش مجدد شروع شد.')}><RefreshCw size={14} /> تلاش مجدد</button>}
           {actions.rebuild && <button type="button" className="rm-btn" disabled={!!busy} onClick={() => onAct('rebuild', 'rebuild', () => 'بازسازی برنچ از sandbox فعلی شروع شد.')}>بازسازی از sandbox</button>}
-          {actions.cancel && <button type="button" className="rm-btn rm-danger" disabled={!!busy} onClick={() => window.confirm(`نسخهٔ ${release.version} لغو شود؟ برنچ‌ها حذف نمی‌شوند.`) && onAct('cancel', 'cancel', () => 'نسخه لغو شد.')}><XCircle size={14} /> لغو</button>}
+          {actions.cancel && <button type="button" className="rm-btn rm-danger" disabled={!!busy} onClick={async () => (await confirmDialog(`نسخهٔ ${release.version} لغو شود؟ برنچ‌ها حذف نمی‌شوند.`, {danger: true, confirmText: 'لغو نسخه'})) && onAct('cancel', 'cancel', () => 'نسخه لغو شد.')}><XCircle size={14} /> لغو</button>}
         </div>
       </div>
 

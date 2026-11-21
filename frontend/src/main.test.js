@@ -183,7 +183,7 @@ test('distinguishes agent replies and shows a typing indicator while the agent r
   assert.match(source, /agentTyping=task&&\['queued','running'\]\.includes\(task\.status\)/);
   assert.match(source, /chat-typing/);
   assert.match(source, /\$\{taskAgentLabel\} در حال پاسخ است/);
-  assert.match(styles, /\.chat-message\.assistant\{[^}]*background:#eef1fb/);
+  assert.match(styles, /\.chat-message\.assistant\{[^}]*background:var\(--blue-3\)/);
   assert.match(styles, /@keyframes typing-dot/);
 });
 
@@ -397,7 +397,7 @@ test('keeps long chat and execution output within proportional workspace widths'
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 
   assert.match(styles, /grid-template-columns:minmax\(0,36%\) minmax\(0,1fr\)/);
-  assert.match(styles, /html\[data-theme="dark"\] \.card\{\s*width:100%;\s*min-width:0;\s*max-width:100%/);
+  assert.doesNotMatch(styles, /\.card\{[^}]*width:1000px/); // the old dark theme's fixed-width card is gone
   assert.match(styles, /\.chat-message\{\s*width:90%;\s*min-width:0;\s*max-width:90%/);
   assert.match(styles, /\.chat-message p,[\s\S]*?overflow-wrap:anywhere;[\s\S]*?word-break:break-word/);
   assert.match(styles, /pre\{\s*min-width:0;\s*max-width:100%;[\s\S]*?overflow-wrap:anywhere/);
