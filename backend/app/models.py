@@ -383,6 +383,7 @@ class AgentConfig(BaseModel):
     timeout_seconds: int = 300  # Ollama request timeout
     cli_timeout_seconds: int = 3600  # Claude Code / Codex run timeout
     max_retries: int = 2
+    setup_command: str = ""  # e.g. "npm install" / "pip install -r requirements.txt"; the dialog's Install button
     run_command: str = ""  # e.g. "npm run dev"; started by the ▶ button, runs in the stage's folder
     repository: RepositoryConfig = Field(default_factory=RepositoryConfig)
     github_config: dict[str, str | bool] = Field(default_factory=lambda: {

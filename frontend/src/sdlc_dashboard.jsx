@@ -1773,6 +1773,19 @@ export default function SDLCDashboard() {
                               </div>
 
                               <div className="sdlc-form-group">
+                                <label>Install Command (نصب وابستگی‌ها)</label>
+                                <input
+                                  type="text" dir="ltr"
+                                  value={newProject.agents[key].setup_command || ''}
+                                  onChange={(e) => updateAgent(key, 'setup_command', e.target.value)}
+                                  placeholder={key === 'frontend' ? 'npm install' : key === 'backend' ? 'pip install -r requirements.txt' : ''}
+                                />
+                                <small className="sdlc-intervention-hint">
+                                  با دکمهٔ «نصب» در پنجرهٔ اجرا (▶ اجرا) در پوشهٔ همین agent اجرا می‌شود.
+                                </small>
+                              </div>
+
+                              <div className="sdlc-form-group">
                                 <label>Run Command (دکمهٔ ▶) <UiTag id="M4-3C" name="RunCommand" /></label>
                                 <input
                                   type="text" dir="ltr"
@@ -2009,6 +2022,12 @@ function RunGuideDialog({ project, stages, onClose }) {
     })));
   });
   const stop = () => guarded(async () => setRun(await readJsonOrThrow(await fetch(`${base}/run/stop`, { method: 'POST' }))));
+  const setupCommand = (project.agents?.[stage]?.setup_command || '').trim();
+  const install = () => guarded(async () => {
+    setRun(await readJsonOrThrow(await fetch(`${base}/run/start`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'setup' }),
+    })));
+  });
 
   return (
     <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -2046,6 +2065,10 @@ function RunGuideDialog({ project, stages, onClose }) {
           )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '10px 0', flexWrap: 'wrap' }}>
             <button className="sdlc-btn sdlc-btn-secondary" disabled={busy || !dirty} onClick={saveOnly}>ذخیره</button>
+            <button className="sdlc-btn sdlc-btn-secondary" disabled={busy || run.running || !setupCommand} onClick={install}
+              title={setupCommand || 'در تنظیمات پروژه (Install Command) دستور نصب را وارد کنید'}>
+              نصب{setupCommand ? `: ${setupCommand}` : ''}
+            </button>
             {run.running ? (
               <button className="sdlc-btn sdlc-btn-secondary" disabled={busy} onClick={stop}><Square size={14} /> توقف</button>
             ) : (

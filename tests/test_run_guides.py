@@ -75,3 +75,21 @@ def test_format_claude_event():
     assert run_processes.format_claude_event(line) == "$ Bash: npm test"
     assert run_processes.format_claude_event(json.dumps({"type": "system"})) == ""
     assert run_guides.GUIDE_FILES["test"] == "RUN_TEST.md"
+
+
+def test_setup_mode_runs_the_install_command_in_the_stage_folder(tmp_path, monkeypatch):
+    folder = setup_project(tmp_path, monkeypatch)
+    project = main_module.sdlc_project_manager.get_project("p")
+    assert client.post("/api/sdlc/projects/p/agents/backend/run/start", json={"mode": "setup"}).status_code == 400
+
+    project.agents["backend"].setup_command = f'"{sys.executable}" -c "import os; print(os.getcwd())"'
+    main_module.sdlc_project_manager.save_project(project)
+    assert client.post("/api/sdlc/projects/p/agents/backend/run/start", json={"mode": "setup"}).json()["mode"] == "setup"
+    for _ in range(50):
+        status = client.get("/api/sdlc/projects/p/agents/backend/run").json()
+        if status["exit_code"] is not None:
+            break
+        time.sleep(0.1)
+    time.sleep(0.2)
+    status = client.get("/api/sdlc/projects/p/agents/backend/run").json()
+    assert status["exit_code"] == 0 and str(folder) in status["log"]

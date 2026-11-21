@@ -1057,8 +1057,15 @@ async def start_stage_run(project_id: str, stage: str, body: Optional[RunStartRe
         if mode is None:
             cmd, folder = _run_target(project_id, stage)
             return run_processes.start(project_id, stage, cmd, folder)
+        if mode == "setup":
+            project, folder = _stage_folder(project_id, stage)
+            cmd = project.agents[stage].setup_command.strip()
+            if not cmd:
+                raise HTTPException(400, f"The {stage} stage has no install command; set one in the project settings")
+            return run_processes.start_process(project_id, stage, lambda key: run_processes.RunProcess(
+                key, cmd, cmd, str(folder), mode="setup"))
         if mode not in run_guides.GUIDE_FILES:
-            raise HTTPException(400, "mode must be 'test' or 'real'")
+            raise HTTPException(400, "mode must be 'test', 'real' or 'setup'")
         project, folder = _stage_folder(project_id, stage)
         guide = run_guides.guide_path(folder, mode)
         if not guide.is_file() or not guide.read_text(encoding="utf-8", errors="replace").strip():
