@@ -254,7 +254,7 @@ def record_agent_process(pid_file: Path, stage: str):
 
 
 async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, runner: StageRunner,
-                        pid_file: Path | None = None, repo_token: str | None = None) -> AgentResult:
+                        pid_file: Path | None = None, repo_token: str | None = None, persist_project=None) -> AgentResult:
     """Run one SDLC stage with Claude Code or Codex inside the stage's folder (or the project repository)."""
     agent_type = AgentType.claude if runner == StageRunner.claude else AgentType.codex
     display_name = agent_name(agent_type)
@@ -262,7 +262,7 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     has_repo = repository.mode.value != "none"
     if has_repo:
         # Clone (existing repo) or initialise (new repo) this stage's repository before it runs.
-        await ensure_workspace(project, stage, repo_token)
+        await ensure_workspace(project, stage, repo_token, persist_project, lambda message: task.base_task.logs.append(message))
     stage_path = project.stage_path(stage)
     if not stage_path:
         raise RuntimeError(f"Stage '{stage}' needs a project_path or a repository to run {display_name}")

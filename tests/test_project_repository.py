@@ -280,3 +280,50 @@ def test_stages_work_in_their_own_repos_and_see_each_other(tmp_path, remote, mon
     assert git(frontend_repo, "branch", "--show-current") == "sdlc/t1"
     assert backend_repo in seen["args"][seen["args"].index("--add-dir") + 1]
     assert f"backend: `{backend_repo}`" in seen["args"][-1]  # prompt lists the other stage's folder
+
+
+def test_create_mode_heals_an_unborn_repo_names_itself_and_creates_the_remote(tmp_path, monkeypatch):
+    """Empty repo on a not-yet-existing base branch + empty name + token => everything is done automatically."""
+    folder = tmp_path / "ws" / "analysis"
+    folder.mkdir(parents=True)
+    git(folder, "init", "-q", "-b", "sandbox")  # what a failed first attempt leaves behind: no commits
+    project = project_with(tmp_path, analysis=RepositoryConfig(mode="create", local_path=str(folder), default_branch="sandbox", name=""))
+    empty = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(empty)], check=True)
+    monkeypatch.setattr(sdlc_git, "clean_github_url", lambda url: str(empty))
+    taken = {"shop-analysis"}
+    created = []
+
+    async def fake_api(method, path, token, body=None):
+        if path == "/user":
+            return 200, {"login": "ehsan"}
+        if body["name"] in taken:
+            return 422, {"message": "Repository creation failed.", "errors": [{"message": "name already exists on this account"}]}
+        created.append(body["name"])
+        return 201, {"html_url": f"https://github.com/ehsan/{body['name']}"}
+
+    monkeypatch.setattr(sdlc_git, "github_api", fake_api)
+    saved, notes = [], []
+
+    path = run(sdlc_git.ensure_workspace(project, "analysis", TOKEN, saved.append, notes.append))
+
+    repo = project.stage_repository("analysis")
+    assert git(path, "log", "--format=%s", "sandbox") == "Initial commit"
+    assert repo.name == created[0] == "shop-analysis-2"  # the first name was taken, so it picked the next one
+    assert repo.url == "https://github.com/ehsan/shop-analysis-2"
+    assert saved == [project] and any("Created GitHub repository" in n for n in notes)
+    assert git(empty, "log", "--format=%s", "sandbox") == "Initial commit"
+    # a task can now branch from the base
+    run(sdlc_git.prepare_task_branch(make_task(), path, "sandbox"))
+    assert git(path, "branch", "--show-current") == "sdlc/t1"
+
+
+def test_create_mode_without_a_token_stays_local_but_still_gets_its_base_branch(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    project = project_with(tmp_path, analysis=RepositoryConfig(mode="create", local_path=str(tmp_path / "a"), default_branch="sandbox"))
+    saved = []
+
+    path = run(sdlc_git.ensure_workspace(project, "analysis", None, saved.append))
+
+    assert git(path, "branch", "--list", "sandbox").strip().endswith("sandbox")
+    assert project.stage_repository("analysis").name == "shop-analysis" and saved == [project]

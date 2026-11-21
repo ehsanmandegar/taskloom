@@ -1891,6 +1891,10 @@ class SDLCTaskManager:
     def agent_token(self, project_id: str, stage: str) -> str:
         return SDLCProjectManager(self.data_dir.parent / "projects").github_token(project_id, stage)
 
+    def persist_project(self, project: SDLCProjectConfig) -> None:
+        """Write back what automation decided (repository name, URL, base branch) so the forms show it."""
+        SDLCProjectManager(self.data_dir.parent / "projects").save_project(project)
+
     def agent_pid_file(self, task_id: str) -> Path:
 
         return self.data_dir / task_id / "agent.pid"
@@ -2004,7 +2008,7 @@ class SDLCTaskManager:
                     result = await loop.run_in_executor(None, _ollama_runner.run_agent, stage, task, project, previous)
             else:
                 result = await run_cli_stage(stage, task, project, agent_cfg, runner, self.agent_pid_file(task_id),
-                                             self.agent_token(project.id, stage))
+                                             self.agent_token(project.id, stage), self.persist_project)
 
             print(f"[SDLC] {stage} finished for {task_id}: {result.status} - {result.summary[:120]}", flush=True)
 

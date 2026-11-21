@@ -69,8 +69,17 @@ async def prepare_task_branch(task: SDLCTask, workdir: Path, base_branch: str,
                 source, base = await base_branch_ref(root, base_branch), base_branch
             except RuntimeError:
                 pass
+    # A brand-new repository has no commits, so its base branch (e.g. `sandbox`) is not a valid ref yet:
+    # `git switch -c <branch> sandbox` fails with "invalid reference". Rename the unborn branch instead.
+    code, _ = await command(["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], root)
+    unborn = code != 0
     if current != branch:
-        args = ["git", "switch", branch] if branch_exists else ["git", "switch", "-c", branch, source]
+        if branch_exists:
+            args = ["git", "switch", branch]
+        elif unborn:
+            args = ["git", "switch", "-c", branch]
+        else:
+            args = ["git", "switch", "-c", branch, source]
         code, output = await command(args, root)
         if code:
             raise RuntimeError(output.strip() or f"Could not switch {root} to {branch}")
@@ -114,16 +123,57 @@ def clean_github_url(repo_url: str) -> str:
     return f"https://github.com/{owner}/{name}.git"
 
 
-async def ensure_workspace(project, stage: str, token: str | None) -> Path:
+def safe_repo_name(text: str) -> str:
+    """A GitHub-valid repository name made from free text."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.") or "repo"
+
+
+async def commit_with_fallback(path: Path, message: str, allow_empty: bool = False) -> tuple[int, str]:
+    """git commit that never needs a human: falls back to a Taskloom identity when git has none."""
+    tail = ["commit", "-q", *(["--allow-empty"] if allow_empty else []), "-m", message]
+    code, output = await command(["git", *tail], path)
+    lowered = output.lower()
+    if code and ("identity" in lowered or "tell me who you are" in lowered):
+        code, output = await command(["git", "-c", "user.name=Taskloom", "-c", "user.email=taskloom@localhost", *tail], path)
+    return code, output
+
+
+async def heal_local_repository(path: Path, project, stage: str, base: str) -> None:
+    """Make a from-scratch repository usable without any manual git step.
+
+    * no commits yet  -> create the initial commit (README when the folder is empty, else everything in it)
+    * base branch missing (e.g. `sandbox`) -> create it at the current commit
+    """
+    code, _ = await command(["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], path)
+    if code:  # unborn branch
+        if not any(child.name != ".git" for child in path.iterdir()):
+            (path / "README.md").write_text(f"# {project.name} — {stage}\n\n{project.description}\n", encoding="utf-8")
+        await command(["git", "add", "-A"], path)
+        code, output = await commit_with_fallback(path, "Initial commit")
+        if code:  # e.g. everything in the folder is git-ignored: still give the base branch a commit
+            code, output = await commit_with_fallback(path, "Initial commit", allow_empty=True)
+        if code:
+            raise RuntimeError("Initial commit failed: " + output.strip())
+    code, _ = await command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{base}"], path)
+    if code:
+        code, output = await command(["git", "branch", base], path)
+        if code:
+            raise RuntimeError(f"Could not create the base branch `{base}`: {output.strip()}")
+
+
+async def ensure_workspace(project, stage: str, token: str | None, persist=None, log=None) -> Path:
     """Make sure the stage's repository exists locally before the stage runs.
 
     existing: clone `repository.url` into the workspace once (later tasks fetch it).
-    create:   start a local repository with an initial commit; GitHub comes on the first push.
+    create:   fully automatic: init the repo, give it an initial commit and its base branch, pick a name when
+              none was set, and create the private GitHub repo when a token is available. The name/URL that
+              were decided are written back to the project (`persist`) so the forms show them.
     """
     repository = project.stage_repository(stage)
     path = Path(project.stage_path(stage)).expanduser()
     token = resolve_token(token)
     is_repo = (path / ".git").exists()
+    note = log or (lambda message: None)
 
     if repository.mode.value == "existing":
         if not repository.url:
@@ -142,18 +192,36 @@ async def ensure_workspace(project, stage: str, token: str | None) -> Path:
                 raise RuntimeError(f"{path} is a Git repository whose origin is not {repository.url}")
         return path
 
-    if repository.mode.value == "create" and not is_repo:
-        path.mkdir(parents=True, exist_ok=True)
-        branch = repository.default_branch or "main"
-        code, output = await command(["git", "init", "-q", "-b", branch], path)
-        if code:
-            raise RuntimeError(output.strip() or "git init failed")
-        if not any(child.name != ".git" for child in path.iterdir()):
-            (path / "README.md").write_text(f"# {project.name} — {stage}\n\n{project.description}\n", encoding="utf-8")
-        await command(["git", "add", "-A"], path)
-        code, output = await command(["git", "commit", "-q", "-m", "Initial commit"], path)
-        if code:
-            raise RuntimeError("Initial commit failed (is git user.name/user.email configured?): " + output.strip())
+    if repository.mode.value == "create":
+        changed = False
+        base = repository.default_branch or "main"
+        if not repository.default_branch:
+            repository.default_branch, changed = base, True
+        if not is_repo:
+            path.mkdir(parents=True, exist_ok=True)
+            code, output = await command(["git", "init", "-q", "-b", base], path)
+            if code:
+                raise RuntimeError(output.strip() or "git init failed")
+        await heal_local_repository(path, project, stage, base)
+        if not repository.name.strip():
+            repository.name, changed = safe_repo_name(project.stage_repo_name(stage)), True
+            note(f"Repository name was empty; using `{repository.name}`")
+        if repository.url and not await has_remote(path, "origin"):
+            await command(["git", "remote", "add", "origin", clean_github_url(repository.url)], path)
+        if not repository.url:
+            if token:
+                try:
+                    repository.url = await create_github_repository(project, stage, token, allow_rename=True)
+                    changed = True
+                    note(f"Created GitHub repository {repository.url}")
+                except GitHubError as exc:
+                    note(f"GitHub repository was not created (the work stays local): {exc}")
+            else:
+                note("No GitHub token: the repository stays local until a token is saved")
+        if changed and persist:
+            persist(project)
+        return path
+
     if repository.url and (path / ".git").exists() and not await has_remote(path, "origin"):
         await command(["git", "remote", "add", "origin", clean_github_url(repository.url)], path)
     return path
@@ -171,26 +239,35 @@ async def describe_new_repository(project, stage: str, token: str | None) -> dic
             "private": project.stage_repository(stage).private}
 
 
-async def create_github_repository(project, stage: str, token: str | None) -> str:
-    """Create the stage's private repo under the token's account, push the base branch, return its URL."""
+async def create_github_repository(project, stage: str, token: str | None, allow_rename: bool = False) -> str:
+    """Create the stage's private repo under the token's account, push the base branch, return its URL.
+
+    With `allow_rename` a name that is already taken gets -2, -3 ... appended; the final name is stored
+    in the stage's repository config."""
     token = resolve_token(token)
     if not token:
         raise GitHubError("A GitHub token is required to create the repository (save one in the project, or set GITHUB_TOKEN)")
     repository = project.stage_repository(stage)
-    name = project.stage_repo_name(stage)
+    wanted = safe_repo_name(project.stage_repo_name(stage))
     status, user = await github_api("GET", "/user", token)
     if status != 200:
         raise GitHubError("The GitHub token is invalid or expired" if status == 401 else _github_message(status, user))
     owner = user["login"]
-    status, payload = await github_api("POST", "/user/repos", token, {
-        "name": name, "private": repository.private, "auto_init": False,
-        "description": f"{project.name} — {stage} (managed by Taskloom SDLC)"[:350],
-    })
+    name, payload = wanted, {}
+    for attempt in range(1, 6 if allow_rename else 2):
+        name = wanted if attempt == 1 else f"{wanted}-{attempt}"
+        status, payload = await github_api("POST", "/user/repos", token, {
+            "name": name, "private": repository.private, "auto_init": False,
+            "description": f"{project.name} — {stage} (managed by Taskloom SDLC)"[:350],
+        })
+        if not (status == 422 and "already exists" in json.dumps(payload)):
+            break
     if status == 422 and "already exists" in json.dumps(payload):
         raise GitHubError(f"{owner}/{name} already exists on GitHub. Use it as the {stage} stage's existing "
                           "repository, or set a different repository name.")
     if status != 201:
         raise GitHubError(_github_message(status, payload))
+    repository.name = name
     url = payload["html_url"]
     root = Path(project.stage_path(stage))
     if await has_remote(root, "origin"):

@@ -213,3 +213,14 @@ def test_validate_reports_repo_access(api, monkeypatch, status, expected):
         assert body == {"status": "valid", "owner": "acme", "repo": "shop", "default_branch": "main", "can_push": True}
     else:
         assert body["status"] == "invalid" and expected in body["message"]
+
+
+def test_task_branch_in_a_repository_without_commits(tmp_path):
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "sandbox")  # the configured base branch exists only as an unborn branch
+
+    record = run(sdlc_git.prepare_task_branch(make_task(), repo, "sandbox"))
+
+    assert git(repo, "branch", "--show-current") == "sdlc/sdlc-git1"
+    assert record.branch == "sdlc/sdlc-git1"

@@ -137,7 +137,7 @@ def test_stage_result_is_reapplied_after_a_save_conflict(tmp_path, monkeypatch):
     )
     run(manager.save_task(make_task()))
 
-    async def fake_stage(stage, task, project, config, runner, pid_file=None, repo_token=None):
+    async def fake_stage(stage, task, project, config, runner, pid_file=None, repo_token=None, persist_project=None):
         return AgentResult(agent=stage, status="completed", summary="done")
 
     monkeypatch.setattr(sdlc_runner, "run_cli_stage", fake_stage)
