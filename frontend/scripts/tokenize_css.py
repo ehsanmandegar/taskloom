@@ -177,8 +177,8 @@ def main(path: Path):
     stripped = strip_dark(css)
     converted = convert(stripped)
     # cream page/panel backgrounds were mapped to amber: use neutral surfaces instead
-    converted = re.sub(r"(background(?:-color)?:)var\(--(?:amber|orange)-[1-4]\)", r"var(--gray-2)", converted)
-    converted = re.sub(r"(background(?:-color)?:)var\(--(?:amber|orange)-5\)", r"var(--gray-3)", converted)
+    converted = re.sub(r"(background(?:-color)?:)var\(--(?:amber|orange)-[1-4]\)", r"\1var(--gray-2)", converted)
+    converted = re.sub(r"(background(?:-color)?:)var\(--(?:amber|orange)-5\)", r"\1var(--gray-3)", converted)
     converted = converted.replace("var(--amber-2)", "var(--color-panel-solid)")
     path.write_text(converted + "\n", encoding="utf-8")
     print(f"hex colours: {before} -> {len(HEX.findall(converted))}; "

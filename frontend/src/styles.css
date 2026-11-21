@@ -96,7 +96,7 @@
 @media(max-width:520px){.session-controls{gap:5px}
 .session-picker{gap:6px}
 .new-session,.rename-session,.delete-session{padding:0 7px;font-size:10px}}
-:root{font-family:Vazirmatn,system-ui;color:var(--gray-12);var(--gray-2)}
+:root{font-family:Vazirmatn,system-ui;color:var(--gray-12);background:var(--gray-2)}
 *{box-sizing:border-box}
 body{margin:0;min-width:320px;background:radial-gradient(circle at 80% 0,var(--accent-5) 0,transparent 30%),var(--gray-3)}
 .app{min-height:100vh}
@@ -162,7 +162,7 @@ header{padding:0 16px}
 .row,.delivery{grid-template-columns:1fr}
 .delivery>div button{flex:1;justify-content:center}}
 .delivery .suggest-commit{height:32px;padding:0 9px;font-size:10px;align-self:center}
-.delivery .retry-commit{height:32px;padding:0 9px;font-size:10px;align-self:center;color:var(--orange-11);border-color:var(--orange-8);var(--gray-2)}
+.delivery .retry-commit{height:32px;padding:0 9px;font-size:10px;align-self:center;color:var(--orange-11);border-color:var(--orange-8);background:var(--gray-2)}
 .delivery .delivery-delete{color:var(--red-11);border-color:var(--red-7);background:var(--red-2)}
 .form select{width:100%;border:1px solid var(--gray-6);border-radius:10px;background:var(--gray-2);padding:11px 12px;margin-top:7px;font:12px Vazirmatn;outline:none;transition:.2s}
 .form select:focus{border-color:var(--gray-9);box-shadow:0 0 0 3px #6b8d721c;background:var(--color-panel-solid)}
@@ -549,7 +549,7 @@ pre{
 }
 .word-preview h1{margin:0 0 28px;padding-bottom:12px;border-bottom:1px solid var(--gray-6);font-size:20px;overflow-wrap:anywhere}
 .word-preview p{margin:0 0 1em;white-space:pre-wrap}
-.dirty-worktree-confirm{display:flex!important;flex-direction:row!important;align-items:flex-start;gap:9px;margin:-5px 0 14px;padding:10px 12px;border:1px solid var(--orange-9);border-radius:9px;var(--gray-2);color:var(--orange-11);line-height:1.8}
+.dirty-worktree-confirm{display:flex!important;flex-direction:row!important;align-items:flex-start;gap:9px;margin:-5px 0 14px;padding:10px 12px;border:1px solid var(--orange-9);border-radius:9px;background:var(--gray-2);color:var(--orange-11);line-height:1.8}
 .dirty-worktree-confirm input{width:auto!important;margin:4px 0 0;flex:none;accent-color:#a66a00}
 @media(max-width:720px){.markdown-preview{padding:20px 16px 50px}
 .word-preview{width:calc(100% - 20px);margin:10px auto 30px;padding:30px 20px}}
@@ -640,7 +640,7 @@ pre{
 .dashboard-task-top{display:flex;align-items:center;justify-content:space-between;gap:6px}
 .dashboard-task-top>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--gray-11);font:600 10px system-ui,sans-serif}
 .dashboard-task-status{flex:none;padding:3px 6px;border-radius:7px;background:var(--accent-4);color:var(--gray-11);font-size:9px}
-.dashboard-task-status.status-running,.dashboard-task-status.status-testing,.dashboard-task-status.status-queued{var(--gray-2);color:var(--orange-11)}
+.dashboard-task-status.status-running,.dashboard-task-status.status-testing,.dashboard-task-status.status-queued{background:var(--gray-2);color:var(--orange-11)}
 .dashboard-task-status.status-failed,.dashboard-task-status.status-blocked{background:var(--red-3);color:var(--red-11)}
 .dashboard-task-card h4{margin:10px 0 5px;color:var(--accent-11);font-size:12px;overflow-wrap:anywhere}
 .dashboard-task-card p{margin:0 0 11px;color:var(--gray-10);font-size:10px;overflow-wrap:anywhere}
@@ -723,7 +723,7 @@ pre{
 .sdlc-dashboard{
   padding:20px;
   color:var(--gray-12);
-  var(--gray-2);
+  background:var(--gray-2);
 }
 .sdlc-header{
   display:flex;
@@ -1131,7 +1131,7 @@ pre{
   color:white;
 }
 .sdlc-revision-count{
-  var(--gray-2);
+  background:var(--gray-2);
   color:var(--orange-11);
   padding:2px 8px;
   border-radius:10px;
