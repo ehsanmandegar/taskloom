@@ -1045,15 +1045,31 @@ pre{
   color:var(--orange-11);
   font-weight:600;
 }
-.sdlc-more-tasks{
-  text-align:center;
+.sdlc-stage-nav{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:6px;
+  padding:8px 0 2px;
   font-size:11px;
   color:var(--gray-11);
-  padding:8px;
+}
+.sdlc-stage-nav-btn{
+  border:1px solid var(--gray-6);
+  background:var(--color-panel-solid);
+  color:var(--accent-11);
+  border-radius:6px;
+  padding:3px 10px;
+  font-size:11px;
+  font-family:inherit;
   cursor:pointer;
 }
-.sdlc-more-tasks:hover{
-  color:var(--accent-11);
+.sdlc-stage-nav-btn:hover:not(:disabled){
+  background:var(--accent-3);
+}
+.sdlc-stage-nav-btn:disabled{
+  opacity:0.4;
+  cursor:not-allowed;
 }
 .sdlc-empty-list{
   text-align:center;
