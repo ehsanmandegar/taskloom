@@ -1,0 +1,29 @@
+/* Taskloom design layer on top of Radix Themes tokens (colours come from the theme, so light/dark both work). */
+.radix-themes{--default-font-family:Vazirmatn,system-ui,"Segoe UI",sans-serif;--heading-font-family:Vazirmatn,system-ui,sans-serif;--code-font-family:"Cascadia Code",Consolas,monospace}
+html,body{background:var(--color-background);color:var(--gray-12)}
+body{background-image:none}
+body:before,body:after{display:none!important}
+
+/* the SDLC page used a cream page background of its own: use the shared app background instead */
+.sdlc-dashboard{background:transparent}
+
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.ui-dialog-actions{display:flex;justify-content:flex-start;gap:10px;margin-top:20px}
+/* modals: shared overlay + entrance */
+.sdlc-modal-overlay,.todo-modal-backdrop{background:color-mix(in srgb,var(--gray-12) 45%,transparent)!important;backdrop-filter:blur(3px);animation:ui-fade .14s ease-out}
+.sdlc-modal-overlay>[role=dialog]{animation:ui-pop .16s ease-out;outline:none}
+@keyframes ui-fade{from{opacity:0}}
+@keyframes ui-pop{from{opacity:0;transform:translateY(8px) scale(.985)}}
+@media(prefers-reduced-motion:reduce){.sdlc-modal-overlay,.sdlc-modal-overlay>[role=dialog]{animation:none}}
+
+/* SDLC automation: audit trail + risk */
+.sdlc-timeline{margin:14px 0;padding:12px 14px;border:1px solid var(--gray-6);border-radius:12px;background:var(--color-panel-solid)}
+.sdlc-timeline h4{display:flex;align-items:center;gap:6px;margin:0 0 10px;font-size:12px}
+.sdlc-timeline ol{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto;display:grid;gap:8px}
+.sdlc-timeline li{display:grid;grid-template-columns:auto auto 1fr;gap:4px 8px;align-items:center;padding-bottom:8px;border-bottom:1px dashed var(--gray-5);font-size:12px}
+.sdlc-timeline li small{grid-column:1/-1;display:flex;align-items:center;gap:4px;color:var(--gray-10)}
+.sdlc-risk{margin:12px 0}
+.sdlc-autonomy{margin-top:14px}
+.sdlc-metrics{padding:6px 0 30px}
+.sdlc-risk-reasons{margin:4px 0 0;padding-inline-start:18px;font-size:12px}
+.sdlc-timeline li{grid-template-columns:auto 1fr}

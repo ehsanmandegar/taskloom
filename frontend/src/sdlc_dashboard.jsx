@@ -2,9 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   BarChart3, ClipboardList, RefreshCw, Users, Play, Pause, CheckCircle, XCircle, 
   Clock, AlertCircle, FileCode, GitBranch, GitPullRequest, MessageCircle, Eye,
-  ChevronRight, ChevronDown, Filter, Search, Download, Upload, Settings, Plus, X, Square
+  ChevronRight, ChevronDown, Filter, Gauge, Search, Download, Upload, Settings, Plus, X, Square
 } from 'lucide-react';
 import { UiTag } from './ui_tag';
+import { ModalShell, confirmDialog } from './ui.jsx';
+import { AutonomyFields, MetricsPanel, RiskBadge, Timeline } from './sdlc_automation.jsx';
+import { withAutonomyDefaults, autonomySummary } from './sdlc_automation.js';
 import { GitPanel } from './release_management.jsx';
 import { storedAdminHeaders } from './releases.js';
 
@@ -353,7 +356,7 @@ export default function SDLCDashboard() {
   // Delete one task (refused by the server while one of its stages is running).
   const handleDeleteTask = async (task) => {
     const taskId = task.base_task.task_id;
-    if (!window.confirm(`تسک «${task.title || taskId}» برای همیشه حذف شود؟
+    if (!await confirmDialog(`تسک «${task.title || taskId}» برای همیشه حذف شود؟
 شاخهٔ Git و ریپوها دست‌نخورده می‌مانند.`)) return;
     try {
       await readJsonOrThrow(await fetch(`${API}/api/sdlc/tasks/${taskId}`, { method: 'DELETE' }));
@@ -650,7 +653,7 @@ export default function SDLCDashboard() {
       
       {/* Task creation form modal */}
       {showTaskForm && (
-        <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setShowTaskForm(false); setError(''); setNewTask({ title:'', description:'', project_id:'', priority:'medium', tags:[] }); } }}>
+        <ModalShell label="ایجاد تسک جدید" onClose={() => { setShowTaskForm(false); setError(''); setNewTask({ title:'', description:'', project_id:'', priority:'medium', tags:[] }); }}>
           <div className="sdlc-project-form" style={{width: 'min(560px, 100%)'}}>
             <div className="sdlc-form-header">
               <div>
@@ -770,7 +773,7 @@ export default function SDLCDashboard() {
               </button>
             </div>
           </div>
-        </div>
+        </ModalShell>
       )}
       
       {/* Stats cards */}
@@ -859,6 +862,14 @@ export default function SDLCDashboard() {
         >
           <Settings size={16} />
           پروژه‌ها
+        </button>
+
+        <button
+          className={`sdlc-tab ${activeTab === 'metrics' ? 'active' : ''}`}
+          onClick={() => setActiveTab('metrics')}
+        >
+          <Gauge size={16} />
+          آمار و خودکارسازی
         </button>
       </div>
       
@@ -1131,7 +1142,7 @@ export default function SDLCDashboard() {
 
       {/* Task detail modal */}
       {selectedTask && (
-        <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setSelectedTask(null); }}>
+        <ModalShell label="جزئیات تسک" onClose={() => { setSelectedTask(null); }}>
           <div className="sdlc-task-detail-modal" data-ui="M3">
             <div className="sdlc-form-header">
               <div>
@@ -1191,12 +1202,16 @@ export default function SDLCDashboard() {
                   baseBranch={repo.base_branch || 'sandbox'} commitSha={repo.commit_sha} integration={repo.integration} />
               ))}
 
+              <RiskBadge risk={selectedTask.risk} />
+
               {(selectedTask.transition_reason || selectedTask.revision_count > 0) && (
                 <div className="sdlc-detail-section sdlc-detail-status">
                   {selectedTask.transition_reason && <p>{selectedTask.transition_reason}</p>}
                   {selectedTask.revision_count > 0 && <p>دفعات بازبینی: {selectedTask.revision_count}</p>}
                 </div>
               )}
+
+              <Timeline events={selectedTask.timeline} />
 
               {/* Questions stages asked the analyst (and the human, through the analyst) */}
               {(selectedTask.stage_questions || []).length > 0 && (
@@ -1450,10 +1465,12 @@ export default function SDLCDashboard() {
               <button className="sdlc-btn sdlc-btn-primary" onClick={() => setSelectedTask(null)}>بستن</button>
             </div>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* Projects view */}
+      {activeTab === 'metrics' && <MetricsPanel project={selectedProject} />}
+
       {activeTab === 'projects' && (
         <div className="sdlc-projects">
           <div className="sdlc-projects-header">
@@ -1538,7 +1555,7 @@ export default function SDLCDashboard() {
           
           {/* Project form modal */}
           {showProjectForm && (
-            <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setShowProjectForm(false); setIsEditingProject(false); setEditingProjectId(''); setProjectFormStep(1); } }}>
+            <ModalShell label="فرم پروژه" onClose={() => { setShowProjectForm(false); setIsEditingProject(false); setEditingProjectId(''); setProjectFormStep(1); }}>
             <div className="sdlc-project-form sdlc-project-wizard" data-ui="M4">
               <div className="sdlc-form-header">
                 <h3>{isEditingProject ? 'ویرایش پروژه' : 'ایجاد پروژه جدید'} <UiTag id="M4" name="ProjectForm"/></h3>
@@ -1721,6 +1738,11 @@ export default function SDLCDashboard() {
                         <span>تأیید نهایی توسط انسان</span>
                       </label>
                     </div>
+
+                    <AutonomyFields
+                      workflow={withAutonomyDefaults(newProject.workflow)}
+                      onChange={(patch) => setNewProject({...newProject, workflow: {...withAutonomyDefaults(newProject.workflow), ...patch}})}
+                    />
                   </>
                 )}
 
@@ -1910,6 +1932,7 @@ export default function SDLCDashboard() {
                       <div className="sdlc-review-row"><span>اجرای ترتیبی</span><span>{newProject.workflow.sequential ? 'بله' : 'خیر'}</span></div>
                       <div className="sdlc-review-row"><span>حداکثر Revision</span><span>{newProject.workflow.max_revision_attempts}</span></div>
                       <div className="sdlc-review-row"><span>تأیید تحلیل</span><span>{newProject.workflow.require_analysis_approval ? 'الزامی' : 'اختیاری'}</span></div>
+                      <div className="sdlc-review-row"><span>تصمیم‌های خودکار</span><span>{autonomySummary(newProject.workflow)}</span></div>
                       <div className="sdlc-review-row"><span>تأیید نهایی</span><span>{newProject.workflow.require_final_human_approval ? 'الزامی' : 'اختیاری'}</span></div>
                     </div>
 
@@ -1960,7 +1983,7 @@ export default function SDLCDashboard() {
                 </div>
               </div>
             </div>
-            </div>
+            </ModalShell>
           )}
           
           {projects.length === 0 ? (
@@ -2099,7 +2122,7 @@ function RunGuideDialog({ project, stages, onClose }) {
   });
 
   return (
-    <div className="sdlc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <ModalShell label="جزئیات" onClose={() => { onClose(); }}>
       <div className="sdlc-task-detail-modal" data-ui="M5">
         <div className="sdlc-form-header">
           <div>
@@ -2154,7 +2177,7 @@ function RunGuideDialog({ project, stages, onClose }) {
           )}
         </div>
       </div>
-    </div>
+    </ModalShell>
   );
 }
 
