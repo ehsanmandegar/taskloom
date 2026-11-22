@@ -27,3 +27,9 @@ body:before,body:after{display:none!important}
 .sdlc-metrics{padding:6px 0 30px}
 .sdlc-risk-reasons{margin:4px 0 0;padding-inline-start:18px;font-size:12px}
 .sdlc-timeline li{grid-template-columns:auto 1fr}
+.sdlc-send-back{display:grid;gap:8px;margin:0 0 14px;padding:12px 14px;border:1px solid var(--amber-7);border-radius:12px;background:var(--amber-2)}
+.sdlc-send-back label{font-size:12px;font-weight:600;color:var(--gray-12)}
+.sdlc-send-back-text{width:100%;box-sizing:border-box;resize:vertical;min-height:90px;padding:8px 10px;border:1px solid var(--gray-7);border-radius:8px;background:var(--color-panel-solid);color:var(--gray-12);font:inherit;font-size:13px;line-height:1.7}
+.sdlc-send-back-text:focus-visible{outline:2px solid var(--accent-8);outline-offset:1px}
+.sdlc-send-back-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.sdlc-send-back-actions small{color:var(--gray-11)}

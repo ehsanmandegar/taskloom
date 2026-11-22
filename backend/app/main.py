@@ -1237,6 +1237,20 @@ async def transition_sdlc_task(task_id: str, transition: StageTransitionRequest)
         raise HTTPException(500, f"Failed to transition task: {exc}") from exc
 
 
+class SendBackRequest(BaseModel):
+    feedback: str
+
+
+@app.post("/api/sdlc/tasks/{task_id}/send-back", response_model=SDLCTask)
+async def send_back_sdlc_task(task_id: str, body: SendBackRequest, request: Request):
+    """A human wrote that something is wrong: the analyst runs again with that opinion and the human re-approves."""
+    actor = (request.headers.get("X-Taskloom-User") or "human").strip()[:80] or "human"
+    try:
+        return await sdlc_task_manager.send_back_to_analysis(task_id, body.feedback, actor)
+    except ValueError as exc:
+        raise HTTPException(404 if "not found" in str(exc) else 409, str(exc)) from exc
+
+
 def require_admin(request: Request) -> str:
     """Authorisation for final approvals and release actions. Taskloom has no user accounts: set TASKLOOM_ADMIN_TOKEN
     and every such request must send it in `X-Taskloom-Admin-Token` (the dashboard asks for it once). The optional
