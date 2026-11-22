@@ -5,6 +5,7 @@ import {
   ChevronRight, ChevronDown, Filter, Gauge, Search, Download, Upload, Settings, Plus, X, Square, Send
 } from 'lucide-react';
 import { canSendBack } from './sdlc_automation.js';
+import ProjectBuilder from './project_builder.jsx';
 import { UiTag } from './ui_tag';
 import { ModalShell, confirmDialog } from './ui.jsx';
 import { AutonomyFields, MetricsPanel, RiskBadge, Timeline } from './sdlc_automation.jsx';
@@ -1552,7 +1553,9 @@ export default function SDLCDashboard() {
               <h2>پروژه‌های SDLC</h2>
               <p>تنظیمات و پیکربندی پروژه‌ها</p>
             </div>
-            <button 
+            <div className="sdlc-projects-header-actions">
+            <ProjectBuilder onCreated={() => loadSDLCData()} />
+            <button
               className="sdlc-btn sdlc-btn-primary"
               onClick={() => {
                 setNewProject({
@@ -1625,6 +1628,7 @@ export default function SDLCDashboard() {
               <Plus size={16} />
               پروژه جدید
             </button>
+            </div>
           </div>
           
           {/* Project form modal */}
