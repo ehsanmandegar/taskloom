@@ -2217,6 +2217,8 @@ class SDLCTaskManager:
                 and task.sdlc_status != SDLCStatus.analysis_approved):
             analysis = task.agent_results.get("analysis")
             clean, why = policy.analysis_is_clean(task) if project.workflow.auto_analysis_approval else (False, "")
+            if clean and any(r.requesting_agent == "human" and r.target_agent == "analysis" for r in task.revisions):
+                clean, why = False, "a human objected to the earlier analysis and must review the new one"
             if clean:
                 policy.record_event(task, "auto_approved", f"Analysis approved automatically: {why}", "analysis")
                 task.sdlc_status = SDLCStatus.analysis_approved
@@ -2325,6 +2327,59 @@ class SDLCTaskManager:
             raise ValueError(f"Task {task_id} not found")
         return await self._ask_human(task, agent, context.get("kind", "manual"), reason, description,
                                      response_options, context)
+
+    MAX_FEEDBACK_CHARS = 4000
+
+    async def send_back_to_analysis(self, task_id: str, feedback: str, actor: str = "human") -> SDLCTask:
+        """A human found a problem: record the opinion and run the analyst again with it as binding input.
+
+        The task then goes through the normal analysis approval again, and Taskloom never approves that analysis
+        by itself (the human objected, so a human looks at the new result). Refused while a stage is running and
+        once the work has been merged into develop (that needs a new task, not a re-analysis)."""
+        if self.read_only:
+            raise ValueError(f"Another Taskloom server owns {self.data_dir}; send the task back from that server")
+        feedback = (feedback or "").strip()
+        if not feedback:
+            raise ValueError("Write what is wrong first: the analyst needs your opinion")
+        if len(feedback) > self.MAX_FEEDBACK_CHARS:
+            raise ValueError(f"The opinion is too long ({len(feedback)} characters; the limit is {self.MAX_FEEDBACK_CHARS})")
+        if self.is_running(task_id):
+            raise ValueError(f"Task {task_id} has a stage running; wait for it to finish")
+        task = await self.load_task(task_id)
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+        if any(repo.integration and repo.integration.merged_into_develop for repo in task.repos.values()):
+            raise ValueError("This task is already merged into develop; create a new task for the change")
+        project = self.load_project(task.project_config_id)
+        if not project or "analysis" not in self.enabled_stages(project):
+            raise ValueError("The project has no enabled analysis stage to send the task back to")
+
+        # Open questions to a human are answered by this opinion: close them so the inbox has no stale duplicate.
+        pending = self.inbox_dir / "pending"
+        resolved = self.inbox_dir / "resolved"
+        for item in task.human_interventions:
+            if item.status != "pending":
+                continue
+            item.status = "superseded"
+            item.response = feedback
+            item.responded_at = datetime.now(timezone.utc)
+            source = pending / f"{item.id}.json"
+            if source.exists():
+                resolved.mkdir(parents=True, exist_ok=True)
+                (resolved / f"{item.id}.json").write_text(
+                    json.dumps(item.model_dump(), indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+                source.unlink(missing_ok=True)
+
+        task.revisions.append(RevisionRequest(
+            requesting_agent="human", target_agent="analysis", reason=feedback, description=feedback, priority="high"))
+        task.previous_status = task.sdlc_status
+        task.sdlc_status = SDLCStatus.revision
+        task.transition_reason = "A human found a problem and sent the task back to analysis"
+        policy.record_event(task, "human_response", f"Sent back to analysis: {feedback[:200]}", "analysis", actor=actor)
+        task.updated_at = datetime.now(timezone.utc)
+        await self.save_task(task)
+        await self.execute_stage(task_id, "analysis", project)
+        return await self.load_task(task_id) or task
 
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task's folder and its inbox items. Refuses while one of its stages is running."""
