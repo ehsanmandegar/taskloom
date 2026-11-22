@@ -65,6 +65,8 @@ export default function SDLCDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('pipeline');
+  // Per-stage visible task (by task id) in the pipeline view; index is derived so polling/filtering cannot make it jump.
+  const [stageCursor, setStageCursor] = useState({});
   const [selectedProject, setSelectedProject] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -924,7 +926,15 @@ export default function SDLCDashboard() {
             {sdlcStages.map(stage => {
               const stageTasks = tasksByStatus[stage.id] || [];
               const StageIcon = stage.icon;
-              
+              const foundIndex = stageTasks.findIndex(t => t.base_task.id === stageCursor[stage.id]);
+              const currentIndex = foundIndex >= 0 ? foundIndex : 0;
+              const currentTask = stageTasks[currentIndex];
+              const moveStage = (event, offset) => {
+                event.stopPropagation();
+                const target = stageTasks[currentIndex + offset];
+                if (target) setStageCursor(prev => ({ ...prev, [stage.id]: target.base_task.id }));
+              };
+
               return (
                 <div key={stage.id} className="sdlc-pipeline-stage">
                   <div className={`sdlc-stage-header ${stage.color}`}>
@@ -939,7 +949,7 @@ export default function SDLCDashboard() {
                     {stageTasks.length === 0 ? (
                       <div className="sdlc-empty-stage">هیچ تسکی در این مرحله نیست</div>
                     ) : (
-                      stageTasks.slice(0, 5).map(task => (
+                      [currentTask].map(task => (
                         <div key={task.base_task.id} className="sdlc-pipeline-task" onClick={() => handleViewTask(task)} style={{cursor: 'pointer'}}>
                           <div className="sdlc-task-header">
                             <span className="sdlc-task-id">{task.base_task.task_id}</span>
@@ -967,9 +977,27 @@ export default function SDLCDashboard() {
                       ))
                     )}
                     
-                    {stageTasks.length > 5 && (
-                      <div className="sdlc-more-tasks">
-                        + {stageTasks.length - 5} تسک دیگر
+                    {stageTasks.length > 1 && (
+                      <div className="sdlc-stage-nav">
+                        <button
+                          type="button"
+                          className="sdlc-stage-nav-btn"
+                          onClick={event => moveStage(event, -1)}
+                          disabled={currentIndex === 0}
+                        >
+                          قبلی
+                        </button>
+                        <span className="sdlc-stage-nav-pos">
+                          {(currentIndex + 1).toLocaleString('fa-IR')} / {stageTasks.length.toLocaleString('fa-IR')}
+                        </span>
+                        <button
+                          type="button"
+                          className="sdlc-stage-nav-btn"
+                          onClick={event => moveStage(event, 1)}
+                          disabled={currentIndex === stageTasks.length - 1}
+                        >
+                          بعدی
+                        </button>
                       </div>
                     )}
                   </div>
