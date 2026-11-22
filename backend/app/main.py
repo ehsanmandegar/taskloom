@@ -19,7 +19,7 @@ from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, Co
 from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse
 from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
 from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError, command
-from . import run_guides, run_processes
+from . import project_builder, run_guides, run_processes
 from .services import agent_executable
 from .sdlc_git import (
     GitHubError, commit_and_push, create_github_repository, create_pull_request, describe_new_repository,
@@ -952,6 +952,21 @@ sdlc_task_manager = SDLCTaskManager()
 async def list_sdlc_projects():
     """List all SDLC project configurations"""
     return sdlc_project_manager.list_projects()
+
+
+@app.post("/api/sdlc/project-builder")
+async def build_sdlc_project(request: project_builder.BuildRequest):
+    """From a free-text idea: create the stage folders, system prompts, starter files and Git repositories, and save the
+    project so tasks can be given to it right away. `preview: true` only returns the plan (nothing is written)."""
+    existing = {item.id for item in sdlc_project_manager.list_projects()}
+    if request.preview:
+        return project_builder.preview(request, existing)
+    try:
+        return await project_builder.build(request, existing, sdlc_project_manager.save_project)
+    except project_builder.BuildError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(500, f"Could not build the project: {exc}") from exc
 
 
 @app.get("/api/sdlc/projects/{project_id}", response_model=SDLCProjectConfig)
