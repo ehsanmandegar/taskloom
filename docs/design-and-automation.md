@@ -24,6 +24,31 @@ appearance and RTL direction support, with no Tailwind and no markup rewrite.
 * `ui.jsx`: `ModalShell` (Radix Dialog) replaced the five hand-made overlays: focus trap and restore, Esc, outside click,
   scroll lock, ARIA labels. `confirmDialog()` / `promptDialog()` replace every `window.confirm/prompt`.
 
+## Project builder: "I want project X"
+
+SDLC → پروژه‌ها → **ساخت خودکار پروژه** (`POST /api/sdlc/project-builder`). The user describes the project in a few
+sentences (10–4000 characters; optional name, stack and parent folder) and picks how automatic it should be. Taskloom then:
+
+1. **Decides the stages** from the idea (analysis + backend/frontend/n8n as needed + qa) and the stack (Python, Node.js or a
+   static site); both can be overridden. The project id is derived from the name, or from the idea, and never collides: a
+   derived id gets `-2`, `-3` … while an id the user typed that already exists is refused (409).
+2. **Creates the folders** under `<parent>/<id>/` (default parent `~/taskloom-projects`): one folder per stage, each its own Git
+   repository, plus `knowledge/` (PROJECT, ARCHITECTURE, CONVENTIONS, DEFINITION_OF_DONE) that every stage is told to read.
+   A non-empty destination is refused and left untouched; a failed build removes what it created.
+3. **Writes each stage's system prompt** (role, project goal, stack, rules, how to report) into the project configuration and
+   into the stage's `CLAUDE.md`, plus a README, `.gitignore` and a starter skeleton whose own test command passes
+   (`python -m pytest -q`, `node --test`). Analysis gets `docs/requirements.md` and open questions, QA gets `test-plan.md`.
+4. **Makes the repositories task-ready**: initial commit on `main` and the `sandbox` branch that task branches start from.
+   Nothing is sent to GitHub; each stage's private repository is created on its first push as for any from-scratch stage.
+5. **Saves the project** with the chosen autonomy preset. Human gates stay on in every preset: *manual* (all decisions human),
+   *balanced* (low-risk tasks approved automatically, one automatic retry), *autopilot* (clean analyses and low-risk tasks
+   approved automatically, release drafts built automatically; merging into `sandbox` is still always a human decision).
+
+With "AI enrichment" on, Claude Code (non-interactive, in an empty temporary folder) or a local Ollama model also writes the
+description, initial requirements, open questions, architecture and project-specific guidance per stage; its answer is
+validated and size-limited before use. If no AI answers, the templates alone already make a complete project.
+**Preview** shows the plan (folders, files, prompts) without writing anything or calling the AI.
+
 ## SDLC automation: more autonomy, with a human where it matters
 
 Survey of agentic-SDLC platforms (GitLab Duo Agent Platform, Devin, Copilot coding agent, Factory and others) shows the same
