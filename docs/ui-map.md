@@ -17,7 +17,7 @@
 
 | کد | بخش | داده از بک‌اند |
 |---|---|---|
-| `M3-A` | Status — وضعیت، اولویت، دکمهٔ تأیید نهایی، دلیل وضعیت | `sdlc_status`، `transition_reason`، `revision_count` |
+| `M3-A` | Status — وضعیت، اولویت، دکمهٔ تأیید نهایی، ثبت نظر و ارجاع به تحلیل (`/send-back`)، دلیل وضعیت | `sdlc_status`، `transition_reason`، `revision_count` |
 | `M3-B` | LiveOutput — خروجی زندهٔ عامل (فقط هنگام اجرا) | `base_task.live_output` |
 | `M3-C` | Description — شرح تسک | `description` |
 | `M3-D` | AgentResults — نتیجهٔ هر مرحله | `agent_results` |
