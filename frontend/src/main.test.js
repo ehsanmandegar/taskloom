@@ -443,6 +443,17 @@ test('previews Markdown, images, PDF and Word files in the workspace viewer', ()
   assert.match(styles, /\.pdf-preview iframe\{/);
 });
 
+test('SDLC pipeline columns show a single task with previous/next navigation', () => {
+  const source = readFileSync(new URL('./sdlc_dashboard.jsx', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(source, /stageTasks\.slice\(0, 5\)/);
+  assert.match(source, /\[currentTask\]\.map/);
+  assert.match(source, /stageTasks\.length > 1/);
+  assert.match(source, /event\.stopPropagation\(\)/);
+  assert.match(source, /قبلی/);
+  assert.match(source, /بعدی/);
+});
+
 test('resolves Markdown image paths inside the selected repository', () => {
   assert.equal(resolveMarkdownAsset('docs/guide/readme.md', '../images/demo.png'), 'docs/images/demo.png');
   assert.equal(resolveMarkdownAsset('README.md', '/assets/logo.svg?raw=1'), 'assets/logo.svg');
