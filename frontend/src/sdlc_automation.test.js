@@ -2,8 +2,24 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import {
-  AUTONOMY_DEFAULTS, EVENT_LABELS, autonomySummary, formatDuration, formatPercent, riskTone, withAutonomyDefaults,
+  AUTONOMY_DEFAULTS, EVENT_LABELS, autonomySummary, canSendBack, formatDuration, formatPercent, riskTone, withAutonomyDefaults,
 } from './sdlc_automation.js';
+
+test('a task can be sent back to analysis unless it is running or already merged into develop', () => {
+  assert.equal(canSendBack(null), false);
+  for (const status of ['human_review', 'pending_approval', 'done', 'failed']) assert.equal(canSendBack({sdlc_status: status}), true, status);
+  for (const status of ['analyzing', 'backend_running', 'testing', 'revision', 'created']) assert.equal(canSendBack({sdlc_status: status}), false, status);
+  const merged = {sdlc_status: 'done', repos: {r: {integration: {merged_into_develop: true}}}};
+  assert.equal(canSendBack(merged), false);
+  assert.equal(canSendBack({sdlc_status: 'done', repos: {r: {integration: {merged_into_develop: false}}}}), true);
+});
+
+test('the task dialog posts the opinion to the send-back endpoint from the Status section', () => {
+  const source = readFileSync(new URL('./sdlc_dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(source, /\/send-back/);
+  assert.match(source, /ارجاع به تحلیل/);
+  assert.match(source, /canSendBack\(selectedTask\)/);
+});
 
 test('durations read naturally', () => {
   assert.equal(formatDuration(null), '—');

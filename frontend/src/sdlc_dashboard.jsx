@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   BarChart3, ClipboardList, RefreshCw, Users, Play, Pause, CheckCircle, XCircle, 
   Clock, AlertCircle, FileCode, GitBranch, GitPullRequest, MessageCircle, Eye,
-  ChevronRight, ChevronDown, Filter, Gauge, Search, Download, Upload, Settings, Plus, X, Square
+  ChevronRight, ChevronDown, Filter, Gauge, Search, Download, Upload, Settings, Plus, X, Square, Send
 } from 'lucide-react';
+import { canSendBack } from './sdlc_automation.js';
 import { UiTag } from './ui_tag';
 import { ModalShell, confirmDialog } from './ui.jsx';
 import { AutonomyFields, MetricsPanel, RiskBadge, Timeline } from './sdlc_automation.jsx';
@@ -67,6 +68,9 @@ export default function SDLCDashboard() {
   const [activeTab, setActiveTab] = useState('pipeline');
   // Per-stage visible task (by task id) in the pipeline view; index is derived so polling/filtering cannot make it jump.
   const [stageCursor, setStageCursor] = useState({});
+  // "Report a problem" box in the task dialog (M3-A): the human's opinion that goes back to the analyst.
+  const [problemText, setProblemText] = useState(null); // null = closed
+  const [problemBusy, setProblemBusy] = useState(false);
   const [selectedProject, setSelectedProject] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -355,6 +359,25 @@ export default function SDLCDashboard() {
     }
   };
 
+  // The human wrote that the result has a problem: the analyst runs again with that opinion, then a human re-approves.
+  const handleSendBack = async (task) => {
+    const taskId = task.base_task.task_id;
+    setProblemBusy(true);
+    try {
+      const response = await fetch(`${API}/api/sdlc/tasks/${taskId}/send-back`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: problemText }),
+      });
+      const updated = await readJsonOrThrow(response);
+      setSelectedTask(current => (current && current.base_task.task_id === taskId ? updated : current));
+      setProblemText(null);
+      await loadSDLCData();
+    } catch (err) {
+      setError(`خطا در ارجاع به تحلیل: ${err.message}`);
+    } finally {
+      setProblemBusy(false);
+    }
+  };
+
   // Delete one task (refused by the server while one of its stages is running).
   const handleDeleteTask = async (task) => {
     const taskId = task.base_task.task_id;
@@ -576,6 +599,7 @@ export default function SDLCDashboard() {
       const response = await fetch(`${API}/api/sdlc/tasks/${task.base_task.task_id}`);
       if (!response.ok) throw new Error('خطا در بارگذاری جزئیات تسک');
       const fullTask = await response.json();
+      setProblemText(null);
       setSelectedTask(fullTask);
     } catch (err) {
       setError(err.message);
@@ -1223,7 +1247,29 @@ export default function SDLCDashboard() {
                     </button>
                   </>
                 )}
+                {canSendBack(selectedTask) && problemText === null && (
+                  <button type="button" className="sdlc-btn sdlc-btn-secondary" onClick={() => setProblemText('')}>
+                    <MessageCircle size={14} /> مشکل دارد؛ ارجاع به تحلیل
+                  </button>
+                )}
               </div>
+
+              {canSendBack(selectedTask) && problemText !== null && (
+                <div className="sdlc-send-back" role="group" aria-label="ارجاع به تحلیل">
+                  <label htmlFor="sdlc-send-back-text">نظر شما دربارهٔ مشکل</label>
+                  <textarea id="sdlc-send-back-text" className="sdlc-send-back-text" rows={4} dir="auto" autoFocus
+                    maxLength={4000} value={problemText} onChange={event => setProblemText(event.target.value)}
+                    placeholder="چه چیزی اشتباه یا ناقص است؟ تحلیل‌گر این متن را الزام‌آور می‌داند و دوباره تحلیل می‌کند." />
+                  <div className="sdlc-send-back-actions">
+                    <button type="button" className="sdlc-btn sdlc-btn-primary" disabled={problemBusy || !problemText.trim()}
+                      onClick={() => handleSendBack(selectedTask)}>
+                      <Send size={14} /> {problemBusy ? 'در حال ارسال…' : 'ارسال به تحلیل‌گر'}
+                    </button>
+                    <button type="button" className="sdlc-btn sdlc-btn-secondary" disabled={problemBusy} onClick={() => setProblemText(null)}>انصراف</button>
+                    <small>پس از تحلیل مجدد، تأیید تحلیل دوباره با شماست.</small>
+                  </div>
+                </div>
+              )}
 
               {Object.entries(selectedTask.repos || {}).map(([path, repo]) => (
                 <GitPanel key={path} taskId={selectedTask.base_task.task_id} repoPath={path} branch={repo.branch}

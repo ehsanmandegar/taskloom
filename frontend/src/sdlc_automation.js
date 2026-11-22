@@ -10,12 +10,21 @@ export const EVENT_LABELS = {
   stage_failed: {label: 'شکست مرحله', tone: 'red'},
   auto_retry: {label: 'تلاش مجدد خودکار', tone: 'amber'},
   escalated: {label: 'ارجاع به انسان', tone: 'orange'},
-  human_response: {label: 'پاسخ انسان', tone: 'violet'},
+  human_response: {label: 'نظر/پاسخ انسان', tone: 'violet'},
   all_stages_completed: {label: 'پایان همهٔ مراحل', tone: 'green'},
   auto_approved: {label: 'تأیید خودکار', tone: 'jade'},
   approved: {label: 'تأیید انسان', tone: 'violet'},
   merged: {label: 'ادغام در develop', tone: 'green'},
 };
+
+// Statuses in which a human may write "this has a problem" and send the task back to the analyst: never while a
+// stage is running, and never once the work is merged into develop (the server enforces the same rules).
+export const SEND_BACK_STATUSES = ['human_review', 'analysis_approved', 'human_qa', 'pending_approval', 'done', 'failed'];
+
+export function canSendBack(task) {
+  if (!task || !SEND_BACK_STATUSES.includes(task.sdlc_status)) return false;
+  return !Object.values(task.repos || {}).some(repo => repo.integration?.merged_into_develop);
+}
 
 export function formatDuration(seconds) {
   if (seconds == null || Number.isNaN(seconds)) return '—';

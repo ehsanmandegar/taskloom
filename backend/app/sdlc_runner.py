@@ -84,7 +84,8 @@ def stage_feedback(task: SDLCTask, stage: str) -> list[str]:
     if revisions:
         sections.append(
             "## Revision requested — address this first\n" + "\n\n".join(
-                f"From {revision.requesting_agent}: {revision.reason}"
+                ("A human reviewer found a problem with the previous result; their opinion is binding: " if revision.requesting_agent == "human"
+                 else f"From {revision.requesting_agent}: ") + revision.reason
                 + (f"\n{revision.description}" if revision.description and revision.description != revision.reason else "")
                 for revision in revisions
             )

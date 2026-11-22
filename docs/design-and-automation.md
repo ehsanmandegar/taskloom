@@ -42,6 +42,13 @@ Taskloom already ran the stages, revision loop and analyst consults automaticall
 
 With the project's *human final approval* switched off, Taskloom approves every task whose tests did not fail.
 
+**Human opinion back to the analyst** (task dialog, section `M3-A` Status): a human who sees a problem clicks
+"مشکل دارد؛ ارجاع به تحلیل", writes what is wrong and sends it. `POST /api/sdlc/tasks/{id}/send-back` `{feedback}` records
+it as a revision request from `human` to `analysis` (it appears in the timeline), closes any open question for that task in the
+inbox, and runs the analyst again with the text as binding input in its prompt. The new analysis always goes to a human for
+approval, even when `auto_analysis_approval` is on. Allowed unless a stage is running or the task is already merged into
+`develop` (409); the opinion is 1–4000 characters. It does not count against the automatic revision limit.
+
 **Risk assessment** (`assess_risk`): size of the change, deletions, sensitive paths (auth/secrets, migrations, CI/deploy,
 dependency manifests, payments), failing or missing tests, revision rounds, automatic retries and open issues. Result
 `low / medium / high` with the reasons, stored on the task and shown in its details. Failing tests are *blocking*.
