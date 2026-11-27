@@ -1,18 +1,235 @@
 /* Taskloom design layer on top of Radix Themes tokens (colours come from the theme, so light/dark both work). */
 
-/* Model Settings Styles */
-.model-settings {
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    background: var(--color-panel);
-    z-index: 1000;
-    display: flex;
-    flex-direction: column;
-    animation: slideIn 0.2s ease;
+/* AI Provider Configuration */
+.ai-provider-config {
+  background: var(--color-panel);
+  border-radius: 8px;
+  overflow: hidden;
 }
+
+.ai-provider-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--gray-6);
+  background: var(--gray-2);
+}
+
+.ai-provider-tab {
+  flex: 1;
+  padding: 1rem 1.5rem;
+  border: none;
+  background: transparent;
+  color: var(--gray-11);
+  font-family: Vazirmatn, sans-serif;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  border-bottom: 2px solid transparent;
+}
+
+.ai-provider-tab:hover {
+  background: var(--gray-3);
+  color: var(--gray-12);
+}
+
+.ai-provider-tab.active {
+  background: var(--color-panel);
+  color: var(--accent-11);
+  border-bottom-color: var(--accent-9);
+  font-weight: 600;
+}
+
+.ai-project-config,
+.ai-stages-config {
+  padding: 1.5rem;
+  background: var(--color-panel);
+}
+
+.ai-form-group {
+  margin-bottom: 1.25rem;
+}
+
+.ai-form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: var(--gray-12);
+  font-family: Vazirmatn, sans-serif;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.ai-form-group input[type="text"],
+.ai-form-group select {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  background: var(--gray-2);
+  border: 1px solid var(--gray-6);
+  border-radius: 6px;
+  color: var(--gray-12);
+  font-family: Vazirmatn, sans-serif;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+
+.ai-form-group input[type="text"]:focus,
+.ai-form-group select:focus {
+  outline: none;
+  border-color: var(--accent-8);
+  box-shadow: 0 0 0 3px var(--accent-3);
+}
+
+.ai-form-group input[type="text"]:disabled,
+.ai-form-group select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ai-provider-status,
+.ai-model-hint {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.ai-status-success {
+  color: var(--grass-11);
+}
+
+.ai-status-error {
+  color: var(--tomato-11);
+}
+
+.ai-status-warning {
+  color: var(--amber-11);
+}
+
+.ai-model-selector {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ai-model-selector select {
+  flex: 1;
+}
+
+.ai-refresh-btn {
+  padding: 0.625rem;
+  background: var(--gray-3);
+  border: 1px solid var(--gray-6);
+  border-radius: 6px;
+  color: var(--gray-11);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.ai-refresh-btn:hover {
+  background: var(--gray-4);
+  color: var(--gray-12);
+  border-color: var(--gray-7);
+}
+
+/* Stages Config */
+.ai-stages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ai-stage-item {
+  background: var(--gray-2);
+  border: 1px solid var(--gray-6);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ai-stage-header {
+  padding: 1rem 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  transition: background 0.2s;
+  background: var(--gray-2);
+}
+
+.ai-stage-header:hover {
+  background: var(--gray-3);
+}
+
+.ai-stage-toggle {
+  color: var(--gray-11);
+  display: flex;
+  align-items: center;
+}
+
+.ai-stage-title {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ai-stage-title strong {
+  color: var(--gray-12);
+  font-family: Vazirmatn, sans-serif;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.ai-stage-summary {
+  color: var(--gray-11);
+  font-family: Vazirmatn, sans-serif;
+  font-size: 0.75rem;
+}
+
+.ai-stage-config {
+  padding: 1.25rem;
+  background: var(--color-panel);
+  border-top: 1px solid var(--gray-6);
+}
+
+.ai-form-group input[type="checkbox"] {
+  margin-left: 0.5rem;
+  cursor: pointer;
+}
+
+.ai-form-group label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--gray-12);
+}
+
+/* Model Settings Dialog Override */
+.model-settings {
+  background: var(--color-panel) !important;
+}
+
+.model-settings header {
+  background: var(--color-panel-solid) !important;
+  color: var(--gray-12) !important;
+}
+
+.model-settings-content {
+  background: var(--color-panel) !important;
+}
+
+.model-settings section {
+  background: var(--gray-2) !important;
+  border-color: var(--gray-6) !important;
+}
+
+.model-settings h3 {
+  font-family: Vazirmatn, sans-serif !important;
+}
+
 
 @keyframes slideIn {
     from {

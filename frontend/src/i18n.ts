@@ -19,6 +19,29 @@ const en: Record<string, string> = {
   "settings": "Settings",
   "humanInbox": "Human Inbox",
   "metrics": "Metrics",
+  "overview": "Overview",
+  "create_task": "Create Task",
+  "roles": "Roles",
+  "release_management": "Release Management",
+  "sdlc_platform": "SDLC Platform",
+  
+  // Theme
+  "light": "Light",
+  "dark": "Dark",
+  "enable_light_theme": "Enable light theme",
+  "enable_dark_theme": "Enable dark theme",
+  "theme_green": "Green theme",
+  "theme_blue": "Blue theme",
+  "theme_orange": "Orange theme",
+  "theme_red": "Red theme",
+  "theme_purple": "Purple theme",
+  
+  // Menu
+  "main_menu": "Main Menu",
+  "management_dashboard": "Management Dashboard",
+  "open_menu": "Open menu",
+  "close_menu": "Close menu",
+  "dashboard_sections": "Dashboard sections",
   
   // Status labels
   "created": "Created",
@@ -238,6 +261,29 @@ const fa: Record<string, string> = {
   "settings": "تنظیمات",
   "humanInbox": "صندوق ورودی انسانی",
   "metrics": "معیارها",
+  "overview": "نمای کلی",
+  "create_task": "ایجاد تسک",
+  "roles": "نقش‌ها",
+  "release_management": "مدیریت نسخه",
+  "sdlc_platform": "پلتفرم SDLC",
+  
+  // Theme
+  "light": "روشن",
+  "dark": "تاریک",
+  "enable_light_theme": "فعال‌کردن تم روشن",
+  "enable_dark_theme": "فعال‌کردن تم تاریک",
+  "theme_green": "تم سبز",
+  "theme_blue": "تم آبی",
+  "theme_orange": "تم نارنجی",
+  "theme_red": "تم قرمز",
+  "theme_purple": "تم بنفش",
+  
+  // Menu
+  "main_menu": "منوی اصلی",
+  "management_dashboard": "داشبورد مدیریت",
+  "open_menu": "باز کردن منو",
+  "close_menu": "بستن منو",
+  "dashboard_sections": "بخش‌های داشبورد",
   
   // Status labels
   "created": "ایجاد شده",

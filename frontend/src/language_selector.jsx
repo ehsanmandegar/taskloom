@@ -1,13 +1,21 @@
 import React from 'react';
 import { Globe, ChevronDown, ChevronUp } from 'lucide-react';
 import { getLanguage, setLanguage, getAvailableLanguages, t } from './i18n';
+import { useTranslation } from './translation_context';
 
 export function LanguageSelector({ className = '' }) {
   const [isOpen, setIsOpen] = React.useState(false);
-  const currentLang = getLanguage();
+  const { language: currentLang, setLanguage } = useTranslation();
   const languages = getAvailableLanguages();
   
   const currentLanguage = languages.find(l => l.code === currentLang) || languages[0];
+
+  function handleLanguageChange(langCode) {
+    setLanguage(langCode);
+    setIsOpen(false);
+    // Force reload after language change
+    setTimeout(() => window.location.reload(), 100);
+  }
 
   return (
     <div className={`relative ${className}`} dir="ltr">
@@ -29,10 +37,7 @@ export function LanguageSelector({ className = '' }) {
               <button
                 key={lang.code}
                 type="button"
-                onClick={() => {
-                  setLanguage(lang.code);
-                  setIsOpen(false);
-                }}
+                onClick={() => handleLanguageChange(lang.code)}
                 className={`w-full px-4 py-2 text-left text-sm ${
                   currentLang === lang.code
                     ? 'bg-gray-100 dark:bg-gray-700 font-medium'

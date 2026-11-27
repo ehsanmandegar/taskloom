@@ -678,6 +678,12 @@ pre{
 .dashboard-roles{grid-template-columns:1fr}}
 .app-topbar{position:sticky;z-index:50;top:0;width:calc(100% - var(--admin-menu-width));height:64px;margin-right:var(--admin-menu-width);padding:0 28px;background:var(--gray-2);border-bottom:1px solid var(--accent-6);box-shadow:0 4px 16px #30442c0a}
 .app-topbar-title,.app-topbar-actions{display:flex;align-items:center;gap:14px}
+.theme-color-picker{display:flex;gap:0.375rem;align-items:center;padding:0.25rem;background:var(--gray-3);border-radius:8px}
+.theme-color-btn{width:24px;height:24px;border:2px solid transparent;border-radius:6px;cursor:pointer;transition:all 0.2s;position:relative}
+.theme-color-btn:hover{transform:scale(1.1);border-color:var(--gray-7)}
+.theme-color-btn.active{border-color:var(--gray-12);box-shadow:0 0 0 2px var(--gray-5)}
+.theme-color-btn.active::after{content:'✓';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:white;font-size:12px;font-weight:bold}
+
 .app-topbar-title{min-width:0;color:var(--accent-11);font-size:14px}
 .app-topbar-icon{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;background:var(--accent-4);color:var(--accent-11)}
 .app-topbar .clock{align-items:center}
