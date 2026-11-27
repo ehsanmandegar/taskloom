@@ -571,6 +571,11 @@ pre{
 @media(max-width:650px){.create-task-page{padding:24px 14px 50px}
 .create-task-card{padding:18px}}
 .admin-menu{position:fixed;z-index:40;top:0;right:0;bottom:0;width:var(--admin-menu-width);display:flex;flex-direction:column;overflow:hidden;border-left:1px solid var(--gray-6);background:var(--gray-2);color:var(--gray-12);box-shadow:-8px 0 28px #273d2812;transition:width .2s ease;font:12px Vazirmatn,system-ui,sans-serif}
+[dir="ltr"] .admin-menu{left:0;right:auto;border-left:none;border-right:1px solid var(--gray-6);box-shadow:8px 0 28px #273d2812}
+[dir="ltr"] .app-topbar{margin-left:var(--admin-menu-width);margin-right:0}
+[dir="ltr"] .tasks-shell{margin-left:calc(var(--admin-menu-width) + 16px);margin-right:16px}
+[dir="ltr"] .dashboard-pane{margin-left:var(--admin-menu-width);margin-right:0}
+
 .admin-menu-header{height:76px;flex:none;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid var(--accent-5)}
 .admin-menu-mark{width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:10px;background:var(--accent-9);color:var(--accent-contrast)}
 .admin-menu-name{min-width:0;display:flex;flex:1;flex-direction:column;white-space:nowrap;overflow:hidden}
@@ -683,6 +688,21 @@ pre{
 .theme-color-btn:hover{transform:scale(1.1);border-color:var(--gray-7)}
 .theme-color-btn.active{border-color:var(--gray-12);box-shadow:0 0 0 2px var(--gray-5)}
 .theme-color-btn.active::after{content:'✓';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:white;font-size:12px;font-weight:bold}
+
+.language-selector-wrapper{position:relative}
+.language-selector-btn{display:flex;align-items:center;gap:7px;min-width:70px;height:35px;padding:0 11px;border:1px solid var(--accent-6);border-radius:9px;background:var(--color-panel-solid);color:var(--accent-11);font:600 11px Vazirmatn;cursor:pointer;transition:all 0.2s}
+.language-selector-btn:hover{background:var(--gray-3);border-color:var(--accent-7)}
+.language-selector-current{font-weight:700;letter-spacing:0.5px}
+.language-selector-backdrop{position:fixed;top:0;left:0;right:0;bottom:0;z-index:999}
+.language-selector-dropdown{position:absolute;top:calc(100% + 6px);left:0;min-width:140px;background:var(--color-panel-solid);border:1px solid var(--gray-6);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:1000;overflow:hidden}
+.language-selector-option{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;border:none;background:transparent;color:var(--gray-12);font:500 13px Vazirmatn;text-align:right;cursor:pointer;transition:background 0.15s}
+.language-selector-option:hover{background:var(--gray-3)}
+.language-selector-option.active{background:var(--accent-3);color:var(--accent-11)}
+.language-selector-option .language-code{font-weight:700;font-size:11px;letter-spacing:0.5px;color:var(--gray-11)}
+.language-selector-option.active .language-code{color:var(--accent-11)}
+.language-selector-option .language-name{flex:1}
+.language-selector-option .language-check{color:var(--accent-11);font-weight:700}
+
 
 .app-topbar-title{min-width:0;color:var(--accent-11);font-size:14px}
 .app-topbar-icon{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;background:var(--accent-4);color:var(--accent-11)}

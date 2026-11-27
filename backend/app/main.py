@@ -2052,6 +2052,73 @@ async def refresh_provider_models(provider_id: str):
         raise HTTPException(500, f"Failed to refresh models: {exc}")
 
 
+@app.get("/api/ai/providers")
+async def get_ai_providers():
+    """Get list of available AI providers"""
+    providers = [
+        {
+            "id": "ollama",
+            "name": "Ollama (محلی)",
+            "available": True,  # TODO: Check if ollama is actually running
+            "description": "Local LLM server"
+        },
+        {
+            "id": "codex",
+            "name": "Codex CLI",
+            "available": False,  # TODO: Check if codex CLI is available
+            "description": "Kiro Codex CLI"
+        },
+        {
+            "id": "claude",
+            "name": "Claude CLI",
+            "available": False,  # TODO: Check if claude CLI is available
+            "description": "Anthropic Claude CLI"
+        }
+    ]
+    return providers
+
+
+@app.get("/api/ai/providers/{provider_id}/status")
+async def get_provider_status(provider_id: str):
+    """Get status of a specific AI provider"""
+    # TODO: Implement actual status checks
+    return {"provider": provider_id, "available": provider_id == "ollama", "message": ""}
+
+
+@app.get("/api/ai/providers/{provider_id}/models")
+async def get_provider_models(provider_id: str):
+    """Get available models for a specific provider"""
+    if provider_id == "ollama":
+        try:
+            models = await get_ollama_models()
+            return models
+        except Exception as e:
+            return []
+    elif provider_id == "codex":
+        # Codex uses whatever models are configured in the CLI
+        return []
+    elif provider_id == "claude":
+        # Claude CLI models
+        return [
+            {"name": "claude-sonnet-4-20250514", "family": "claude-4", "parameters": "", "quantization": ""},
+            {"name": "claude-3-5-sonnet-20241022", "family": "claude-3.5", "parameters": "", "quantization": ""},
+        ]
+    return []
+
+
+@app.post("/api/ai/providers/{provider_id}/refresh")
+async def refresh_provider_models(provider_id: str):
+    """Refresh model list for a specific provider"""
+    # For ollama, trigger a refresh
+    if provider_id == "ollama":
+        try:
+            await get_ollama_models()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(500, f"Failed to refresh models: {e}")
+    return {"status": "success"}
+
+
 @app.get("/api/sdlc/projects/{project_id}/ai-settings")
 async def get_project_ai_settings(project_id: str):
     """Get AI provider and model settings for a project"""
