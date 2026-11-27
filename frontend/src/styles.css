@@ -575,6 +575,14 @@ pre{
 [dir="ltr"] .app-topbar{margin-left:var(--admin-menu-width);margin-right:0}
 [dir="ltr"] .tasks-shell{margin-left:calc(var(--admin-menu-width) + 16px);margin-right:16px}
 [dir="ltr"] .dashboard-pane{margin-left:var(--admin-menu-width);margin-right:0}
+[dir="ltr"] .sdlc-dashboard{direction:ltr;text-align:left}
+[dir="ltr"] .sdlc-stats-summary{direction:ltr}
+[dir="ltr"] .sdlc-pipeline-stages{direction:ltr}
+[dir="ltr"] .pipeline-task-nav{flex-direction:row}
+[dir="ltr"] .sdlc-task-list{text-align:left}
+[dir="ltr"] .sdlc-form-body label{text-align:left}
+[dir="ltr"] .admin-menu-nav{text-align:left}
+[dir="ltr"] .admin-menu-item{text-align:left}
 
 .admin-menu-header{height:76px;flex:none;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid var(--accent-5)}
 .admin-menu-mark{width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:10px;background:var(--accent-9);color:var(--accent-contrast)}

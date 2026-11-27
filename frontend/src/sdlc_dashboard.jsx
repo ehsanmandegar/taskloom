@@ -7,32 +7,18 @@ import {
 import { canSendBack } from './sdlc_automation.js';
 import ProjectBuilder from './project_builder.jsx';
 import AIProviderConfig from './ai_provider_config.jsx';
+import SDLCStatsSummary from './sdlc_stats_summary.jsx';
+import SDLCTabs from './sdlc_tabs.jsx';
+import SDLCPipelineView from './sdlc_pipeline_view.jsx';
 import { UiTag } from './ui_tag';
 import { ModalShell, confirmDialog } from './ui.jsx';
 import { AutonomyFields, MetricsPanel, RiskBadge, Timeline } from './sdlc_automation.jsx';
 import { withAutonomyDefaults, autonomySummary } from './sdlc_automation.js';
 import { GitPanel } from './release_management.jsx';
 import { storedAdminHeaders } from './releases.js';
+import { useTranslation } from './translation_context';
 
 const API = import.meta.env.VITE_API_URL || '';
-
-// SDLC stage configuration
-const sdlcStages = [
-  { id: 'created', label: 'ایجاد شده', color: 'bg-gray-200', icon: FileCode },
-  { id: 'analyzing', label: 'در حال تحلیل', color: 'bg-blue-100', icon: MessageCircle },
-  { id: 'human_review', label: 'بازبینی انسانی', color: 'bg-yellow-100', icon: Eye },
-  { id: 'analysis_approved', label: 'تأیید تحلیل', color: 'bg-green-100', icon: CheckCircle },
-  { id: 'backend_running', label: 'توسعه بک‌اند', color: 'bg-purple-100', icon: FileCode },
-  { id: 'n8n_running', label: 'توسعه n8n', color: 'bg-indigo-100', icon: GitBranch },
-  { id: 'frontend_running', label: 'توسعه فرانت‌اند', color: 'bg-pink-100', icon: FileCode },
-  { id: 'testing', label: 'آزمون', color: 'bg-orange-100', icon: AlertCircle },
-  { id: 'human_qa', label: 'تأیید کیفیت', color: 'bg-yellow-100', icon: Eye },
-  { id: 'revision', label: 'بازبینی', color: 'bg-red-100', icon: RefreshCw },
-  { id: 'pending_approval', label: 'منتظر تأیید نهایی', color: 'bg-yellow-200', icon: Eye },
-  { id: 'done', label: 'انجام شده', color: 'bg-green-200', icon: CheckCircle },
-  { id: 'failed', label: 'ناموفق', color: 'bg-red-200', icon: XCircle },
-  { id: 'blocked', label: 'مسدود شده', color: 'bg-gray-300', icon: Pause }
-];
 
 // Parse a JSON response and turn HTTP errors into exceptions carrying the server's message
 async function readJsonOrThrow(response) {
@@ -43,25 +29,37 @@ async function readJsonOrThrow(response) {
 
 const DEFAULT_REPOSITORY = { mode: 'none', url: '', name: '', local_path: '', default_branch: 'main', private: true, github_token: '', token_saved: false, clear_token: false };
 
-const responseOptionLabels = { approve: 'تأیید', stop: 'توقف تسک', resume: 'ادامه (اجرای دوبارهٔ مرحله)' };
-
-// What a free-text answer does for each kind of inbox item (see SDLCTaskManager.submit_human_response)
-const interventionHints = {
-  analysis_approval: 'با «تأیید» توسعه شروع می‌شود؛ اگر بازخورد بنویسید، تحلیل با بازخورد شما دوباره اجرا می‌شود.',
-  agent_question: 'پاسخ شما به عامل داده می‌شود و همین مرحله دوباره اجرا می‌شود.',
-  revision_limit: 'سقف دفعات بازبینی پر شده است؛ راهنمایی شما به عامل داده می‌شود و مرحله دوباره اجرا می‌شود.',
-  interrupted: 'سرور وسط اجرای این مرحله بسته شد. «ادامه» مرحله را دوباره اجرا می‌کند؛ فایل‌هایی که عامل قبلاً تغییر داده بود در پوشه باقی مانده‌اند.',
-};
-
-const agentTypes = {
-  analysis: { label: 'تحلیلگر', color: 'bg-blue-500' },
-  backend: { label: 'توسعه‌دهنده بک‌اند', color: 'bg-purple-500' },
-  n8n: { label: 'مهندس n8n', color: 'bg-indigo-500' },
-  frontend: { label: 'توسعه‌دهنده فرانت‌اند', color: 'bg-pink-500' },
-  qa: { label: 'آزمونگر', color: 'bg-orange-500' }
-};
-
 export default function SDLCDashboard() {
+  const { t, direction } = useTranslation();
+  
+  // SDLC stage configuration - will be translated dynamically
+  const getSdlcStages = () => [
+    { id: 'created', label: t('stage_created'), color: 'bg-gray-200', icon: FileCode },
+    { id: 'analyzing', label: t('stage_analyzing'), color: 'bg-blue-100', icon: MessageCircle },
+    { id: 'human_review', label: t('stage_human_review'), color: 'bg-yellow-100', icon: Eye },
+    { id: 'analysis_approved', label: t('stage_analysis_approved'), color: 'bg-green-100', icon: CheckCircle },
+    { id: 'backend_running', label: t('stage_backend_running'), color: 'bg-purple-100', icon: FileCode },
+    { id: 'n8n_running', label: t('stage_n8n_running'), color: 'bg-indigo-100', icon: GitBranch },
+    { id: 'frontend_running', label: t('stage_frontend_running'), color: 'bg-pink-100', icon: FileCode },
+    { id: 'testing', label: t('stage_testing'), color: 'bg-orange-100', icon: AlertCircle },
+    { id: 'human_qa', label: t('stage_human_qa'), color: 'bg-yellow-100', icon: Eye },
+    { id: 'revision', label: t('stage_revision'), color: 'bg-red-100', icon: RefreshCw },
+    { id: 'pending_approval', label: t('stage_pending_approval'), color: 'bg-yellow-200', icon: Eye },
+    { id: 'done', label: t('stage_done'), color: 'bg-green-200', icon: CheckCircle },
+    { id: 'failed', label: t('stage_failed'), color: 'bg-red-200', icon: XCircle },
+    { id: 'blocked', label: t('stage_blocked'), color: 'bg-gray-300', icon: Pause }
+  ];
+  
+  const getAgentTypes = () => ({
+    analysis: { label: t('agent_analyst'), color: 'bg-blue-500' },
+    backend: { label: t('agent_backend_developer'), color: 'bg-purple-500' },
+    n8n: { label: t('agent_n8n_engineer'), color: 'bg-indigo-500' },
+    frontend: { label: t('agent_frontend_developer'), color: 'bg-pink-500' },
+    qa: { label: t('agent_qa_tester'), color: 'bg-orange-500' }
+  });
+  
+  const sdlcStages = getSdlcStages();
+  const agentTypes = getAgentTypes();
   const [tasks, setTasks] = useState([]);
   const [projects, setProjects] = useState([]);
   const [pendingInterventions, setPendingInterventions] = useState([]);
@@ -672,8 +670,8 @@ export default function SDLCDashboard() {
       {/* Header */}
       <header className="sdlc-header">
         <div className="sdlc-header-left">
-          <h1>پلتفرم SDLC</h1>
-          <p>مدیریت چرخه کامل توسعه نرم‌افزار</p>
+          <h1>{t('sdlc_platform')}</h1>
+          <p>{t('sdlc_complete_cycle')}</p>
         </div>
         <div className="sdlc-header-right">
           <button 
@@ -682,7 +680,7 @@ export default function SDLCDashboard() {
             disabled={loading}
           >
             <Plus size={16} />
-            ایجاد تسک جدید
+            {t('create_new_task')}
           </button>
           <button 
             className="sdlc-btn sdlc-btn-secondary"
@@ -690,7 +688,7 @@ export default function SDLCDashboard() {
             disabled={loading}
           >
             <RefreshCw size={16} className={loading ? 'spin' : ''} />
-            {loading ? 'در حال بارگذاری...' : 'به‌روزرسانی'}
+            {loading ? t('loading') : t('update')}
           </button>
         </div>
       </header>
