@@ -34,12 +34,14 @@ flowchart LR
 |---|---|
 | `main.py` (ریشه) | نقطهٔ ورود: `python main.py [--port 8003] [--no-browser] [--data-dir]`؛ UI build‌شده را هم سرو می‌کند |
 | `backend/app/main.py` | تعریف FastAPI app، CORS و routeها |
-| `backend/app/models.py` | مدل‌های Pydantic: `TaskState`, `SDLCTask`, `SDLCProjectConfig`, `AgentResult`, `HumanIntervention`, ... |
+| `backend/app/models.py` | مدل‌های Pydantic: `TaskState`, `SDLCTask`, `SDLCProjectConfig`, `AgentResult`, `HumanIntervention`, `ModelInfo`, `ProjectModelSettings`, ... |
 | `backend/app/services.py` | منطق اصلی: اجرای CLI عامل، git، workspace، event streamها، مدیریت پروژه/تسک SDLC، فراخوانی Ollama |
+| `backend/app/sdlc_runner.py` | اجراکننده مراحل SDLC، انتخاب runner مناسب، snapshot فایل‌ها |
 | `backend/app/guide_mcp.py` | یک MCP server روی stdio که فایل‌های Markdown راهنما را به عامل ارائه می‌دهد |
 | `backend/app/config.py` | تنظیمات از متغیرهای محیطی: `OLLAMA_BASE_URL`، `OLLAMA_MODEL` (پیش‌فرض `qwen3.5:0.8b`) |
 | `frontend/src/main.jsx` | UI تسک کلاسیک + workspace explorer |
 | `frontend/src/sdlc_dashboard.jsx` | داشبورد کانبان SDLC، پروژه‌ها، inbox انسانی، GitHub |
+| `frontend/src/model_settings.jsx` | تنظیمات مدل‌های AI برای هر پروژه |
 
 ## جریان SDLC
 
@@ -125,9 +127,44 @@ stateDiagram-v2
 
 | `runner` | رفتار |
 |---|---|
-| `auto` (پیش‌فرض) | اگر مرحله `project_path` دارد و Claude Code (یا Codex) نصب است ← عامل CLI؛ وگرنه Ollama |
+| `auto` (پیش‌فرض) | اول Ollama اگر در دسترس باشد، سپس اگر مرحله `project_path` دارد و Claude Code (یا Codex) نصب است ← عامل CLI |
 | `claude` / `codex` | عامل CLI واقعی در پوشهٔ `project_path` |
-| `ollama` | فقط گزارش متنی؛ فایلی نوشته نمی‌شود. فایل‌هایی که مدل «پیشنهاد» می‌دهد در `recommendations.proposed_changes` ثبت می‌شوند، نه در `changes` |
+| `ollama` | **OllamaCodingAgent** با tool calling کامل برای ویرایش فایل‌ها |
+
+#### OllamaCodingAgent (سیستم چند-مدلی جدید)
+
+TaskLoom اکنون از Ollama به عنوان عامل کدنویسی پیش‌فرض با قابلیت‌های زیر پشتیبانی می‌کند:
+
+1. **کشف پویا مدل‌ها**: دریافت خودکار مدل‌های نصب شده Ollama از `/api/tags`
+2. **پیکربندی پروژه**: هر پروژه می‌تواند مدل پیش‌فرض و تخصیص مدل برای هر مرحله را تنظیم کند
+3. **Tool Calling**: پشتیبانی از ابزارهای زیر برای ویرایش واقعی فایل‌ها:
+   - `read_file`: خواندن محتوای فایل
+   - `list_files`: لیست فایل‌های پروژه
+   - `write_file`: ایجاد یا ویرایش فایل
+   - `delete_file`: حذف فایل
+   - `search_files`: جستجوی متن در فایل‌ها
+   - `run_command`: اجرای دستورات امن (npm, python, git read-only, etc.)
+4. **امنیت**: validation کامل مسیرها، جلوگیری از path traversal، محدودیت دستورات
+5. **مدیریت مدل**: اولویت‌بندی انتخاب مدل: task override → stage assignment → project default → environment → fallback
+
+#### اجرای یک مرحله با OllamaCodingAgent:
+
+```mermaid
+flowchart TD
+    A[تعیین مدل برای مرحله<br/>ModelResolutionService] --> B[ساخت prompt: system_prompt + تسک + knowledge_path + نتایج مراحل قبل]
+    B --> C[ارسال به Ollama با tool definitions]
+    C --> D{Ollama tool call?}
+    D -- بله --> E[اجرای tool call<br/>read/write/list/search/run]
+    E --> F[برگرداندن نتیجه به Ollama]
+    F --> C
+    D -- خیر --> G[دریافت پاسخ نهایی]
+    G --> H[snapshot پوشه ← changes واقعی]
+    H --> I[خواندن گزارش JSON عامل<br/>status / summary / issues / ...]
+    I --> J{test_instructions.command؟}
+    J -- بله --> K[Taskloom خودش تست را اجرا می‌کند<br/>شکست تست ← stage failed]
+    J -- خیر --> L[AgentResult]
+    K --> L
+```
 
 اجرای یک مرحله با عامل CLI:
 
@@ -224,3 +261,326 @@ flowchart TD
 - **inbox:** پاسخ با `rename` اتمی «تصاحب» می‌شود؛ دوبار کلیک یا دو سرور یک درخواست را دو بار پردازش نمی‌کنند.
 - **ویندوز:** `os.replace` و خواندن فایل هنگام باز بودن فایل توسط خوانندهٔ دیگر چند بار تکرار می‌شوند.
 - مسیرها هنوز نسبی‌اند (`data/...` نسبت به پوشهٔ اجرای سرور)؛ `TASKLOOM.bat` همیشه از ریشهٔ repo اجرا می‌کند.
+
+## سیستم چند-مدلی AI
+
+### معماری
+
+```mermaid
+flowchart TD
+    API["API Endpoints<br/>/api/ollama/*"] --> DS["OllamaDiscoveryService"]
+    API --> MRS["ModelResolutionService"]
+    MRS --> P["ProjectModelSettings"]
+    MRS --> OC["OllamaCodingAgent"]
+    DS --> O["Ollama Server<br/>:11434"]
+    OC --> O
+    OC --> T["Tool Execution<br/>read/write/list/search/run"]
+    T --> FS["File System<br/>Project Workspace"]
+    SR["SDLC Runner"] --> MRS
+    SR --> OC
+```
+
+### ModelResolutionService
+
+اولویت‌بندی انتخاب مدل برای هر مرحله:
+
+```python
+1. Task-level override (اگر در درخواست تسک مشخص شده)
+2. Project stage assignment (تنظیمات اختصاصی مرحله)
+3. Project default model (مدل پیش‌فرض پروژه)
+4. OLLAMA_MODEL environment variable
+5. Fallback به "qwen3.5:0.8b"
+```
+
+### OllamaDiscoveryService
+
+- **`/api/tags`**: دریافت لیست مدل‌های نصب شده
+- **`/api/show`**: دریافت اطلاعات جزئی یک مدل خاص
+- **Connection checking**: بررسی دسترسی به سرور Ollama
+
+### تنظیمات مدل (ProjectModelSettings)
+
+هر پروژه `SDLCProjectConfig` شامل یک `model_settings` با فیلدهای زیر است:
+
+```json
+{
+  "default_model": "qwen3.5:0.8b",
+  "stage_assignments": {
+    "analysis": "qwen3.5:0.8b",
+    "backend": "qwen3.5:0.8b", 
+    "frontend": "qwen3.5:0.8b",
+    "n8n": "qwen3.5:0.8b",
+    "qa": "qwen3.5:0.8b"
+  },
+  "ollama_endpoint": "http://localhost:11434"
+}
+```
+
+### امنیت و محدودیت‌ها
+
+#### Path Security
+- بررسی `is_relative_to()` برای جلوگیری از path traversal
+- محدودیت دسترسی به خارج از workspace پروژه
+- Validation تمام مسیرها قبل از اجرای tool calls
+
+#### Command Safety  
+- لیست سفید دستورات مجاز:
+  - npm, yarn, pnpm (install, test, run)
+  - python, pip (install, test)
+  - git (read-only: status, diff, log, show)
+  - go, cargo, dotnet, make, cmake
+- محدودیت timeout (60 ثانیه)
+- اجرا در working directory ایمن
+
+#### Model Security
+- اعتبارسنجی موجودیت مدل قبل از استفاده
+- Fallback ایمن به مدل پیش‌فرض در صورت عدم دسترسی
+- خطای واضح برای مدل‌های مفقود یا غیرقابل دسترس
+
+### سرویس‌های جدید
+
+| سرویس | مسئولیت |
+|-------|---------|
+| `OllamaDiscoveryService` | کشف مدل‌های Ollama و اطلاعات آن‌ها |
+| `ModelResolutionService` | انتخاب مدل مناسب برای هر مرحله SDLC |
+| `OllamaCodingAgent` | اجراکننده کدنویسی با tool calling |
+| `execute_stage()` | تابع یکپارچه در `sdlc_runner.py` |
+
+### ویژگی‌های کلیدی
+
+1. **کشف پویا**: مدل‌ها به صورت خودکار از Ollama دریافت می‌شوند
+2. **پیکربندی انعطاف‌پذیر**: هر مرحله می‌تواند مدل متفاوتی داشته باشد
+3. **ویرایش واقعی**: OllamaCodingAgent می‌تواند فایل‌ها را واقعاً ویرایش کند
+4. **سازگاری عقبرو**: Claude و Codex همچنان پشتیبانی می‌شوند
+5. **مدیریت session**: ادامه مکالمه‌ها پس از restart سرور
+6. **امنیت کامل**: validation مسیرها و محدودیت دستورات
+
+### API Endpoints جدید
+
+```
+GET    /api/ollama/models           # لیست مدل‌های Ollama
+GET    /api/ollama/connection       # بررسی اتصال Ollama
+GET    /api/ollama/models/{name}    # اطلاعات مدل خاص
+GET    /api/sdlc/projects/{id}/model-settings  # تنظیمات مدل پروژه
+PUT    /api/sdlc/projects/{id}/model-settings  # به‌روزرسانی تنظیمات
+GET    /api/sdlc/projects/{id}/stage-model/{stage}  # مدل مرحله
+```
+
+### Frontend Component
+
+- **`model_settings.jsx`**: کامپوننت تنظیمات مدل
+- نمایش مدل‌های نصب شده Ollama
+- تنظیم مدل پیش‌فرض پروژه
+- تخصیص مدل برای هر مرحله SDLC
+- بررسی وضعیت اتصال Ollama
+
+### مزایای سیستم جدید
+
+1. **عدم وابستگی به Anthropic**: اجرای کامل بدون نیاز به Claude Code یا حساب Anthropic
+2. **کنترل کامل کاربر**: کاربر می‌تواند هر مدل Ollama دلخواه را نصب و استفاده کند
+3. **انعطاف‌پذیری**: استفاده از مدل‌های مختلف برای وظایف مختلف
+4. **هزینه‌ی صفر**: اجرای محلی بدون هزینه API
+5. **حریم خصوصی**: تمام پردازش‌ها به صورت محلی انجام می‌شود
+
+## Team Workflow Extension (2026-11-27)
+
+### Extended SDLC State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> created
+    created --> analyzing
+    analyzing --> human_review: require_analysis_approval
+    human_review --> analysis_approved: approve
+    human_review --> analyzing: بازخورد انسان
+    analysis_approved --> backend_running
+    backend_running --> backend_review: completed
+    backend_review --> backend_running: needs_revision
+    backend_review --> frontend_running: analyst_approved
+    backend_running --> human_review: needs_human / revision_limit
+    frontend_running --> frontend_review: completed
+    frontend_review --> frontend_running: needs_revision
+    frontend_review --> qa_running: analyst_approved
+    frontend_review --> backend_running: needs_backend_revision
+    qa_running --> qa_review: completed
+    qa_review --> qa_running: needs_revision
+    qa_review --> analyst_final_review: qa_passed
+    qa_review --> backend_running: needs_backend_revision
+    qa_review --> frontend_running: needs_frontend_revision
+    analyst_final_review --> pending_approval: analyst_recommended
+    analyst_final_review --> qa_running: needs_qa_revision
+    pending_approval --> done: po_approved
+    pending_approval --> analyst_final_review: po_changes_requested
+    pending_approval --> qa_running: po_changes_requested
+    human_review --> failed: stop
+    backend_running --> failed: blocked / failed
+    frontend_running --> failed: blocked / failed
+    qa_running --> failed: blocked / failed
+```
+
+### Role Knowledge Access Matrix
+
+| Role | May Read | Must Not Read |
+|------|----------|---------------|
+| **Analyst** | Shared product/workspace knowledge, requirements, task flow, stage reports needed for review | Secrets; unrelated private credentials |
+| **Backend Developer** | Shared project/architecture/conventions + approved requirements + backend knowledge | Frontend private knowledge unless explicitly provided as API integration contract |
+| **Frontend Developer** | Shared project/conventions + approved requirements + approved backend API handoff + frontend knowledge | Backend source, private docs, agent reports and implementation details |
+| **QA Engineer** | Original request + approved requirements/acceptance criteria + requirement-level task decisions + QA knowledge | Backend/frontend source, private docs, agent reports, implementation details |
+| **Product Owner** | Request, approved specification, Analyst final summary, QA results/evidence, risks and release scope | Secrets and unnecessary implementation internals |
+
+### Analyst Mid-Pipeline Reviews (Mandatory Gates)
+
+**Analysis → Backend Handoff:**
+- Analyst automatically reviews backend output
+- Must approve, request revision, or escalate to human inbox if ambiguous/disagreement/risk
+- Revision requests go through Analyst coordination only
+
+**Backend → Frontend Handoff:**
+- Backend produces structured `backend_handoff` artifact with:
+  - API contract changes (method, path, request/response shape, validation, errors)
+  - Compatibility notes
+  - Configuration, migrations, operational implications
+  - Changed files/commits
+  - Separate frontend handoff section
+- Frontend receives only approved handoff, not unrestricted backend private knowledge
+
+**Frontend → QA Review:**
+- Analyst automatically reviews frontend output against requirements and backend contract
+- May approve → QA, send revision to Frontend, or request backend corrections
+
+**QA → Analyst Final Review:**
+- QA must be independent: receives only requirements-level information
+- Cannot access backend/frontend source, private knowledge, or implementation details
+- QA reports test cases, pass/fail/blocked with evidence
+
+### PO Approval Rules (Enhanced pending_approval State)
+
+**Structure:**
+- Use existing `pending_approval` as the distinct PO/business acceptance gate
+- PO decision is structured and independently recorded
+- Technical final approval and `auto_final_approval` must never bypass PO approval when enabled
+
+**PO Decision Options:**
+1. **Approve:** task becomes release-ready
+2. **Request Changes:** feedback goes to Analyst, who coordinates stage revisions and QA retesting
+3. **Reject:** task is not release-ready; decision preserved in timeline
+
+**PO Change Request Routing:**
+- PO feedback returns to Analyst
+- Analyst routes to appropriate stage(s) (QA, Backend, Frontend)
+- After changes, QA must retest affected behavior before PO reviews again
+
+### Release Eligibility Rules
+
+A task can only become release-ready when:
+1. QA has explicitly passed (`qa_review → qa_passed`)
+2. PO has explicitly approved (`pending_approval → po_approved`)
+3. Existing develop integration and unreleased-task rules are satisfied
+
+**Technical completion or merging into develop alone must NOT make a task release-ready.**
+
+### Knowledge Isolation Enforcement
+
+**QA Access Control:**
+- QA agent has separate `qa_knowledge_path` (QA-specific documentation)
+- QA prompt must NOT include:
+  - Backend source directories
+  - Frontend source directories
+  - Backend/frontend private knowledge paths
+  - Backend/frontend agent reports
+  - Implementation-specific design decisions
+
+**Sanitization Before QA:**
+- Stage outputs are sanitized before sharing with QA
+- Only requirement-level decisions and externally observable expected behavior shared
+- QA receives: original request, approved requirements, requirement-level task decisions, QA knowledge
+
+### Project Workflow Defaults
+
+**New Projects:**
+- Default workflow: `analysis → backend → backend_review → frontend → frontend_review → qa → qa_review → analyst_final_review → po_pending_approval`
+- `backend_review`, `frontend_review`, `qa_review`, `analyst_final_review` are mandatory gates
+- `n8n` stage is optional, can be positioned between `backend` and `frontend` if enabled
+
+**Backward Compatibility:**
+- Existing projects with old stage lists continue to work
+- Missing review gates default to "no automatic review" (analyst can still manually intervene via human inbox)
+- `auto_analysis_approval` and `auto_final_approval` policies preserved
+
+### Backend Handoff Structure
+
+```json
+{
+  "api_contract": {
+    "method": "POST",
+    "path": "/api/v1/users",
+    "request_schema": {...},
+    "response_schema": {...},
+    "validation": {...},
+    "error_codes": [...],
+    "compatibility_notes": "..."
+  },
+  "config_changes": [...],
+  "migrations": [...],
+  "changed_files": [...],
+  "frontend_handoff": {
+    "required": true,
+    "endpoint": "/api/v1/users",
+    "data_format": "JSON",
+    "states": ["loading", "success", "error", "permission_denied"],
+    "accessibility": "..."
+  }
+}
+```
+
+### QA Report Structure
+
+```json
+{
+  "test_strategy": "requirements-led, implementation-independent",
+  "test_cases": [
+    {
+      "id": "TC-001",
+      "requirements": ["REQ-001", "REQ-002"],
+      "description": "...",
+      "environment": "...",
+      "steps": [...],
+      "expected": "...",
+      "actual": "...",
+      "result": "pass|fail|blocked",
+      "evidence": "...",
+      "reproducible": true
+    }
+  ],
+  "coverage_gaps": [...],
+  "residual_risks": [...],
+  "overall_recommendation": "pass|fail|blocked"
+}
+```
+
+### PO Decision Structure
+
+```json
+{
+  "decision": "approve|changes_requested|reject",
+  "rationale": "...",
+  "affected_requirements": [...],
+  "revision_required": true,
+  "return_to_stage": "qa|frontend|backend|analyst"
+}
+```
+
+### Timeline Event Extensions
+
+New event kinds:
+- `backend_review_completed`, `frontend_review_completed`, `qa_review_completed`, `analyst_final_review_completed`, `po_decision_made`
+- `backend_handoff_created`, `qa_report_created`
+- `revision_requested_to_backend`, `revision_requested_to_frontend`, `revision_requested_to_qa`
+
+### Git/Release Flow Integration
+
+**Release PR/MR Requirements:**
+- Release PR/MR must clearly identify included tasks
+- PO approval status shown in release task list
+- Only PO-approved tasks can be included in release
+- Release version tag associated with task IDs

@@ -23,14 +23,20 @@ from .services import (
     _command_started_handler,
     WORKSPACE_IGNORED_DIRECTORIES, agent_error_detail, agent_executable, agent_name,
     agent_response, command, initial_agent_args, run_agent_command, test_plan,
+    OllamaCodingAgent, ModelResolutionService, _ollama_runner,
 )
 
 STAGE_ROLES = {
     "analysis": "software analyst",
     "backend": "backend developer",
+    "backend_review": "analyst reviewing backend implementation",
     "n8n": "n8n workflow engineer",
     "frontend": "frontend developer",
+    "frontend_review": "analyst reviewing frontend implementation",
     "qa": "QA engineer",
+    "qa_review": "QA engineer reviewing test results",
+    "analyst_final_review": "analyst performing final assessment",
+    "po_pending_approval": "product owner evaluating release readiness",
 }
 REPORT_ONLY_STAGES = {"analysis", "qa"}
 AGENT_STATUSES = {"completed", "needs_human", "needs_revision", "blocked"}
@@ -42,14 +48,27 @@ Snapshot = dict[str, tuple[int, int]]
 
 
 def resolve_runner(config: AgentConfig, workdir: str | None = None) -> StageRunner:
-    """Pick who runs a stage; `auto` prefers a CLI agent whenever the stage has a working folder
-    (its own project_path, or the project repository passed as `workdir`)."""
+    """Pick who runs a stage; `auto` prefers Ollama when available, then CLI agents."""
     if config.runner != StageRunner.auto:
         return config.runner
+    
+    # Check if Ollama is available and preferred
+    from .services import _ollama_discovery
+    try:
+        import asyncio
+        # Check Ollama connection
+        if asyncio.run(_ollama_discovery.check_connection()):
+            # Ollama is available, use it as default
+            return StageRunner.ollama
+    except:
+        pass
+    
+    # Fall back to CLI agents if Ollama is not available
     if workdir if workdir is not None else config.project_path:
         for runner in (StageRunner.claude, StageRunner.codex):
             if shutil.which(runner.value):
                 return runner
+    
     return StageRunner.ollama
 
 
@@ -298,7 +317,8 @@ SDLC_ALLOWED_TOOLS = [
 
 
 async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig, runner: StageRunner,
-                        pid_file: Path | None = None, repo_token: str | None = None, persist_project=None) -> AgentResult:
+                        pid_file: Path | None = None, repo_token: str | None = None, persist_project=None,
+                        model_name: str | None = None) -> AgentResult:
     """Run one SDLC stage with Claude Code or Codex inside the stage's folder (or the project repository)."""
     agent_type = AgentType.claude if runner == StageRunner.claude else AgentType.codex
     display_name = agent_name(agent_type)
@@ -326,7 +346,7 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
     before = snapshot_folder(workdir)
     token = _command_started_handler.set(record_agent_process(pid_file, stage) if pid_file else None)
     try:
-        args = initial_agent_args(agent_type, executable, prompt, readable_dirs(stage, project, config, workdir), SDLC_ALLOWED_TOOLS)
+        args = initial_agent_args(agent_type, executable, prompt, readable_dirs(stage, project, config, workdir), SDLC_ALLOWED_TOOLS, model=model_name)
         code, output = await run_agent_command(agent_type, args, workdir, state, config.cli_timeout_seconds)
     finally:
         _command_started_handler.reset(token)
@@ -402,3 +422,316 @@ async def run_cli_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
             description=result.summary,
         )
     return result
+
+
+async def run_ollama_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig, config: AgentConfig,
+                          pid_file: Path | None = None, repo_token: str | None = None, persist_project=None,
+                          model_name: str | None = None) -> AgentResult:
+    """Run one SDLC stage with Ollama coding agent inside the stage's folder."""
+    repository = project.stage_repository(stage)
+    has_repo = repository.mode.value != "none"
+    if has_repo:
+        # Clone (existing repo) or initialise (new repo) this stage's repository before it runs.
+        await ensure_workspace(project, stage, repo_token, persist_project, lambda message: task.base_task.logs.append(message))
+    stage_path = project.stage_path(stage)
+    if not stage_path:
+        raise RuntimeError(f"Stage '{stage}' needs a project_path or a repository to run Ollama")
+    workdir = Path(stage_path).expanduser().resolve()
+    if not workdir.is_dir():
+        raise RuntimeError(f"Project folder for stage '{stage}' does not exist: {workdir}")
+
+    # In a Git repository every task works on its own branch (sdlc/<task-id>)
+    base_branch = repository.default_branch if has_repo else str(config.github_config.get("branch") or "main")
+    await prepare_task_branch(task, workdir, base_branch, resolve_token(repo_token) if has_repo else None, auto_stash=has_repo)
+    
+    state = task.base_task
+    state.step = f"Ollama is running the {stage} stage"
+    
+    # Create Ollama coding agent with the specified model
+    # Use provided model_name, or get from project configuration
+    if model_name:
+        # Get Ollama endpoint from project AI settings
+        ollama_endpoint = project.ai_settings.ollama_endpoint
+        coding_agent = OllamaCodingAgent(base_url=ollama_endpoint, model=model_name)
+    else:
+        # Fallback to legacy behavior
+        coding_agent = OllamaCodingAgent()
+    
+    # Record PID if requested
+    if pid_file:
+        import json
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(json.dumps({
+            "pid": os.getpid(),
+            "image": "ollama_coding_agent",
+            "stage": stage
+        }), encoding="utf-8")
+    
+    try:
+        # Run the stage with Ollama coding agent
+        result = await coding_agent.run_stage(stage, task, project, config, workdir)
+        
+        # Run tests after agent completes
+        tests = await run_stage_tests(config, workdir)
+        result.tests = tests
+        
+        # Handle test failures
+        if tests.executed and not tests.passed and result.status == "completed":
+            result.status = "needs_revision"
+            result.issues.append("Stage tests failed; see test results.")
+            failure = tests.results[0] if tests.results else {}
+            result.revision_request = RevisionRequest(
+                requesting_agent=stage,
+                target_agent=stage,
+                reason=f"Tests failed: exit code {failure.get('exit_code', 1)}",
+                description=f"Fix the code so the tests pass. Test output:\n{failure.get('output', '')[-1500:]}",
+            )
+        
+        return result
+        
+    except Exception as exc:
+        return AgentResult(
+            agent=stage,
+            status="failed",
+            summary=f"Ollama coding agent failed: {exc}",
+            changes=[],
+            tests=TestResults(),
+            issues=[str(exc)],
+            raw_output=""
+        )
+    finally:
+        if pid_file:
+            pid_file.unlink(missing_ok=True)
+
+
+# تابع اصلی برای اجرای مرحله که runner مناسب را انتخاب می‌کند
+async def execute_stage(stage: str, task: SDLCTask, project: SDLCProjectConfig,
+                       pid_file: Path | None = None, repo_token: str | None = None,
+                       persist_project=None) -> AgentResult:
+    """Execute a stage with the appropriate runner based on configuration.
+    
+    Provider/model priority:
+    1. Agent-level provider_override (new explicit field)
+    2. Stage-level provider in project.ai_settings
+    3. Project-level defaults in project.ai_settings
+    4. Legacy AgentConfig.runner when != auto (backward compatibility)
+    5. Auto-detect (Ollama available → ollama; else first installed CLI)
+    """
+    config = project.agents.get(stage, AgentConfig())
+    
+    # For legacy projects: if runner is explicitly set and no new provider fields exist,
+    # map the legacy runner directly to a provider so old configs keep working.
+    if config.runner != StageRunner.auto and not config.provider_override:
+        runner_to_provider = {
+            StageRunner.claude: "claude",
+            StageRunner.codex: "codex",
+            StageRunner.ollama: "ollama",
+        }
+        legacy_provider = runner_to_provider.get(config.runner)
+        if legacy_provider:
+            # Use the legacy runner with the project's default model for that provider
+            runner = config.runner
+            provider_id = legacy_provider
+            model_name = project.ai_settings.default_model
+            # For non-Ollama runners, model_name may not make sense — let it be empty so CLI uses default
+            if legacy_provider != "ollama":
+                model_name = None
+            if runner == StageRunner.ollama:
+                return await run_ollama_stage(stage, task, project, config, pid_file, repo_token, persist_project, model_name)
+            else:
+                return await run_cli_stage(stage, task, project, config, runner, pid_file, repo_token, persist_project, model_name)
+    
+    # Use provider resolution to determine which provider and model to use
+    from .services import ProviderResolutionService
+    resolver = ProviderResolutionService()
+    
+    # Get effective provider and model for this stage
+    provider_id, model_name, is_overridden = resolver.resolve_provider_for_stage(
+        stage, project, config
+    )
+    
+    # Validate provider availability — do NOT silently fall back to another provider
+    available, error_msg = await resolver.validate_provider_availability(provider_id, model_name)
+    if not available:
+        return AgentResult(
+            agent=stage,
+            status="failed",
+            raw_output=f"Provider error: {error_msg}",
+            issues=[f"Provider '{provider_id}' or model '{model_name}' is unavailable: {error_msg}"]
+        )
+    
+    # Get runner based on provider
+    from .providers import provider_registry
+    provider = provider_registry.get_provider(provider_id)
+    if not provider:
+        return AgentResult(
+            agent=stage,
+            status="failed",
+            raw_output=f"Provider '{provider_id}' not found",
+            issues=[f"Provider '{provider_id}' not found in registry"]
+        )
+    
+    runner = provider.get_runner_type()
+    
+    # Execute with the appropriate runner
+    if runner == StageRunner.ollama:
+        return await run_ollama_stage(stage, task, project, config, pid_file, repo_token, persist_project, model_name)
+    else:
+        return await run_cli_stage(stage, task, project, config, runner, pid_file, repo_token, persist_project, model_name)
+
+
+# ===== TEAM WORKFLOW GATE FUNCTIONS =====
+
+def build_stage_prompt_for_review(stage: str, task: SDLCTask, project: SDLCProjectConfig, 
+                                   config: AgentConfig, workdir: Path) -> str:
+    """Build prompt for review stages (backend_review, frontend_review, qa_review, analyst_final_review).
+    
+    These stages don't produce code but review previous outputs and decide on approval/revision.
+    """
+    role = STAGE_ROLES.get(stage, stage)
+    sections = [f"You are the {role} stage of an automated software delivery pipeline (Taskloom) for project \"{project.name}\"."]
+    
+    if project.description:
+        sections.append(f"Project description: {project.description}")
+    
+    if config.system_prompt.strip():
+        sections.append("## Your instructions\n" + config.system_prompt.strip())
+    
+    # Task context
+    sections.append(
+        f"## Task {task.base_task.task_id}\nTitle: {task.title}\nPriority: {task.priority}\n"
+        f"Description:\n{task.description or '(no description)'}"
+    )
+    
+    # Approved requirements (from task specification if available)
+    if task.task_specification:
+        sections.append("## Approved Requirements\n")
+        sections.append(f"User Need: {task.task_specification.user_business_need}")
+        if task.task_specification.acceptance_criteria:
+            sections.append("\n### Acceptance Criteria\n" + "\n".join(f"- {c}" for c in task.task_specification.acceptance_criteria))
+    
+    # Previous stage results
+    if stage in {"backend_review"}:
+        previous_stage = "backend"
+        if previous_stage in task.agent_results:
+            result = task.agent_results[previous_stage]
+            sections.append(f"\n## {previous_stage} Result\nStatus: {result.status}\nSummary: {result.summary}")
+            if result.changes:
+                sections.append(f"\n### Changed Files\n" + "\n".join(f"- {c.file} ({c.kind})" for c in result.changes))
+            if result.issues:
+                sections.append(f"\n### Issues\n" + "\n".join(f"- {i}" for i in result.issues))
+        
+        # Include backend handoff if available
+        if task.backend_handoff:
+            sections.append("\n## Backend Handoff\n")
+            if task.backend_handoff.api_contract:
+                api = task.backend_handoff.api_contract
+                sections.append(f"API Contract: {api.get('method', 'GET')} {api.get('path', '/api')}")
+                if task.backend_handoff.frontend_handoff:
+                    sections.append(f"\n### Frontend Impact\n{task.backend_handoff.frontend_handoff.get('required', 'No frontend impact')}")
+    
+    elif stage in {"frontend_review"}:
+        # Include backend result and handoff
+        if "backend" in task.agent_results:
+            result = task.agent_results["backend"]
+            sections.append(f"\n## Backend Result\nStatus: {result.status}\nSummary: {result.summary}")
+        
+        if task.backend_handoff:
+            sections.append("\n## Backend Handoff\n")
+            if task.backend_handoff.api_contract:
+                api = task.backend_handoff.api_contract
+                sections.append(f"API Contract: {api.get('method', 'GET')} {api.get('path', '/api')}")
+        
+        # Include frontend result
+        if "frontend" in task.agent_results:
+            result = task.agent_results["frontend"]
+            sections.append(f"\n## Frontend Result\nStatus: {result.status}\nSummary: {result.summary}")
+    
+    elif stage in {"qa_review"}:
+        # Include original requirements and requirement-level decisions only
+        sections.append("\n## QA Review Instructions\n")
+        sections.append("You are reviewing the implementation from a black-box perspective.")
+        sections.append("Do NOT inspect implementation code or implementation-specific logic.")
+        sections.append("Focus on whether the implementation satisfies the acceptance criteria.")
+        
+        # Include QA report if available
+        if task.qa_report:
+            sections.append("\n## QA Report\n")
+            sections.append(f"Recommendation: {task.qa_report.overall_recommendation}")
+            if task.qa_report.test_cases:
+                sections.append(f"\nTest Cases: {len(task.qa_report.test_cases)}")
+                sections.append("### Test Results\n")
+                for tc in task.qa_report.test_cases[:5]:  # Show first 5
+                    sections.append(f"- {tc.id}: {tc.result}")
+        
+        # Include frontend/backend results (sanitized for QA)
+        if "frontend" in task.agent_results:
+            result = task.agent_results["frontend"]
+            sanitized_summary = result.summary.replace("I implemented", "The implementation").replace("I wrote", "The code was written")
+            sections.append(f"\n## Frontend Implementation Summary\n{sanitized_summary}")
+        
+        if "backend" in task.agent_results:
+            result = task.agent_results["backend"]
+            sanitized_summary = result.summary.replace("I implemented", "The implementation").replace("I wrote", "The code was written")
+            sections.append(f"\n## Backend Implementation Summary\n{sanitized_summary}")
+    
+    elif stage in {"analyst_final_review"}:
+        # Include all stage results
+        for stage_name, result in task.agent_results.items():
+            sections.append(f"\n## {stage_name} Result\nStatus: {result.status}\nSummary: {result.summary}")
+        
+        # Include QA report
+        if task.qa_report:
+            sections.append("\n## QA Report\n")
+            sections.append(f"Recommendation: {task.qa_report.overall_recommendation}")
+        
+        # Include PO decision
+        if task.po_decision:
+            sections.append("\n## PO Decision\n")
+            sections.append(f"Decision: {task.po_decision.decision}")
+            sections.append(f"Rationale: {task.po_decision.rationale}")
+    
+    # Review task
+    if stage == "backend_review":
+        sections.append("\n## Your Task\nReview the backend implementation against the approved requirements.")
+        sections.append("1. Does it satisfy the acceptance criteria?")
+        sections.append("2. Is the API contract clear and complete?")
+        sections.append("3. Are there any issues or risks?")
+        sections.append("4. Should Frontend review proceed?")
+        sections.append("\nOutput: approve, request_revision, or escalate_to_human")
+    
+    elif stage == "frontend_review":
+        sections.append("\n## Your Task\nReview the frontend implementation against the approved requirements and backend handoff.")
+        sections.append("1. Does it satisfy the acceptance criteria?")
+        sections.append("2. Is the API integration correct?")
+        sections.append("3. Are there any issues or risks?")
+        sections.append("4. Should QA testing proceed?")
+        sections.append("\nOutput: approve, request_revision, or escalate_to_human")
+    
+    elif stage == "qa_review":
+        sections.append("\n## Your Task\nReview the QA test results against the acceptance criteria.")
+        sections.append("1. Are all acceptance criteria covered by tests?")
+        sections.append("2. Are the test results accurate and reproducible?")
+        sections.append("3. Are there coverage gaps or residual risks?")
+        sections.append("4. Should Analyst Final Review proceed?")
+        sections.append("\nOutput: approve, request_revision, or escalate_to_human")
+    
+    elif stage == "analyst_final_review":
+        sections.append("\n## Your Task\nPerform final assessment before PO approval.")
+        sections.append("Review all evidence and determine if the task is ready for release.")
+        sections.append("If ready, recommend 'po_pending_approval'.")
+        sections.append("If issues remain, request revision to appropriate stage.")
+    
+    # Final output format
+    sections.append(
+        "\n## Final Answer Format\n"
+        "End your reply with exactly one fenced ```json block containing:\n"
+        "{\"status\": \"completed | needs_human | needs_revision\", "
+        "\"summary\": \"what you reviewed and decided\", "
+        "\"recommendation\": \"approve | request_revision | escalate_to_human\", "
+        "\"revision_target\": \"stage to request revision from, only for needs_revision\", "
+        "\"revision_reason\": \"only for needs_revision\", "
+        "\"question_for_human\": \"only for needs_human\"}"
+    )
+    
+    return "\n\n".join(sections)

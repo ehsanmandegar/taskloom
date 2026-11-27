@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { canSendBack } from './sdlc_automation.js';
 import ProjectBuilder from './project_builder.jsx';
+import AIProviderConfig from './ai_provider_config.jsx';
 import { UiTag } from './ui_tag';
 import { ModalShell, confirmDialog } from './ui.jsx';
 import { AutonomyFields, MetricsPanel, RiskBadge, Timeline } from './sdlc_automation.jsx';
@@ -177,6 +178,14 @@ export default function SDLCDashboard() {
           auto_pr: false
         }
       }
+    },
+    ai_settings: {
+      default_provider: 'ollama',
+      default_model: 'qwen3.5:0.8b',
+      stage_providers: {},
+      ollama_endpoint: 'http://localhost:11434',
+      codex_endpoint: '',
+      claude_endpoint: ''
     }
   });
   const [newTask, setNewTask] = useState({
@@ -527,6 +536,14 @@ export default function SDLCDashboard() {
             timeout_seconds: 300,
             max_retries: 2
           }
+        },
+        ai_settings: {
+          default_provider: 'ollama',
+          default_model: 'qwen3.5:0.8b',
+          stage_providers: {},
+          ollama_endpoint: 'http://localhost:11434',
+          codex_endpoint: '',
+          claude_endpoint: ''
         }
       });
       setError('');
@@ -582,7 +599,15 @@ export default function SDLCDashboard() {
         require_analysis_approval: false,
         require_final_human_approval: false
       },
-      agents: processedAgents
+      agents: processedAgents,
+      ai_settings: project.ai_settings || {
+        default_provider: 'ollama',
+        default_model: project.model_settings?.default_model || 'qwen3.5:0.8b',
+        stage_providers: {},
+        ollama_endpoint: project.model_settings?.ollama_endpoint || 'http://localhost:11434',
+        codex_endpoint: '',
+        claude_endpoint: ''
+      }
     });
     setIsEditingProject(true);
     setEditingProjectId(project.id);
@@ -1653,7 +1678,8 @@ export default function SDLCDashboard() {
                   { step: 1, label: 'اطلاعات پروژه' },
                   { step: 2, label: 'تنظیمات Workflow' },
                   { step: 3, label: 'تنظیمات Agents' },
-                  { step: 4, label: 'تأیید نهایی' }
+                  { step: 4, label: 'AI Provider' },
+                  { step: 5, label: 'تأیید نهایی' }
                 ].map(({ step, label }) => (
                   <div
                     key={step}
@@ -1669,7 +1695,7 @@ export default function SDLCDashboard() {
               </div>
               
               <div className="sdlc-form-body">
-                <UiTag id={`M4-${projectFormStep}`} name={['', 'ProjectInfo', 'Workflow', 'Agents', 'Review'][projectFormStep]}/>
+                <UiTag id={`M4-${projectFormStep}`} name={['', 'ProjectInfo', 'Workflow', 'Agents', 'AIProvider', 'Review'][projectFormStep]}/>
 
                 {/* ── Step 1: Project Info ── */}
                 {projectFormStep === 1 && (
@@ -1986,8 +2012,34 @@ export default function SDLCDashboard() {
                   );
                 })()}
 
-                {/* ── Step 4: Review ── */}
+                {/* ── Step 4: AI Provider ── */}
                 {projectFormStep === 4 && (
+                  <div className="sdlc-ai-config">
+                    <h4>تنظیمات AI Provider</h4>
+                    <p className="sdlc-form-hint">
+                      می‌توانید ارائه‌دهنده AI و مدل مورد نظر را برای هر مرحله از SDLC تنظیم کنید.
+                      تنظیمات پیش‌فرض برای همه مراحل اعمال می‌شود مگر اینکه برای مرحله‌ای خاص تنظیم متفاوتی انتخاب کنید.
+                    </p>
+                    
+                    <AIProviderConfig
+                      projectId={newProject.id}
+                      aiSettings={newProject.ai_settings || {
+                        default_provider: 'ollama',
+                        default_model: 'qwen3.5:0.8b',
+                        stage_providers: {},
+                        ollama_endpoint: 'http://localhost:11434',
+                        codex_endpoint: '',
+                        claude_endpoint: ''
+                      }}
+                      onSettingsChange={(settings) => {
+                        setNewProject({...newProject, ai_settings: settings});
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* ── Step 5: Review ── */}
+                {projectFormStep === 5 && (
                   <div className="sdlc-review">
                     <div className="sdlc-review-section">
                       <h4>اطلاعات پروژه</h4>
@@ -2041,7 +2093,7 @@ export default function SDLCDashboard() {
                     </button>
                   )}
 
-                  {projectFormStep < 4 ? (
+                  {projectFormStep < 5 ? (
                     <button
                       className="sdlc-btn sdlc-btn-primary"
                       onClick={() => setProjectFormStep(s => s + 1)}

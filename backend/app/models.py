@@ -432,7 +432,207 @@ class ProjectWorkflowConfig(BaseModel):
     auto_retry_failed_stages: int = 0      # automatic re-runs of a failed stage before it is escalated to a human
     auto_release: bool = False             # draft + validate a release when enough merged tasks are waiting (a human still approves it)
     auto_release_min_tasks: int = 2
+    
+    # Team workflow extension: automatic review gates
+    auto_backend_review: bool = True       # automatically run Backend Review gate after Backend stage
+    auto_frontend_review: bool = True      # automatically run Frontend Review gate after Frontend stage
+    auto_qa_review: bool = True            # automatically run QA Review gate after QA stage
+    auto_analyst_final_review: bool = True # automatically run Analyst Final Review gate before PO approval
+    require_po_approval: bool = True       # require Product Owner approval before release
 
+
+class TaskSpecification(BaseModel):
+    """Structured task specification created by Analyst"""
+    id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    user_business_need: str = ""
+    expected_behavior: str = ""
+    scope: str = ""
+    out_of_scope: str = ""
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    edge_cases: list[str] = Field(default_factory=list)
+    backend_requirements: str = ""
+    frontend_requirements: str = ""
+    dependencies: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    qa_verification_requirements: str = ""
+
+
+class BackendHandoff(BaseModel):
+    """Backend implementation report with frontend handoff section"""
+    id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    what_changed: str = ""
+    api_contract: dict = Field(default_factory=dict)
+    compatibility_notes: str = ""
+    config_changes: list[str] = Field(default_factory=list)
+    migrations: list[str] = Field(default_factory=list)
+    operational_implications: str = ""
+    changed_files: list[str] = Field(default_factory=list)
+    commits: list[str] = Field(default_factory=list)
+    frontend_handoff: dict = Field(default_factory=dict)
+
+
+class QATestCase(BaseModel):
+    """Individual QA test case"""
+    id: str
+    requirements: list[str] = Field(default_factory=list)
+    description: str = ""
+    environment: str = ""
+    steps: list[str] = Field(default_factory=list)
+    expected: str = ""
+    actual: str = ""
+    result: str = "pending"
+    evidence: str = ""
+    reproducible: bool = False
+
+
+class QAReport(BaseModel):
+    """QA test strategy and results report"""
+    id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    test_strategy: str = "requirements-led, implementation-independent"
+    test_cases: list[QATestCase] = Field(default_factory=list)
+    coverage_gaps: list[str] = Field(default_factory=list)
+    residual_risks: list[str] = Field(default_factory=list)
+    overall_recommendation: str = "pending"
+
+
+class PODecision(BaseModel):
+    """Product Owner decision on task release readiness"""
+    id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    decision: str = "pending"
+    rationale: str = ""
+    affected_requirements: list[str] = Field(default_factory=list)
+    revision_required: bool = False
+    return_to_stage: str = ""
+
+class ModelInfo(BaseModel):
+    """Information about an Ollama model"""
+    name: str
+    family: str = ""
+    parameters: str = ""
+    quantization: str = ""
+    supports_tool_calls: bool = False
+    description: str = ""
+    modified_at: datetime | None = None
+    size: int = 0
+    
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class StageProviderConfig(BaseModel):
+    """Provider and model configuration for a specific stage"""
+    provider: str = "ollama"
+    model: str = ""
+    inherit_from_project: bool = True
+    
+    @field_validator("provider")
+    @classmethod
+    def clean_provider(cls, value: str) -> str:
+        value = value.strip().lower()
+        valid_providers = {"ollama", "codex", "claude"}
+        if value not in valid_providers:
+            raise ValueError(f"Provider must be one of: {valid_providers}")
+        return value
+    
+    @field_validator("model")
+    @classmethod
+    def clean_model(cls, value: str) -> str:
+        return value.strip()
+
+
+class ProjectAISettings(BaseModel):
+    """AI provider and model configuration for a project"""
+    default_provider: str = "ollama"
+    default_model: str = "qwen3.5:0.8b"
+    stage_providers: dict[str, StageProviderConfig] = Field(default_factory=dict)
+    ollama_endpoint: str = "http://localhost:11434"
+    codex_endpoint: str = ""
+    claude_endpoint: str = ""
+    
+    @field_validator("default_provider")
+    @classmethod
+    def clean_default_provider(cls, value: str) -> str:
+        value = value.strip().lower()
+        valid_providers = {"ollama", "codex", "claude"}
+        if value not in valid_providers:
+            raise ValueError(f"Default provider must be one of: {valid_providers}")
+        return value
+    
+    @field_validator("default_model")
+    @classmethod
+    def clean_default_model(cls, value: str) -> str:
+        return value.strip()
+    
+    @field_validator("ollama_endpoint", "codex_endpoint", "claude_endpoint")
+    @classmethod  
+    def clean_endpoint(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value:
+            return value
+        if not value.startswith(("http://", "https://")):
+            value = f"http://{value}"
+        return value
+    
+    def get_provider_for_stage(self, stage: str) -> tuple[str, str, bool]:
+        stage_config = self.stage_providers.get(stage)
+        if stage_config and not stage_config.inherit_from_project:
+            return stage_config.provider, stage_config.model, False
+        return self.default_provider, self.default_model, True
+    
+    def get_effective_config_for_stage(self, stage: str) -> dict:
+        provider, model, inherited = self.get_provider_for_stage(stage)
+        return {"provider": provider, "model": model, "inherited": inherited, "stage_has_override": stage in self.stage_providers}
+
+
+class ProjectModelSettings(BaseModel):
+    """Legacy AI model configuration for a project (backward compatibility)"""
+    default_model: str = "qwen3.5:0.8b"
+    stage_assignments: dict[str, str] = Field(default_factory=dict)
+    ollama_endpoint: str = "http://localhost:11434"
+    
+    @field_validator("default_model")
+    @classmethod
+    def clean_default_model(cls, value: str) -> str:
+        return value.strip()
+    
+    @field_validator("stage_assignments")
+    @classmethod
+    def clean_stage_assignments(cls, value: dict[str, str]) -> dict[str, str]:
+        return {stage: model.strip() for stage, model in value.items() if stage.strip() and model.strip()}
+    
+    @field_validator("ollama_endpoint")
+    @classmethod  
+    def clean_ollama_endpoint(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            value = f"http://{value}"
+        return value
+    
+    def get_model_for_stage(self, stage: str) -> str:
+        return self.stage_assignments.get(stage, self.default_model)
+    
+    def to_ai_settings(self) -> ProjectAISettings:
+        return ProjectAISettings(
+            default_provider="ollama",
+            default_model=self.default_model,
+            stage_providers={
+                stage: StageProviderConfig(
+                    provider="ollama",
+                    model=model,
+                    inherit_from_project=False
+                )
+                for stage, model in self.stage_assignments.items()
+            },
+            ollama_endpoint=self.ollama_endpoint,
+        )
 
 class SDLCProjectConfig(BaseModel):
     """SDLC-specific project configuration"""
@@ -639,6 +839,25 @@ class SDLCTask(BaseModel):
     checkpoint_path: str = ""
     last_checkpoint: datetime | None = None
 
+    # Team workflow extension fields
+    task_specification: TaskSpecification | None = None  # Analyst's structured specification
+    backend_handoff: BackendHandoff | None = None  # Backend's handoff to Frontend
+    qa_report: QAReport | None = None  # QA's test report
+    po_decision: PODecision | None = None  # Product Owner's decision
+
+    # Workflow-specific gate states (for automatic review)
+    backend_review_status: str = "pending"  # pending, reviewing, approved, needs_revision
+    frontend_review_status: str = "pending"  # pending, reviewing, approved, needs_revision
+    qa_review_status: str = "pending"  # pending, reviewing, approved, needs_revision
+    analyst_final_review_status: str = "pending"  # pending, reviewing, completed
+    analyst_final_summary: str = ""  # Analyst's final assessment
+
+    # Knowledge paths for role isolation
+    analyst_knowledge_path: str = ""
+    backend_knowledge_path: str = ""
+    frontend_knowledge_path: str = ""
+    qa_knowledge_path: str = ""
+
 
 class SDLCTaskRequest(BaseModel):
     """Request to create a new SDLC task"""
@@ -696,3 +915,7 @@ class StageTransitionRequest(BaseModel):
         if value not in valid_stages:
             raise ValueError(f"Stage must be one of: {valid_stages}")
         return value
+
+
+# ===== TEAM WORKFLOW EXTENSION MODELS =====
+

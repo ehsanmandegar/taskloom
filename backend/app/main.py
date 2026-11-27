@@ -16,9 +16,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import AgentType, BranchSwitchRequest, ChatMessage, ChatRequest, CommitRequest, GitProvider, McpFailureMode, ProjectDefaults, ProjectProfile, RenameTaskRequest, RoleKnowledgeSettings, RunStatus, TaskRequest, TaskRoleRequest, TaskState, TestSetupRequest, TodoItem, TodoRequest, valid_branch_name
-from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse
+from .models import SDLCStatus, SDLCProjectConfig, AgentConfig, ProjectWorkflowConfig, SDLCTask, SDLCTaskRequest, AgentResult, HumanIntervention, RevisionRequest, SDLCTaskContext, StageTransitionRequest, HumanInterventionResponse, StageProviderConfig
 from .services import agent_account_status, codex_account_status, continue_task, create_merge_request, execute_task, generate_commit_message, git_branches, git_commit, git_push, repository, run_test_setup, switch_git_branch, task_branch_preflight, workspace_changes, workspace_diff, workspace_file, workspace_preview_path, workspace_tree
-from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError, command
+from .services import SDLCProjectManager, SDLCTaskManager, TaskConflictError, command, OllamaDiscoveryService, ModelResolutionService, ProviderResolutionService, _ollama_coding_agent
 from . import project_builder, run_guides, run_processes
 from .services import agent_executable
 from .sdlc_git import (
@@ -1641,6 +1641,474 @@ async def respond_to_human_intervention(
 async def list_pending_human_interventions():
     """List pending human intervention requests (oldest first)"""
     return sdlc_task_manager.list_pending_interventions()
+
+
+# ===== TEAM WORKFLOW EXTENSION API ENDPOINTS =====
+
+@app.post("/api/sdlc/tasks/{task_id}/backend-review", response_model=SDLCTask)
+async def submit_backend_review(task_id: str, request: Request):
+    """Submit backend result for analyst review."""
+    from .services import SDLCTask
+    from .models import StageTransitionRequest
+    
+    task = sdlc_task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+    
+    try:
+        # Transition to backend review stage
+        transition = StageTransitionRequest(task_id=task_id, stage="backend_review", force=False)
+        return await transition_sdlc_task(task_id, transition)
+    except Exception as exc:
+        raise HTTPException(400, f"Failed to submit backend review: {exc}") from exc
+
+
+@app.post("/api/sdlc/tasks/{task_id}/frontend-review", response_model=SDLCTask)
+async def submit_frontend_review(task_id: str, request: Request):
+    """Submit frontend result for analyst review."""
+    from .services import SDLCTask
+    from .models import StageTransitionRequest
+    
+    task = sdlc_task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+    
+    try:
+        # Transition to frontend review stage
+        transition = StageTransitionRequest(task_id=task_id, stage="frontend_review", force=False)
+        return await transition_sdlc_task(task_id, transition)
+    except Exception as exc:
+        raise HTTPException(400, f"Failed to submit frontend review: {exc}") from exc
+
+
+@app.post("/api/sdlc/tasks/{task_id}/qa-review", response_model=SDLCTask)
+async def submit_qa_review(task_id: str, request: Request):
+    """Submit QA test results for review."""
+    from .services import SDLCTask
+    from .models import StageTransitionRequest, QAReport
+    
+    task = sdlc_task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+    
+    body = await request.json()
+    qa_report_data = body.get("qa_report", {})
+    
+    try:
+        # Create QA report
+        qa_report = QAReport(
+            id=f"qa-{task_id}",
+            test_strategy=qa_report_data.get("test_strategy", "requirements-led, implementation-independent"),
+            test_cases=[],
+            coverage_gaps=qa_report_data.get("coverage_gaps", []),
+            residual_risks=qa_report_data.get("residual_risks", []),
+            overall_recommendation=qa_report_data.get("overall_recommendation", "pending")
+        )
+        
+        # Update task with QA report
+        await sdlc_task_manager.update_task(task_id, lambda t: setattr(t, "qa_report", qa_report))
+        
+        # Transition to QA review stage
+        transition = StageTransitionRequest(task_id=task_id, stage="qa_review", force=False)
+        return await transition_sdlc_task(task_id, transition)
+    except Exception as exc:
+        raise HTTPException(400, f"Failed to submit QA review: {exc}") from exc
+
+
+@app.post("/api/sdlc/tasks/{task_id}/analyst-final-review", response_model=SDLCTask)
+async def submit_analyst_final_review(task_id: str, request: Request):
+    """Submit analyst's final assessment before PO approval."""
+    from .models import StageTransitionRequest
+    
+    task = sdlc_task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+    
+    body = await request.json()
+    final_summary = body.get("final_summary", "")
+    
+    try:
+        # Update task with analyst final review
+        await sdlc_task_manager.update_task(task_id, lambda t: setattr(t, "analyst_final_summary", final_summary))
+        
+        # Transition to analyst final review stage
+        transition = StageTransitionRequest(task_id=task_id, stage="analyst_final_review", force=False)
+        return await transition_sdlc_task(task_id, transition)
+    except Exception as exc:
+        raise HTTPException(400, f"Failed to submit analyst final review: {exc}") from exc
+
+
+@app.post("/api/sdlc/tasks/{task_id}/po-approval", response_model=SDLCTask)
+async def submit_po_decision(task_id: str, request: Request):
+    """Submit Product Owner's decision on release readiness."""
+    from .models import StageTransitionRequest, PODecision
+    
+    task = sdlc_task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+    
+    body = await request.json()
+    decision_data = body.get("decision", {})
+    
+    try:
+        # Create PO decision
+        po_decision = PODecision(
+            id=f"po-{task_id}",
+            decision=decision_data.get("decision", "pending"),
+            rationale=decision_data.get("rationale", ""),
+            affected_requirements=decision_data.get("affected_requirements", []),
+            revision_required=decision_data.get("revision_required", False),
+            return_to_stage=decision_data.get("return_to_stage", "")
+        )
+        
+        # Update task with PO decision
+        await sdlc_task_manager.update_task(task_id, lambda t: setattr(t, "po_decision", po_decision))
+        
+        # Determine next stage based on decision
+        if po_decision.decision == "approve":
+            # Transition to release ready
+            return await transition_sdlc_task(task_id, StageTransitionRequest(task_id=task_id, stage="release_ready", force=True))
+        elif po_decision.decision == "changes_requested":
+            # Return to appropriate stage
+            return_to = po_decision.return_to_stage or "analyst_final_review"
+            return await transition_sdlc_task(task_id, StageTransitionRequest(task_id=task_id, stage=return_to, force=True))
+        else:  # reject
+            return await transition_sdlc_task(task_id, StageTransitionRequest(task_id=task_id, stage="failed", force=True))
+    except Exception as exc:
+        raise HTTPException(400, f"Failed to submit PO decision: {exc}") from exc
+
+
+@app.post("/api/sdlc/tasks/{task_id}/release-ready", response_model=SDLCTask)
+async def mark_task_release_ready(task_id: str, request: Request):
+    """Mark task as release-ready after PO approval."""
+    from .models import StageTransitionRequest
+    
+    task = sdlc_task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+    
+    try:
+        # Transition to release ready stage
+        return await transition_sdlc_task(task_id, StageTransitionRequest(task_id=task_id, stage="release_ready", force=True))
+    except Exception as exc:
+        raise HTTPException(400, f"Failed to mark task as release-ready: {exc}") from exc
+
+
+@app.get("/api/sdlc/tasks/{task_id}/workflow-status", response_model=dict)
+async def get_workflow_status(task_id: str):
+    """Get detailed workflow status for a task."""
+    task = sdlc_task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+    
+    return {
+        "current_stage": task.current_stage,
+        "workflow_status": task.workflow_status,
+        "current_review_stage": task.current_review_stage,
+        "backend_review_status": task.backend_review_status,
+        "frontend_review_status": task.frontend_review_status,
+        "qa_review_status": task.qa_review_status,
+        "analyst_final_review_status": task.analyst_final_review_status,
+        "po_decision": task.po_decision.model_dump() if task.po_decision else None,
+        "qa_report": task.qa_report.model_dump() if task.qa_report else None,
+        "can_transition": task.current_stage in ["backend_running", "frontend_running", "qa_running", "analyst_final_review", "po_pending_approval"]
+    }
+
+
+@app.get("/api/sdlc/projects/{project_id}/default-workflow", response_model=list[str])
+async def get_default_workflow(project_id: str):
+    """Get the default workflow stages for a new project."""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        # Return default workflow
+        return ["analysis", "backend", "backend_review", "frontend", "frontend_review", "qa", "qa_review", "analyst_final_review", "po_pending_approval"]
+    
+    return project.workflow.stages
+
+
+# ===== OLLAMA MODEL MANAGEMENT API =====
+
+@app.get("/api/ollama/models")
+async def get_ollama_models():
+    """Get list of available Ollama models"""
+    try:
+        discovery = OllamaDiscoveryService()
+        models = await discovery.list_models()
+        return [model.model_dump() for model in models]
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to fetch Ollama models: {exc}")
+
+
+@app.get("/api/ollama/connection")
+async def check_ollama_connection():
+    """Check if Ollama is reachable"""
+    try:
+        discovery = OllamaDiscoveryService()
+        connected = await discovery.check_connection()
+        return {"connected": connected}
+    except Exception as exc:
+        return {"connected": False, "error": str(exc)}
+
+
+@app.get("/api/ollama/models/{model_name}")
+async def get_ollama_model_info(model_name: str):
+    """Get detailed information about a specific Ollama model"""
+    try:
+        discovery = OllamaDiscoveryService()
+        model_info = await discovery.get_model_info(model_name)
+        if not model_info:
+            raise HTTPException(404, f"Model '{model_name}' not found")
+        return model_info.model_dump()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to get model info: {exc}")
+
+
+@app.get("/api/sdlc/projects/{project_id}/model-settings")
+async def get_project_model_settings(project_id: str):
+    """Get AI model settings for a project (legacy endpoint)"""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    # Return legacy model settings or convert from AI settings
+    if project.model_settings:
+        return project.model_settings.model_dump()
+    else:
+        # Convert from new AI settings to legacy format
+        legacy_settings = {
+            "default_model": project.ai_settings.default_model,
+            "stage_assignments": {},
+            "ollama_endpoint": project.ai_settings.ollama_endpoint
+        }
+        
+        # Convert stage providers to stage assignments (only for Ollama)
+        for stage, config in project.ai_settings.stage_providers.items():
+            if config.provider == "ollama":
+                legacy_settings["stage_assignments"][stage] = config.model
+        
+        return legacy_settings
+
+
+@app.put("/api/sdlc/projects/{project_id}/model-settings")
+async def update_project_model_settings(project_id: str, settings: dict):
+    """Update AI model settings for a project (legacy endpoint)"""
+    from .models import ProjectModelSettings
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    try:
+        # Ensure legacy model_settings exists
+        if project.model_settings is None:
+            project.model_settings = ProjectModelSettings()
+        
+        # Update legacy model settings
+        if "default_model" in settings:
+            project.model_settings.default_model = settings["default_model"]
+        if "stage_assignments" in settings:
+            project.model_settings.stage_assignments = settings["stage_assignments"]
+        if "ollama_endpoint" in settings:
+            project.model_settings.ollama_endpoint = settings["ollama_endpoint"]
+        
+        # Also update AI settings for backward compatibility
+        project.ai_settings.default_model = settings.get("default_model", project.ai_settings.default_model)
+        project.ai_settings.ollama_endpoint = settings.get("ollama_endpoint", project.ai_settings.ollama_endpoint)
+        
+        # Convert stage assignments to stage providers
+        stage_assignments = settings.get("stage_assignments", {})
+        for stage, model in stage_assignments.items():
+            project.ai_settings.stage_providers[stage] = StageProviderConfig(
+                provider="ollama",
+                model=model,
+                inherit_from_project=False
+            )
+        
+        # Save the project
+        sdlc_project_manager.save_project(project)
+        return project.model_settings.model_dump()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid model settings: {exc}")
+
+
+@app.get("/api/sdlc/projects/{project_id}/stage-model/{stage}")
+async def get_stage_model(project_id: str, stage: str):
+    """Get the resolved model for a specific stage (legacy endpoint)"""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    # Use new provider resolution
+    agent_config = project.agents.get(stage)
+    provider_info = await ProviderResolutionService().get_provider_info_for_stage(stage, project, agent_config)
+    
+    # For backward compatibility, only return model info for Ollama
+    if provider_info["provider"] == "ollama":
+        model_name = provider_info["model"]
+        try:
+            discovery = OllamaDiscoveryService()
+            model_info = await discovery.get_model_info(model_name)
+            return {
+                "model": model_name,
+                "info": model_info.model_dump() if model_info else None,
+                "source": "project_default" if model_name == project.ai_settings.default_model else "stage_assignment",
+                "provider": "ollama"
+            }
+        except Exception:
+            return {
+                "model": model_name,
+                "info": None,
+                "source": "project_default" if model_name == project.ai_settings.default_model else "stage_assignment",
+                "provider": "ollama"
+            }
+    else:
+        # For non-Ollama providers, return provider info
+        return {
+            "model": provider_info["model"],
+            "info": None,
+            "source": "provider_override" if provider_info["overridden"] else "project_default",
+            "provider": provider_info["provider"],
+            "provider_name": provider_info["provider_name"]
+        }
+
+
+# ===== MULTI-PROVIDER AI API ENDPOINTS =====
+
+@app.get("/api/ai/providers")
+async def get_ai_providers():
+    """Get list of all available AI providers with their status"""
+    try:
+        from .providers import provider_registry
+        providers = await provider_registry.get_available_providers()
+        return providers
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to fetch providers: {exc}")
+
+
+@app.get("/api/ai/providers/{provider_id}/status")
+async def get_provider_status(provider_id: str):
+    """Get status and information for a specific provider"""
+    try:
+        from .providers import provider_registry, ProviderError
+        provider = provider_registry.get_provider(provider_id)
+        if not provider:
+            raise HTTPException(404, f"Provider '{provider_id}' not found")
+        
+        available = await provider.check_availability()
+        result = {
+            "id": provider.get_provider_id(),
+            "name": provider.get_display_name(),
+            "available": available,
+            "agent_type": provider.get_agent_type().value,
+            "runner_type": provider.get_runner_type().value,
+        }
+        
+        if available:
+            try:
+                models = await provider.get_available_models()
+                result["models"] = [model.model_dump() for model in models]
+                result["model_count"] = len(models)
+            except Exception as exc:
+                result["models"] = []
+                result["model_count"] = 0
+                result["model_error"] = str(exc)
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to get provider status: {exc}")
+
+
+@app.get("/api/ai/providers/{provider_id}/models")
+async def get_provider_models(provider_id: str):
+    """Get available models for a specific provider"""
+    try:
+        from .providers import provider_registry, ProviderError
+        models = await provider_registry.get_provider_models(provider_id)
+        return [model.model_dump() for model in models]
+    except ProviderError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to fetch models: {exc}")
+
+
+@app.post("/api/ai/providers/{provider_id}/refresh")
+async def refresh_provider_models(provider_id: str):
+    """Refresh the model list for a provider"""
+    try:
+        from .providers import provider_registry, ProviderError
+        # This will force a re-fetch of models
+        models = await provider_registry.get_provider_models(provider_id)
+        return {
+            "provider": provider_id,
+            "model_count": len(models),
+            "refreshed": True
+        }
+    except ProviderError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to refresh models: {exc}")
+
+
+@app.get("/api/sdlc/projects/{project_id}/ai-settings")
+async def get_project_ai_settings(project_id: str):
+    """Get AI provider and model settings for a project"""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found")
+    return project.ai_settings.model_dump()
+
+
+@app.put("/api/sdlc/projects/{project_id}/ai-settings")
+async def update_project_ai_settings(project_id: str, settings: dict):
+    """Update AI provider and model settings for a project"""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    try:
+        # Update AI settings
+        if "default_provider" in settings:
+            project.ai_settings.default_provider = settings["default_provider"]
+        if "default_model" in settings:
+            project.ai_settings.default_model = settings["default_model"]
+        if "stage_providers" in settings:
+            # Convert dict to StageProviderConfig objects
+            stage_providers = {}
+            for stage, config_dict in settings["stage_providers"].items():
+                stage_providers[stage] = StageProviderConfig(**config_dict)
+            project.ai_settings.stage_providers = stage_providers
+        if "ollama_endpoint" in settings:
+            project.ai_settings.ollama_endpoint = settings["ollama_endpoint"]
+        if "codex_endpoint" in settings:
+            project.ai_settings.codex_endpoint = settings["codex_endpoint"]
+        if "claude_endpoint" in settings:
+            project.ai_settings.claude_endpoint = settings["claude_endpoint"]
+        
+        # Save the project
+        sdlc_project_manager.save_project(project)
+        return project.ai_settings.model_dump()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid AI settings: {exc}")
+
+
+@app.get("/api/sdlc/projects/{project_id}/stage-config/{stage}")
+async def get_stage_provider_config(project_id: str, stage: str):
+    """Get the resolved provider and model configuration for a specific stage"""
+    project = sdlc_project_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    agent_config = project.agents.get(stage)
+    provider_info = await ProviderResolutionService().get_provider_info_for_stage(stage, project, agent_config)
+    
+    return {
+        **provider_info,
+        "effective_config": project.ai_settings.get_effective_config_for_stage(stage),
+        "agent_has_override": bool(agent_config and (agent_config.provider_override or agent_config.model_override)),
+    }
 
 
 # ===== END SDLC API ENDPOINTS =====

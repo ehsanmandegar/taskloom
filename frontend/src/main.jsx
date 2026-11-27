@@ -9,6 +9,9 @@ import '@fontsource/vazirmatn/700.css';
 import '@radix-ui/themes/styles.css';
 import {Theme} from '@radix-ui/themes';
 import {DirectionProvider} from '@radix-ui/react-direction';
+import {TranslationProvider, useTranslation} from './translation_context';
+import {LanguageSelector} from './language_selector';
+import {initializeLanguage} from './i18n';
 import './styles.css';
 import './design.css';
 import {confirmDialog, promptDialog, DialogHost, ModalShell} from './ui.jsx';
@@ -21,6 +24,9 @@ import ReleaseManagement, {GitPanel} from './release_management.jsx';
 import {GitMerge, Package} from 'lucide-react';
 import {storedAdminHeaders} from './releases.js';
 import SDLCDashboard from './sdlc_dashboard.jsx';
+
+// Initialize language on app load
+initializeLanguage();
 
 const API = import.meta.env.VITE_API_URL || '';
 const initial = {project_path:'', guide_paths:'', task_id:'', session_name:'', request:'', base_branch:'main', test_command:'', test_working_directory:'', test_setup_enabled:false, confirm_dirty_worktree:false, auto_commit:false, auto_generate_commit_message:false, auto_push:false, auto_merge_request:false, mcp_server_name:'', mcp_failure_mode:'warning', git_provider:'gitlab', agent_type:'codex'};
@@ -268,7 +274,7 @@ function App(){
   function closeWorkspace(id,e){e.stopPropagation();if(workspaces.length===1)return;const index=workspaces.findIndex(item=>item.id===id),remaining=workspaces.filter(item=>item.id!==id);setWorkspaces(remaining);localStorage.removeItem(`taskloom-workspace-${id}-state`);localStorage.removeItem(`taskloom-workspace-${id}-active-session`);if(activeWorkspace===id)setActiveWorkspace(remaining[Math.max(0,index-1)].id)}
   function updateIdentity(id,title,status){setWorkspaces(current=>current.map(item=>item.id===id&&(item.title!==title||item.status!==status)?{...item,title,status}:item))}
   return <Theme accentColor="green" grayColor="sage" radius="large" appearance={theme} panelBackground="solid"><DirectionProvider dir="rtl"><DialogHost/><div className={`taskloom-browser ${menuCollapsed?'admin-menu-collapsed':''}`} dir="rtl">
-    <header className="app-topbar"><div className="app-topbar-title"><span className="app-topbar-icon"><Sparkles size={17}/></span><strong>{view==='overview'?'نمای کلی':view==='tasks'?'تسک‌ها':view==='create-task'?'ایجاد تسک':view==='roles'?'نقش‌ها':view==='releases'?'مدیریت نسخه':'پلتفرم SDLC'}</strong></div><div className="app-topbar-actions"><Clock/><button className="theme-toggle" type="button" onClick={()=>setTheme(nextTheme(theme))} aria-label={theme==='dark'?'فعال‌کردن تم روشن':'فعال‌کردن تم تاریک'} aria-pressed={theme==='dark'}>{theme==='dark'?<Sun size={16}/>:<Moon size={16}/>}<span>{theme==='dark'?'روشن':'تاریک'}</span></button></div></header>
+    <header className="app-topbar"><div className="app-topbar-title"><span className="app-topbar-icon"><Sparkles size={17}/></span><strong>{view==='overview'?'نمای کلی':view==='tasks'?'تسک‌ها':view==='create-task'?'ایجاد تسک':view==='roles'?'نقش‌ها':view==='releases'?'مدیریت نسخه':'پلتفرم SDLC'}</strong></div><div className="app-topbar-actions"><Clock/><LanguageSelector className="language-selector"/><button className="theme-toggle" type="button" onClick={()=>setTheme(nextTheme(theme))} aria-label={theme==='dark'?'فعال‌کردن تم روشن':'فعال‌کردن تم تاریک'} aria-pressed={theme==='dark'}>{theme==='dark'?<Sun size={16}/>:<Moon size={16}/>}<span>{theme==='dark'?'روشن':'تاریک'}</span></button></div></header>
     <aside className="admin-menu" aria-label="منوی اصلی">
       <div className="admin-menu-header"><span className="admin-menu-mark"><Bot size={19}/></span><div className="admin-menu-name"><strong>Taskloom</strong><small>داشبورد مدیریت</small></div><button type="button" className="admin-menu-toggle" onClick={()=>setMenuCollapsed(value=>!value)} aria-label={menuCollapsed?'باز کردن منو':'بستن منو'} aria-expanded={!menuCollapsed} title={menuCollapsed?'باز کردن منو':'بستن منو'}><Menu size={20}/></button></div>
       <nav className="admin-menu-nav" aria-label="بخش‌های داشبورد"><span className="admin-menu-section">منوی اصلی</span><button type="button" className={`admin-menu-item ${view==='overview'?'active':''}`} aria-current={view==='overview'?'page':undefined} title="نمای کلی" onClick={()=>setView('overview')}><LayoutDashboard size={19}/><span>نمای کلی</span></button><button type="button" className={`admin-menu-item ${view==='tasks'?'active':''}`} aria-current={view==='tasks'?'page':undefined} title="تسک‌ها" onClick={()=>setView('tasks')}><ClipboardList size={19}/><span>تسک‌ها</span></button><button type="button" className={`admin-menu-item ${view==='create-task'?'active':''}`} aria-current={view==='create-task'?'page':undefined} title="ایجاد تسک" onClick={()=>setView('create-task')}><Plus size={19}/><span>ایجاد تسک</span></button><button type="button" className={`admin-menu-item ${view==='roles'?'active':''}`} aria-current={view==='roles'?'page':undefined} title="نقش‌ها" onClick={()=>setView('roles')}><Users size={19}/><span>نقش‌ها</span></button><button type="button" className={`admin-menu-item ${view==='sdlc'?'active':''}`} aria-current={view==='sdlc'?'page':undefined} title="پلتفرم SDLC" onClick={()=>setView('sdlc')}><BarChart3 size={19}/><span>پلتفرم SDLC</span></button><button type="button" className={`admin-menu-item ${view==='releases'?'active':''}`} aria-current={view==='releases'?'page':undefined} title="مدیریت نسخه" onClick={()=>setView('releases')}><Package size={19}/><span>مدیریت نسخه</span></button></nav>
@@ -280,4 +286,8 @@ function App(){
     </div>
   </div></DirectionProvider></Theme>;
 }
-createRoot(document.getElementById('root')).render(<App/>);
+createRoot(document.getElementById('root')).render(
+  <TranslationProvider>
+    <App/>
+  </TranslationProvider>
+);

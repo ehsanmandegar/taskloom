@@ -1,0 +1,611 @@
+# TaskLoom --- Team Workflow & Agent Governance Extension
+
+**Implementation brief for Kiro**\
+**Date:** 2026-11-26\
+**Repository:** https://github.com/ehsanmandegar/taskloom
+
+## 1. Purpose
+
+Extend the existing TaskLoom multi-agent SDLC workflow so it can model
+and automate the real delivery process of a four-person product team,
+while preserving the existing task execution, revision, approval, Git
+and release capabilities.
+
+This is an extension of the current system, not a request to replace its
+architecture or build a second workflow engine. Before changing code,
+inspect the current implementation and map each requirement below to
+existing models, services, endpoints, UI components and tests. Reuse
+existing mechanisms wherever possible.
+
+A second requested improvement is a complete Persian/English dashboard
+experience.
+
+## 2. Team and product context
+
+The human team has four people:
+
+-   **Product Owner (PO):** owns product acceptance and the final
+    decision that a task is ready to enter release planning.
+-   **Analyst:** translates incoming team requests into a
+    workspace-compatible specification, coordinates cross-stage
+    decisions and reviews the evidence from implementation and QA.
+-   **Backend developer:** implements backend/API changes and reports
+    any frontend impact.
+-   **Frontend developer:** implements the visual widget and its
+    integration with backend APIs.
+
+QA/testing is a responsibility but does not currently have a dedicated
+human team member. It is performed by a QA agent.
+
+The product is a unified web workspace that brings multiple tools
+together as widgets. Examples include calendar, task management, file
+storage and Git integrations. A requesting internal team explains which
+widget and capabilities it needs. The TaskLoom team implements the
+integration and widget; the requesting team then uses the resulting
+tool.
+
+## 3. Target end-to-end workflow
+
+The intended flow is **request → analysis → backend ↔ analyst ↔ frontend
+→ analyst → QA → analyst → PO → release**.
+
+The exact stage sequence may contain repeated review and revision loops.
+Do not model it as a one-way pipeline that cannot return to an earlier
+stage.
+
+### 3.1 Incoming request and analysis
+
+1.  A request arrives from an internal team. It should be possible to
+    create a TaskLoom task with the original request, requester/team,
+    relevant widget or integration, and any supplied context.
+2.  The Analyst agent reads the request and the approved shared product
+    knowledge:
+    -   Workspace policies and product rules.
+    -   Existing architecture and integration conventions.
+    -   Relevant product documentation and supported scenarios.
+    -   Existing requirements and prior decisions that are explicitly
+        available to the Analyst.
+3.  The Analyst creates a clear, actionable task specification. It must
+    explain:
+    -   User/business need and expected behavior.
+    -   Scope and out-of-scope items.
+    -   Acceptance criteria and edge cases.
+    -   Required backend work and API contract.
+    -   Required frontend/widget work and expected UX behavior.
+    -   Dependencies, assumptions, risks and unresolved questions.
+    -   What QA must verify from the externally observable requirements.
+4.  The Analyst may use the current repository and project documentation
+    to make the specification consistent with the actual architecture.
+    It must not invent existing APIs or claim an implementation exists
+    without evidence.
+5.  If essential information is missing or conflicting, the Analyst asks
+    for clarification or creates a human-review item instead of silently
+    guessing.
+6.  The task specification is presented for the configured analysis
+    approval gate. Keep existing human/automatic approval policies; do
+    not bypass them.
+
+### 3.2 Backend implementation and frontend handoff
+
+1.  The Backend agent receives the approved task specification and the
+    backend-specific knowledge available to it.
+2.  It implements only the backend portion in its own
+    repository/workspace.
+3.  Its completion report must include:
+    -   What changed and why.
+    -   API contract changes, including method, path, request/response
+        shape, validation, errors and compatibility notes.
+    -   Relevant configuration, migrations and operational implications.
+    -   Tests executed and their actual results.
+    -   Changed files/commits as established by TaskLoom, not merely
+        claimed by the model.
+    -   A separate **Frontend Handoff** section describing any frontend
+        work required because of the backend implementation.
+4.  The Backend agent must not directly implement frontend code. Its
+    frontend handoff is a proposal/report for the Analyst and Frontend
+    agent.
+5.  The Analyst reviews the backend result against the approved task and
+    the handoff:
+    -   If acceptable, it sends the approved frontend instructions to
+        Frontend.
+    -   If incomplete or incorrect, it creates a revision request
+        targeted at Backend, with concrete reasons and expected
+        corrections.
+    -   If the backend reports no frontend impact, the Analyst must
+        still decide whether the original requirement needs frontend
+        work. The absence of a handoff is not proof that no UI change is
+        required.
+
+### 3.3 Frontend implementation and review loop
+
+1.  Frontend receives the approved original requirements, the Analyst's
+    instructions and the relevant Backend Handoff/API contract.
+2.  Frontend implements the widget/UI and API integration in its own
+    repository/workspace.
+3.  Its report includes the user-visible behavior implemented, API
+    integration details, states handled (loading, empty, error,
+    permission-denied, success, etc. where relevant),
+    accessibility/responsive considerations, tests and any remaining
+    concerns.
+4.  The Analyst reviews Frontend's result against the approved
+    requirements and Backend contract.
+5.  The Analyst may:
+    -   Approve the frontend result and move the task to QA.
+    -   Send a concrete revision request back to Frontend.
+    -   Send a clarification or correction request back to Backend if
+        the API contract or backend behavior needs to change.
+6.  When Backend is revised, the Analyst re-evaluates the new backend
+    output and updates the frontend handoff if necessary. Frontend must
+    not continue against a superseded API contract.
+7.  Repeat until the Analyst determines that the implementation evidence
+    is coherent and ready for independent QA.
+
+### 3.4 Independent QA --- mandatory knowledge isolation
+
+QA is intentionally independent. This is a core requirement, not an
+optional prompt preference.
+
+**QA must not receive or read backend source code, backend
+implementation notes, backend agent reports, frontend source code,
+implementation-specific design decisions, or internal implementation
+knowledge.** In particular, QA must not be told which code paths or
+implementation choices were used, because that can bias test design
+toward confirming the implementation rather than independently checking
+the requirements.
+
+QA may receive only: - The original incoming request. - The approved
+task specification and acceptance criteria. - The Analyst's approved
+cross-stage task-flow/revision history, limited to requirement-level
+decisions and externally observable expected behavior. -
+Public/user-facing product behavior and test environment/access needed
+to exercise the product. - QA's own role-specific testing knowledge,
+test standards and prior QA artifacts.
+
+QA must not receive: - Backend or frontend source repositories or their
+`project_path`. - Backend/frontend `knowledge_path` or private stage
+documents. - Backend/frontend agent prompts, reports, implementation
+summaries or code diffs. - Internal implementation details that reveal
+how the feature was built.
+
+The QA agent must be configured with a separate knowledge directory and
+a separate system prompt. Verify the actual filesystem/tool access
+boundary, not just a sentence in the prompt. Do not pass implementation
+directories through CLI `--add-dir`, MCP resources, shared context,
+attachments or other indirect channels.
+
+QA creates its own test strategy from the requirements, not from the
+implementation. It should consider: - Positive and negative scenarios. -
+Boundary and invalid inputs. - Permissions and access boundaries. -
+Empty, loading, failure and recovery states. - Integration behavior and
+API/UI contract from an external perspective. - Regression and
+cross-widget effects. - Usability/accessibility and responsive behavior
+where applicable.
+
+QA may author and run backend-facing tests and frontend-facing tests,
+but its test design must remain requirements-led and
+implementation-independent. It can use black-box interfaces, documented
+public contracts and test environments. It must not inspect
+implementation code to choose tests.
+
+QA reports: - Test cases and the requirement/acceptance criterion each
+one covers. - Environment and test data assumptions. - Exact commands or
+execution method where useful. - Pass/fail/blocked result per test. -
+Evidence and reproducible failure details. - Coverage gaps and residual
+risks. - Overall recommendation: `pass`, `fail` or `blocked`.
+
+If tests fail, QA sends the report to the Analyst. The Analyst decides
+whether the correction belongs to Backend, Frontend, both, or requires
+clarification of the task. The Analyst creates targeted revision
+requests and the relevant stage runs again. Once changed, the task
+returns to QA for re-testing. QA does not directly patch product code.
+
+### 3.5 Analyst final review and PO approval
+
+1.  After QA passes, the Analyst reviews the complete evidence chain:
+    -   Original request and approved requirements.
+    -   Backend result and frontend handoff.
+    -   Frontend result and any API contract updates.
+    -   QA test plan, results and evidence.
+    -   All revision requests and their resolutions.
+2.  The Analyst writes a final summary explaining whether the original
+    request has been met, which acceptance criteria are satisfied, known
+    limitations and any residual risk.
+3.  The Analyst sends the task to the PO for final product acceptance.
+4.  The PO can:
+    -   **Approve:** task becomes accepted/release-ready.
+    -   **Request changes:** PO feedback is sent to the Analyst; the
+        Analyst routes it to QA and/or Backend/Frontend as appropriate.
+        QA must re-test affected behavior after changes.
+    -   **Reject/stop:** task is not release-ready; preserve the
+        decision and rationale in the timeline.
+5.  PO approval is a distinct business/product gate. It must not be
+    silently treated as equivalent to an agent's `completed` status,
+    passing tests, or a technical auto-approval.
+6.  A task enters release planning only after PO approval and all
+    mandatory QA gates have passed.
+
+### 3.6 Release workflow --- preserve the existing Git process
+
+The existing Git/release workflow is already implemented and must be
+inspected and reused. Do not replace it with a parallel release
+mechanism.
+
+The business flow is: 1. PO-approved tasks accumulate for a release. 2.
+A release is created with a version identifier/tag. 3. The release
+explicitly lists the approved task IDs included in it. Example IDs
+mentioned by the team include `DWS-...` and `PODW-...`; these are
+examples, not fixed identifiers. 4. TaskLoom prepares the required Git
+merge/pull request on GitHub or GitLab using the existing repository and
+branch rules. 5. The release PR/MR must be associated with the release
+version tag and clearly identify included tasks. 6. Existing merge
+order, branch protection, human approval and release validation rules
+remain authoritative. Never push directly to protected branches or merge
+a release without the existing required approval. 7. Preserve
+traceability from request → task → agent stages/revisions → QA evidence
+→ PO approval → release → tag → PR/MR → merge.
+
+Before implementing this section, inspect the current release code, data
+model, Git provider integration and UI. Extend what exists only where a
+gap is demonstrated.
+
+## 4. Agent roles and knowledge boundaries
+
+Use separate role-specific knowledge directories and explicit
+allowlists. A suggested logical separation is:
+
+  ------------------------------------------------------------------------------------
+  Role                    May read                             Must not read
+  ----------------------- ------------------------------------ -----------------------
+  Analyst                 Shared product/workspace knowledge,  Secrets; unrelated
+                          requirements, task flow, stage       private credentials
+                          reports needed for review            
+
+  Backend                 Shared                               Frontend private
+                          project/architecture/conventions +   knowledge unless
+                          approved requirements + backend      explicitly provided as
+                          knowledge                            a narrow API
+                                                               integration contract
+
+  Frontend                Shared project/conventions +         Backend source/private
+                          approved requirements + approved     implementation notes
+                          backend API handoff + frontend       
+                          knowledge                            
+
+  QA                      Original request + approved          Backend/frontend
+                          requirements/acceptance criteria +   source, private docs,
+                          requirement-level task decisions +   agent reports and
+                          QA knowledge                         implementation details
+
+  PO                      Request, approved specification,     Secrets and unnecessary
+                          Analyst final summary, QA            implementation
+                          results/evidence, risks and release  internals
+                          scope                                
+  ------------------------------------------------------------------------------------
+
+Important distinctions: - Shared product knowledge is not the same as
+each stage's private knowledge. - An approved API contract is a public
+integration artifact; it must not expose backend source or internal
+implementation reasoning. - The Analyst needs enough stage output to
+coordinate and assess work. QA deliberately receives a reduced,
+sanitized view. - Keep access least-privilege and test it with automated
+negative-access tests. - Do not weaken existing project isolation or
+repository boundaries to make agents' jobs easier.
+
+## 5. Workflow state, events and auditability
+
+Extend the current SDLC task model/state machine rather than inventing a
+second state store.
+
+The workflow must represent at least: - Awaiting/under analysis. -
+Analysis review/approval. - Backend running and backend review. -
+Frontend running and frontend review. - QA planning/running and QA
+review. - Revision requested, including target stage and reason. -
+Analyst final review. - PO pending approval, approved, changes requested
+or rejected. - Release-ready / assigned to release. - Existing release
+lifecycle states.
+
+Use the project's existing status naming conventions where possible.
+These are conceptual states, not a demand to rename every current enum.
+
+Every meaningful transition must create a timeline/audit event
+containing actor/agent, source stage, target stage, timestamp, decision,
+reason, and relevant artifact references. Preserve all earlier reports
+and revisions; new outputs must not overwrite the historical evidence.
+
+Prevent invalid transitions (for example, QA before implementation
+review, PO approval before QA pass, release inclusion before PO
+approval). Return a clear conflict/error and explain the blocking
+condition.
+
+Support restart/recovery without duplicating stage execution, human
+requests, approvals or Git actions. Reuse existing task locking,
+optimistic versioning, inbox claiming and recovery mechanisms.
+
+## 6. Dashboard language: Persian and English
+
+Add full Persian/English localization to the dashboard.
+
+Requirements: 1. Provide a visible language selector with **فارسی** and
+**English**. 2. Persist the selected language using the project's
+existing settings mechanism if one exists; otherwise use an appropriate
+browser-persistent preference. Do not store sensitive data. 3. Default
+language should follow a reliable existing user preference/browser
+language if supported; otherwise preserve the current default to avoid
+surprising existing users. 4. All user-facing UI strings must be
+translated: navigation, page titles, buttons, forms, validation
+messages, status labels, workflow steps, empty/loading/error states,
+confirmations, notifications, tables, dialogs, tooltips and
+accessibility labels. 5. Agent output and user-authored task content
+must remain unchanged. Do not automatically translate source code,
+identifiers, API paths, logs or raw technical output. If translated
+summaries are later desired, make them explicitly separate from the
+original. 6. Persian mode must use RTL layout; English mode must use
+LTR. Direction must update consistently across the entire application,
+including menus, dialogs, forms, tables, icons where
+direction-sensitive, code-adjacent UI and responsive layouts. 7. Keep
+Persian typography (including the existing bundled Vazirmatn font) and
+the existing Radix Themes design system. Do not rewrite the UI framework
+or introduce an unrelated design system. 8. Verify both languages in
+light and dark themes and at narrow/mobile and desktop widths. 9. Avoid
+mixed-direction corruption for technical values such as URLs, email
+addresses, branch names, IDs, code, timestamps and API paths. Use
+appropriate LTR isolation for those values inside RTL pages. 10. Do not
+translate persisted enum values or API contracts solely for display. Map
+stable internal values to localized labels in the frontend.
+
+Suggested implementation approach: - Inspect current `main.jsx`,
+`sdlc_dashboard.jsx`, shared UI components and CSS first. - Introduce a
+centralized translation catalog and a small `t(key)` mechanism (or reuse
+an existing localization library if one is already present). - Avoid
+scattered inline language ternaries and duplicated components. - Set
+document/app direction and language attributes from the selected
+locale. - Add tests that detect missing translation keys and verify
+language/direction switching.
+
+## 7. UX expectations for the workflow
+
+The dashboard should make the process understandable at a glance: - Show
+the task's current stage and the next responsible role. - Show a clear
+timeline of analysis, backend, frontend, QA, Analyst decisions, PO
+decisions and revisions. - Distinguish agent completion from Analyst
+acceptance, QA pass and PO approval. - Show revision arrows/links to the
+stage being asked to change, with the reason and feedback. - Show
+Backend Handoff as a structured artifact, not buried in an unstructured
+log. - Show QA evidence and failures without exposing
+implementation-only material to QA. - Show why a task is blocked and
+what action or decision unblocks it. - Show release-ready tasks
+separately from tasks still in development/review. - Keep existing
+dashboard functionality working.
+
+Do not build a large visual redesign unless necessary. Prefer extending
+existing components and design tokens.
+
+## 8. API and data model expectations
+
+Inspect existing Pydantic models and endpoints before designing
+additions. Prefer additive, backward-compatible fields and endpoints.
+
+Potential concepts (names are suggestions, not mandatory): -
+`request_context` / requester metadata. - Structured acceptance
+criteria. - `backend_handoff` with API contract and frontend impact. -
+Stage review decisions and revision target/reason. - QA plan, individual
+test results and evidence references. - Analyst final assessment. - PO
+decision and feedback. - Release membership / release identifier.
+
+Requirements: - Validate all state transitions server-side;
+frontend-only restrictions are insufficient. - Keep original request and
+original reports immutable or versioned. - Sanitize stage artifacts
+before sharing them with a role that has a narrower knowledge
+boundary. - Never return secret tokens in API responses or logs. - Keep
+existing endpoints working unless a deliberate migration is designed and
+tested. - Document any new/changed API contract in the project's API
+documentation.
+
+## 9. Testing and acceptance criteria
+
+The work is not complete merely because the new UI appears or agents
+return text. Add automated tests and verify the following.
+
+### Workflow tests
+
+-   A request can be created and starts with Analysis.
+-   Analysis produces a structured task specification and enters the
+    configured approval gate.
+-   Backend can produce a backend result and a structured Frontend
+    Handoff.
+-   Analyst can approve Backend, request Backend revision, or route work
+    to Frontend.
+-   Frontend can implement against the approved API contract and report
+    its result.
+-   Analyst can send revisions to Frontend or Backend and repeat the
+    loop.
+-   QA starts only after Analyst implementation review.
+-   QA receives requirement-level information but cannot access
+    backend/frontend code or private stage knowledge.
+-   QA independently produces tests and reports pass/fail/blocked with
+    evidence.
+-   QA failure returns to Analyst and can be routed to the correct
+    implementation stage.
+-   QA is run again after relevant changes.
+-   Analyst final review occurs before PO approval.
+-   PO approval is required before release readiness.
+-   PO change requests return to the appropriate stage and preserve the
+    full history.
+-   A task cannot enter a release without QA pass and PO approval.
+-   Release membership, version/tag and Git PR/MR use the existing
+    release implementation.
+-   Invalid transitions are rejected server-side.
+-   Restart/recovery does not duplicate work or approvals.
+
+### Knowledge isolation tests
+
+-   QA cannot read backend source directories.
+-   QA cannot read frontend source directories.
+-   QA cannot read backend/frontend private knowledge directories.
+-   QA cannot receive backend/frontend reports through prompts,
+    attachments, MCP or shared context.
+-   QA can read the original request, approved requirements, permitted
+    task-flow decisions and its own knowledge.
+-   Frontend receives the approved API handoff but not unrestricted
+    backend-private knowledge.
+-   Backend and Frontend cannot write into each other's repositories.
+-   Tests verify actual filesystem/tool access and serialized
+    prompt/context contents, not just configuration labels.
+
+### Localization tests
+
+-   Language selector switches all UI labels between Persian and
+    English.
+-   Persian sets RTL and English sets LTR.
+-   Selected language persists across reloads.
+-   No missing translation keys in either locale.
+-   Technical identifiers, URLs, email addresses and code remain
+    readable in RTL.
+-   Both languages work in light/dark themes and responsive layouts.
+-   Existing UI tests and flows remain functional.
+
+### Regression and quality
+
+-   Run the existing backend and frontend test suites.
+-   Run formatting, linting, type checks and build commands already
+    defined by the repository.
+-   Add tests for backward compatibility of old task/project JSON files.
+-   Test concurrency, duplicate actions, stale task versions and
+    recovery using existing locking/versioning patterns.
+-   Do not claim success for tests that were not actually run.
+
+## 10. Implementation sequence
+
+Work in small, reviewable increments. Suggested order:
+
+1.  **Repository reconnaissance:** inspect current architecture, task
+    models, stage runner, prompts, knowledge paths, API routes, frontend
+    dashboard, localization/theme setup, Git integrations and release
+    flow. Produce a short mapping of existing functionality vs gaps.
+2.  **Workflow design:** propose the smallest compatible
+    state/data-model changes, transition rules and role access matrix.
+    Add/update architecture documentation before major code changes.
+3.  **Knowledge isolation:** implement and test QA's restricted context
+    and actual access boundaries. This is a security/correctness
+    prerequisite for QA work.
+4.  **Structured artifacts:** add task specification, Backend Handoff,
+    QA report, Analyst final assessment and PO decision in a
+    backward-compatible way.
+5.  **Revision/approval routing:** implement Analyst review loops and PO
+    feedback routing with audit history and duplicate-action protection.
+6.  **Dashboard workflow UX:** expose stage, handoffs, decisions, QA
+    evidence, blockers and release readiness.
+7.  **Persian/English localization:** centralize strings, implement
+    language persistence and RTL/LTR, then test every page/state.
+8.  **Release integration:** connect PO-approved tasks to the existing
+    release/tag/PR/MR process only after inspecting and testing it.
+9.  **Regression and documentation:** run the full test/build suite,
+    update API/architecture/user docs and report exact evidence.
+
+Kiro must not blindly implement all steps in one giant change. First
+complete reconnaissance and present the gap analysis/implementation
+plan. Then proceed incrementally while keeping the application runnable.
+
+## 11. Constraints and non-goals
+
+-   Do not replace the current FastAPI/React architecture.
+-   Do not replace the existing SDLC engine, task storage, human inbox,
+    Git integration or release process without demonstrating a concrete
+    limitation.
+-   Do not remove existing Claude/Codex/Ollama runner support.
+-   Do not give QA implementation knowledge in the name of convenience.
+-   Do not let an agent's self-reported success substitute for tests or
+    review.
+-   Do not bypass human approval gates or protected-branch rules.
+-   Do not expose secrets in prompts, UI, logs, reports or Git remotes.
+-   Do not perform destructive migrations or delete existing
+    task/project data.
+-   Preserve compatibility with existing projects and task records.
+-   Do not introduce paid external services or dependencies without
+    explicit approval.
+
+## 12. Definition of done
+
+This extension is done only when: 1. The team workflow and its loops are
+represented end-to-end. 2. Backend-to-Frontend handoff is structured and
+reviewed by the Analyst. 3. QA is demonstrably independent of
+implementation knowledge. 4. QA failures and PO feedback can be routed
+back to the right stage with complete history. 5. Analyst final review
+and PO approval are distinct, enforced gates. 6. Only QA-passed and
+PO-approved tasks can become release-ready. 7. The existing
+release/tag/PR/MR process is reused and remains safe. 8. The dashboard
+is fully usable in Persian RTL and English LTR. 9. Automated tests cover
+workflow, isolation, localization, compatibility and regression. 10.
+Documentation and implementation reports reflect what was actually built
+and tested.
+
+## 13. Required first response from Kiro
+
+Before editing code, return: - A concise map of the current
+implementation relevant to this brief. - Which requirements are already
+implemented, partially implemented or missing. - The exact
+files/models/routes/components likely to change. - The proposed state
+transitions and role/knowledge access matrix. - Risks, compatibility
+concerns and test plan. - Any ambiguity that genuinely blocks
+implementation.
+
+Do not ask the user to repeat the workflow described in this document.
+Ask only for decisions that cannot be safely inferred from the
+repository or this brief.
+
+
+
+Thanks for the reconnaissance. These are my decisions:
+
+**1. Analyst mid-pipeline reviews: Option A**
+
+The Analyst agent must automatically review the outputs of Backend, Frontend, and QA.
+
+- These reviews are mandatory workflow gates, not optional steps.
+- The Analyst should automatically approve, request revisions, or route issues to the appropriate stage.
+- If there is ambiguity, disagreement, a significant risk, or insufficient confidence, escalate the decision to the human inbox.
+- Any revision request must go through the Analyst's coordination process.
+- The workflow must not proceed until the required review is resolved.
+
+The goal is to preserve automation while keeping human intervention available when genuinely necessary.
+
+**2. PO approval: Enhance the existing `pending_approval`**
+
+Use the existing `pending_approval` state as the distinct PO/business acceptance gate. Do not introduce a separate technical final-approval state or duplicate API unless technically necessary.
+
+However:
+- PO approval must be a structured, independently recorded decision.
+- Technical final approval and `auto_final_approval` must never bypass PO approval when PO approval is enabled.
+- PO must support approve, request changes, and reject, with a mandatory rationale where appropriate.
+- PO change requests must return to the Analyst, who coordinates the required stage revisions and QA retesting before PO reviews again.
+
+**3. Release Git workflow: Option A**
+
+Keep the current in-app release approval followed by merge/push to sandbox.
+
+Do not add Git tags or release PR/MR workflows in this iteration.
+
+Harden release eligibility so a task can only become release-ready when:
+- QA has explicitly passed.
+- PO has explicitly approved.
+- Existing develop integration and unreleased-task rules are satisfied.
+
+Technical completion or merging into develop alone must not make a task release-ready.
+
+**4. Default project template: Without n8n**
+
+New team-workflow projects should default to:
+`analysis → backend → frontend → qa`
+
+Keep n8n fully supported as an optional stage that can be enabled and positioned between Backend and Frontend.
+
+**Implementation instructions:**
+
+- Preserve backward compatibility with existing projects and configurations.
+- Make the new review gates configurable so existing workflows are not unexpectedly broken.
+- Keep the existing architecture and release flow unless a change is necessary for these requirements.
+- Do not start implementing all phases at once.
+- First update the architecture documentation with these decisions, the state transitions, the PO rules, and the knowledge-access matrix.
+- Then stop and present the updated architecture for review.
+- After approval, implement QA knowledge isolation as the first code change, including negative tests proving QA cannot access Backend/Frontend implementation files, private knowledge, or internal agent reports.
+- Report changed files, design decisions, and actual test results at each phase.

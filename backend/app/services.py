@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable
 from zipfile import BadZipFile, ZipFile
 
-from .models import AgentType, ChatMessage, GitProvider, McpFailureMode, McpStatus, RunStatus, TaskRequest, TaskState, SDLCTask, SDLCProjectConfig, AgentResult
+from .models import AgentType, ChatMessage, GitProvider, McpFailureMode, McpStatus, RunStatus, TaskRequest, TaskState, SDLCTask, SDLCProjectConfig, AgentResult, ModelInfo, ProjectModelSettings, Change, AgentConfig
 
 
 _command_output_handler: ContextVar[Callable[[str], None] | None] = ContextVar("command_output_handler", default=None)
@@ -1056,11 +1056,13 @@ def agent_executable(agent_type: AgentType) -> str:
 
 
 def initial_agent_args(agent_type: AgentType, executable: str, prompt: str,
-                       extra_dirs: list[str] | None = None, allowed_tools: list[str] | None = None) -> list[str]:
+                       extra_dirs: list[str] | None = None, allowed_tools: list[str] | None = None,
+                       model: str | None = None) -> list[str]:
     if agent_type == AgentType.claude:
         # --add-dir lets the agent read the other SDLC stages' repositories (it is variadic, so it
         # must come before another option, never directly before the prompt).
         add_dirs = [arg for directory in (extra_dirs or []) for arg in ("--add-dir", directory)]
+        model_args = ["--model", model] if model and model not in ("claude", "") else []
         return [
             executable,
             "--print",
@@ -1068,13 +1070,16 @@ def initial_agent_args(agent_type: AgentType, executable: str, prompt: str,
             "stream-json",
             "--verbose",
             *add_dirs,
+            *model_args,
             # One comma-separated value: --allowedTools is variadic and must not swallow the next option.
             *(["--allowedTools", ",".join(allowed_tools)] if allowed_tools else []),
             "--permission-mode",
             "acceptEdits",
             prompt,
         ]
-    return [executable, "exec", "--sandbox", "workspace-write", "--color", "never", "--json", prompt]
+    # Codex: pass model via --model flag when explicitly specified
+    model_args = ["--model", model] if model and model not in ("codex", "") else []
+    return [executable, "exec", "--sandbox", "workspace-write", "--color", "never", "--json", *model_args, prompt]
 
 
 def resume_agent_args(agent_type: AgentType, executable: str, session_id: str, prompt: str) -> list[str]:
@@ -1451,12 +1456,333 @@ def _feedback_text(task: SDLCTask, stage: str) -> str:
     return "\n\n".join(sections) + "\n\n" if sections else ""
 
 
+class OllamaDiscoveryService:
+    """Service for discovering Ollama models and their capabilities"""
+    
+    def __init__(self, base_url: str = OLLAMA_BASE_URL):
+        self.base_url = base_url.rstrip("/")
+    
+    async def list_models(self) -> list[ModelInfo]:
+        """Get list of available Ollama models"""
+        try:
+            import urllib.request
+            import json
+            
+            req = urllib.request.Request(
+                f"{self.base_url}/api/tags",
+                headers={"Content-Type": "application/json"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                models_data = data.get("models", [])
+                
+                models = []
+                for model_data in models_data:
+                    model_name = model_data.get("name", "")
+                    # Extract family and parameters from name
+                    family = "unknown"
+                    parameters = ""
+                    quantization = ""
+                    
+                    # Try to parse model name
+                    if "qwen" in model_name.lower():
+                        family = "Qwen"
+                    elif "llama" in model_name.lower():
+                        family = "Llama"
+                    elif "mistral" in model_name.lower():
+                        family = "Mistral"
+                    elif "gemma" in model_name.lower():
+                        family = "Gemma"
+                    
+                    # Extract parameter count
+                    import re
+                    param_match = re.search(r'(\d+(?:\.\d+)?[bB])', model_name)
+                    if param_match:
+                        parameters = param_match.group(1)
+                    
+                    # Extract quantization
+                    if "q4" in model_name.lower():
+                        quantization = "Q4"
+                    elif "q5" in model_name.lower():
+                        quantization = "Q5"
+                    elif "q6" in model_name.lower():
+                        quantization = "Q6"
+                    elif "q8" in model_name.lower():
+                        quantization = "Q8"
+                    
+                    models.append(ModelInfo(
+                        name=model_name,
+                        family=family,
+                        parameters=parameters,
+                        quantization=quantization,
+                        supports_tool_calls=("qwen" in model_name.lower() and "0.8b" not in model_name),
+                        description=model_data.get("details", {}).get("description", ""),
+                        modified_at=datetime.fromisoformat(model_data.get("modified_at", "").replace("Z", "+00:00")) 
+                            if model_data.get("modified_at") else None,
+                        size=model_data.get("size", 0)
+                    ))
+                
+                return models
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch Ollama models: {exc}") from exc
+    
+    async def get_model_info(self, model_name: str) -> ModelInfo | None:
+        """Get detailed information about a specific model"""
+        try:
+            import urllib.request
+            import json
+            
+            payload = json.dumps({"name": model_name}).encode()
+            req = urllib.request.Request(
+                f"{self.base_url}/api/show",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                
+                # Extract information
+                family = data.get("family", "unknown")
+                parameters = data.get("parameter_size", "")
+                quantization = data.get("quantization_level", "")
+                
+                return ModelInfo(
+                    name=model_name,
+                    family=family,
+                    parameters=parameters,
+                    quantization=quantization,
+                    supports_tool_calls=data.get("support_tool_calls", False),
+                    description=data.get("description", ""),
+                    size=data.get("size", 0)
+                )
+        except Exception as exc:
+            print(f"Failed to get model info for {model_name}: {exc}")
+            return None
+    
+    async def check_connection(self) -> bool:
+        """Check if Ollama is reachable"""
+        try:
+            import urllib.request
+            
+            req = urllib.request.Request(
+                f"{self.base_url}/api/tags",
+                method="GET",
+                timeout=5
+            )
+            with urllib.request.urlopen(req):
+                return True
+        except Exception:
+            return False
+
+
+class ModelResolutionService:
+    """Service for resolving which model to use for each SDLC stage (legacy)"""
+    
+    def __init__(self, discovery_service: OllamaDiscoveryService | None = None):
+        self.discovery_service = discovery_service or OllamaDiscoveryService()
+    
+    def resolve_model_for_stage(
+        self,
+        stage: str,
+        project_config: SDLCProjectConfig,
+        task_override: str | None = None,
+        agent_config: AgentConfig | None = None
+    ) -> str:
+        """Resolve which model to use for a specific stage (legacy)
+        
+        Priority order:
+        1. Task-level override (if provided)
+        2. Project stage assignment
+        3. Project default model
+        4. OLLAMA_MODEL environment variable
+        5. Fallback to "qwen3.5:0.8b"
+        """
+        # 1. Task override (highest priority)
+        if task_override and task_override.strip():
+            return task_override.strip()
+        
+        # 2. Project stage assignment
+        model_settings = project_config.model_settings
+        stage_model = model_settings.stage_assignments.get(stage)
+        if stage_model and stage_model.strip():
+            return stage_model.strip()
+        
+        # 3. Project default model
+        if model_settings.default_model.strip():
+            return model_settings.default_model.strip()
+        
+        # 4. Environment variable
+        from .config import OLLAMA_MODEL
+        if OLLAMA_MODEL.strip():
+            return OLLAMA_MODEL.strip()
+        
+        # 5. Fallback
+        return "qwen3.5:0.8b"
+    
+    async def get_model_info_for_stage(
+        self,
+        stage: str,
+        project_config: SDLCProjectConfig,
+        task_override: str | None = None
+    ) -> tuple[str, ModelInfo | None]:
+        """Get both model name and detailed info for a stage"""
+        model_name = self.resolve_model_for_stage(stage, project_config, task_override)
+        model_info = await self.discovery_service.get_model_info(model_name)
+        return model_name, model_info
+    
+    async def validate_model_availability(self, model_name: str) -> bool:
+        """Check if a specific model is available"""
+        try:
+            models = await self.discovery_service.list_models()
+            return any(model.name == model_name for model in models)
+        except Exception:
+            return False
+    
+    async def get_available_models(self) -> list[ModelInfo]:
+        """Get list of available models"""
+        try:
+            return await self.discovery_service.list_models()
+        except Exception as exc:
+            print(f"Failed to get available models: {exc}")
+            return []
+
+
+class ProviderResolutionService:
+    """Service for resolving which provider and model to use for each SDLC stage"""
+    
+    def __init__(self, provider_registry=None):
+        from .providers import provider_registry as default_registry
+        self.provider_registry = provider_registry or default_registry
+    
+    def resolve_provider_for_stage(
+        self,
+        stage: str,
+        project_config: SDLCProjectConfig,
+        agent_config: AgentConfig | None = None,
+        task_override_provider: str | None = None,
+        task_override_model: str | None = None
+    ) -> tuple[str, str, bool]:
+        """Resolve which provider and model to use for a specific stage
+        
+        Priority order:
+        1. Task-level overrides (provider and model)
+        2. Agent-level overrides (provider_override, model_override)
+        3. Stage-specific provider and model from project AI settings
+        4. Project default provider and model
+        
+        Returns:
+            tuple: (provider_id, model_name, is_overridden)
+        """
+        is_overridden = False
+        
+        # 1. Task-level overrides (highest priority)
+        if task_override_provider and task_override_provider.strip():
+            provider = task_override_provider.strip().lower()
+            model = task_override_model.strip() if task_override_model else ""
+            is_overridden = True
+            
+            # If model is empty, use project default for that provider
+            if not model:
+                project_defaults = project_config.ai_settings
+                if provider == project_defaults.default_provider:
+                    model = project_defaults.default_model
+                else:
+                    # For different provider, we need a sensible default
+                    if provider == "ollama":
+                        model = "qwen3.5:0.8b"
+                    elif provider == "codex":
+                        model = "codex"
+                    elif provider == "claude":
+                        model = "claude"
+            
+            return provider, model, is_overridden
+        
+        # 2. Agent-level overrides
+        if agent_config:
+            provider, model, agent_overridden = agent_config.get_effective_provider(
+                project_config.ai_settings, stage
+            )
+            if agent_overridden:
+                is_overridden = True
+                return provider, model, is_overridden
+        
+        # 3. Get from project AI settings for this stage
+        provider, model, inherited = project_config.ai_settings.get_provider_for_stage(stage)
+        
+        # If the stage has an explicit override in project settings, mark as overridden
+        if stage in project_config.ai_settings.stage_providers and not project_config.ai_settings.stage_providers[stage].inherit_from_project:
+            is_overridden = True
+        
+        return provider, model, is_overridden
+    
+    async def validate_provider_availability(self, provider_id: str, model_name: str) -> tuple[bool, str]:
+        """Validate that a provider and model are available
+        
+        Returns:
+            tuple: (is_available, error_message)
+        """
+        provider = self.provider_registry.get_provider(provider_id)
+        if not provider:
+            return False, f"Provider '{provider_id}' not found"
+        
+        # Check provider availability
+        if not await provider.check_availability():
+            return False, f"Provider '{provider_id}' is unavailable"
+        
+        # Validate model
+        if not await provider.validate_model(model_name):
+            return False, f"Model '{model_name}' is not available for provider '{provider_id}'"
+        
+        return True, ""
+    
+    async def get_provider_info_for_stage(
+        self,
+        stage: str,
+        project_config: SDLCProjectConfig,
+        agent_config: AgentConfig | None = None
+    ) -> dict:
+        """Get provider and model information for a specific stage"""
+        provider_id, model_name, is_overridden = self.resolve_provider_for_stage(
+            stage, project_config, agent_config
+        )
+        
+        provider = self.provider_registry.get_provider(provider_id)
+        if not provider:
+            return {
+                "provider": provider_id,
+                "model": model_name,
+                "available": False,
+                "overridden": is_overridden,
+                "error": f"Provider '{provider_id}' not found"
+            }
+        
+        # Check availability
+        available = await provider.check_availability()
+        result = {
+            "provider": provider_id,
+            "model": model_name,
+            "available": available,
+            "overridden": is_overridden,
+            "provider_name": provider.get_display_name(),
+            "agent_type": provider.get_agent_type().value,
+            "runner_type": provider.get_runner_type().value,
+        }
+        
+        if not available:
+            result["error"] = f"Provider '{provider_id}' is unavailable"
+        
+        return result
+
+
 class OllamaAgentRunner:
     """Calls ollama /v1/chat/completions to run an SDLC agent."""
 
     def __init__(self, base_url: str = OLLAMA_BASE_URL, model: str = OLLAMA_MODEL):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.resolution_service = ModelResolutionService()
 
     def _chat(self, system: str, user: str, timeout: int = 240) -> str:
         payload = json.dumps({
@@ -2516,3 +2842,698 @@ class SDLCTaskManager:
         # Sort by creation date (newest first)
         tasks.sort(key=lambda t: t.created_at, reverse=True)
         return tasks
+# ===== OLLAMA CODING AGENT =====
+
+class OllamaCodingAgent:
+    """Coding agent that uses Ollama with tool calling to edit files"""
+    
+    def __init__(self, base_url: str = OLLAMA_BASE_URL, model: str = OLLAMA_MODEL):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.resolution_service = ModelResolutionService()
+        self.tools = self._create_tools()
+    
+    def _create_tools(self) -> list[dict]:
+        """Create tool definitions for Ollama"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read the contents of a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the file relative to project root"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files in the project directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Directory path relative to project root (optional)",
+                                "default": "."
+                            },
+                            "recursive": {
+                                "type": "boolean",
+                                "description": "Whether to list recursively",
+                                "default": False
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "Create or modify a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the file relative to project root"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "File content to write"
+                            },
+                            "append": {
+                                "type": "boolean",
+                                "description": "Whether to append to existing file",
+                                "default": False
+                            }
+                        },
+                        "required": ["path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_file",
+                    "description": "Delete a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the file relative to project root"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_files",
+                    "description": "Search for text in files",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "Text pattern to search for"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Directory path to search in (optional)",
+                                "default": "."
+                            }
+                        },
+                        "required": ["pattern"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_command",
+                    "description": "Run a shell command (restricted to safe commands)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "Command to run"
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "Working directory (optional)",
+                                "default": "."
+                            }
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }
+        ]
+    
+    def _is_safe_command(self, command: str) -> bool:
+        """Check if a command is safe to run"""
+        safe_prefixes = [
+            "npm ", "yarn ", "pnpm ",
+            "python ", "python3 ", "pip ", "pip3 ",
+            "node ", "npx ",
+            "git status", "git diff", "git log", "git show",
+            "go ", "cargo ", "dotnet ",
+            "make ", "cmake "
+        ]
+        command_lower = command.lower()
+        return any(command_lower.startswith(prefix) for prefix in safe_prefixes)
+    
+    async def _call_ollama_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        workdir: Path,
+        max_iterations: int = 10
+    ) -> tuple[str, list[Change]]:
+        """Call Ollama with tool calling support"""
+        import urllib.request
+        import json
+        
+        changes = []
+        iteration = 0
+        
+        while iteration < max_iterations:
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": False,
+                "temperature": 0.3,
+            }
+            
+            try:
+                req = urllib.request.Request(
+                    f"{self.base_url}/api/chat",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    response = json.loads(resp.read())
+                    
+                    # Check for tool calls
+                    message = response.get("message", {})
+                    tool_calls = message.get("tool_calls", [])
+                    
+                    if tool_calls:
+                        # Execute tool calls
+                        for tool_call in tool_calls:
+                            tool_name = tool_call.get("function", {}).get("name")
+                            tool_args = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
+                            
+                            # Execute tool
+                            result = await self._execute_tool(tool_name, tool_args, workdir)
+                            
+                            # Record file changes
+                            if tool_name == "write_file":
+                                file_path = tool_args.get("path")
+                                if file_path:
+                                    changes.append(Change(
+                                        file=file_path,
+                                        description="Modified by Ollama agent",
+                                        kind="created" if not (workdir / file_path).exists() else "modified"
+                                    ))
+                            elif tool_name == "delete_file":
+                                file_path = tool_args.get("path")
+                                if file_path:
+                                    changes.append(Change(
+                                        file=file_path,
+                                        description="Deleted by Ollama agent",
+                                        kind="deleted"
+                                    ))
+                            
+                            # Add tool result to messages
+                            messages.append({
+                                "role": "tool",
+                                "content": json.dumps(result),
+                                "tool_call_id": tool_call.get("id")
+                            })
+                    else:
+                        # No more tool calls, return final response
+                        final_response = message.get("content", "")
+                        return final_response, changes
+                    
+            except Exception as exc:
+                raise RuntimeError(f"Ollama tool call failed: {exc}") from exc
+            
+            iteration += 1
+        
+        raise RuntimeError(f"Maximum iterations ({max_iterations}) reached")
+    
+    async def _execute_tool(self, tool_name: str, args: dict, workdir: Path) -> dict:
+        """Execute a tool call"""
+        try:
+            if tool_name == "read_file":
+                file_path = workdir / args["path"]
+                if not file_path.exists():
+                    return {"error": f"File not found: {args['path']}"}
+                if not file_path.is_relative_to(workdir):
+                    return {"error": "Path traversal attempt blocked"}
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                return {"content": content}
+            
+            elif tool_name == "list_files":
+                dir_path = workdir / args.get("path", ".")
+                if not dir_path.exists():
+                    return {"error": f"Directory not found: {args.get('path', '.')}"}
+                if not dir_path.is_relative_to(workdir):
+                    return {"error": "Path traversal attempt blocked"}
+                
+                files = []
+                recursive = args.get("recursive", False)
+                
+                if recursive:
+                    for root, dirs, filenames in os.walk(dir_path):
+                        # Skip hidden directories
+                        dirs[:] = [d for d in dirs if not d.startswith(".")]
+                        for filename in filenames:
+                            if not filename.startswith("."):
+                                rel_path = (Path(root) / filename).relative_to(workdir)
+                                files.append(str(rel_path))
+                else:
+                    for item in dir_path.iterdir():
+                        if not item.name.startswith("."):
+                            rel_path = item.relative_to(workdir)
+                            files.append(str(rel_path))
+                
+                return {"files": files}
+            
+            elif tool_name == "write_file":
+                file_path = workdir / args["path"]
+                if not file_path.is_relative_to(workdir):
+                    return {"error": "Path traversal attempt blocked"}
+                
+                # Create parent directories
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                content = args["content"]
+                if args.get("append", False) and file_path.exists():
+                    with file_path.open("a", encoding="utf-8") as f:
+                        f.write(content)
+                else:
+                    file_path.write_text(content, encoding="utf-8")
+                
+                return {"success": True, "path": str(file_path.relative_to(workdir))}
+            
+            elif tool_name == "delete_file":
+                file_path = workdir / args["path"]
+                if not file_path.is_relative_to(workdir):
+                    return {"error": "Path traversal attempt blocked"}
+                if not file_path.exists():
+                    return {"error": f"File not found: {args['path']}"}
+                
+                file_path.unlink()
+                return {"success": True, "path": str(file_path.relative_to(workdir))}
+            
+            elif tool_name == "search_files":
+                search_path = workdir / args.get("path", ".")
+                if not search_path.exists():
+                    return {"error": f"Path not found: {args.get('path', '.')}"}
+                if not search_path.is_relative_to(workdir):
+                    return {"error": "Path traversal attempt blocked"}
+                
+                pattern = args["pattern"]
+                results = []
+                
+                for root, dirs, filenames in os.walk(search_path):
+                    # Skip hidden directories
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    for filename in filenames:
+                        if filename.startswith("."):
+                            continue
+                        file_path = Path(root) / filename
+                        try:
+                            content = file_path.read_text(encoding="utf-8", errors="ignore")
+                            if pattern in content:
+                                rel_path = file_path.relative_to(workdir)
+                                results.append({
+                                    "file": str(rel_path),
+                                    "matches": content.count(pattern)
+                                })
+                        except:
+                            continue
+                
+                return {"results": results}
+            
+            elif tool_name == "run_command":
+                if not self._is_safe_command(args["command"]):
+                    return {"error": "Command not allowed for security reasons"}
+                
+                working_dir = workdir / args.get("working_dir", ".")
+                if not working_dir.is_relative_to(workdir):
+                    return {"error": "Path traversal attempt blocked"}
+                
+                import subprocess
+                try:
+                    result = subprocess.run(
+                        args["command"],
+                        shell=True,
+                        cwd=str(working_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    return {
+                        "exit_code": result.returncode,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr
+                    }
+                except subprocess.TimeoutExpired:
+                    return {"error": "Command timeout"}
+                except Exception as e:
+                    return {"error": str(e)}
+            
+            else:
+                return {"error": f"Unknown tool: {tool_name}"}
+                
+        except Exception as exc:
+            return {"error": str(exc)}
+    
+    async def run_stage(
+        self,
+        stage: str,
+        task: SDLCTask,
+        project: SDLCProjectConfig,
+        config: AgentConfig,
+        workdir: Path
+    ) -> AgentResult:
+        """Run an SDLC stage with Ollama coding agent"""
+        # Resolve model for this stage
+        model_name = self.resolution_service.resolve_model_for_stage(stage, project)
+        self.model = model_name
+        
+        # Get system prompt for this stage
+        system_prompt = config.system_prompt or self._get_default_system_prompt(stage)
+        
+        # Build initial messages
+        from .sdlc_runner import build_stage_prompt
+        user_prompt = build_stage_prompt(stage, task, project, config, workdir)
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        try:
+            # Run Ollama with tool calling
+            final_response, changes = await self._call_ollama_with_tools(
+                messages, self.tools, workdir
+            )
+            
+            # Parse agent report
+            from .sdlc_runner import parse_agent_report
+            report = parse_agent_report(final_response)
+            
+            # Create AgentResult
+            return AgentResult(
+                agent=stage,
+                status=report.get("status", "completed"),
+                summary=report.get("summary", final_response[:500]),
+                changes=changes,
+                tests=TestResults(),
+                recommendations=report.get("recommendations", {}),
+                issues=report.get("issues", []),
+                raw_output=final_response
+            )
+            
+        except Exception as exc:
+            return AgentResult(
+                agent=stage,
+                status="failed",
+                summary=f"Ollama coding agent failed: {exc}",
+                changes=[],
+                tests=TestResults(),
+                recommendations={},
+                issues=[str(exc)],
+                raw_output=""
+            )
+    
+    def _get_default_system_prompt(self, stage: str) -> str:
+        """Get default system prompt for a stage"""
+        prompts = {
+            "analysis": "You are an expert software analyst. Analyze requirements and create detailed specifications.",
+            "backend": "You are an expert backend developer. Write clean, efficient, and secure backend code.",
+            "frontend": "You are an expert frontend developer. Create responsive, accessible, and user-friendly interfaces.",
+            "n8n": "You are an expert n8n workflow engineer. Design efficient and reliable automation workflows.",
+            "qa": "You are an expert QA engineer. Write comprehensive tests and ensure software quality."
+        }
+        return prompts.get(stage, "You are a software development assistant. Complete the task professionally.")
+
+
+# ===== TEAM WORKFLOW GATE FUNCTIONS =====
+
+def get_next_workflow_stage(current_stage: str, project: SDLCProjectConfig) -> str | None:
+    """Determine the next stage in the workflow based on current stage and project config.
+    
+    Handles review gates and maintains workflow sequence.
+    """
+    workflow = project.workflow
+    stages = workflow.stages
+    
+    try:
+        current_idx = stages.index(current_stage)
+    except ValueError:
+        # If current stage not in config, try common progression
+        if current_stage == "analysis_approved":
+            return "backend_running"
+        if current_stage == "backend_running":
+            return "backend_review" if "backend_review" in stages else "frontend_running"
+        if current_stage == "backend_review":
+            return "frontend_running"
+        if current_stage == "frontend_running":
+            return "frontend_review" if "frontend_review" in stages else "qa_running"
+        if current_stage == "frontend_review":
+            return "qa_running"
+        if current_stage == "qa_running":
+            return "qa_review" if "qa_review" in stages else "analyst_final_review"
+        if current_stage == "qa_review":
+            return "analyst_final_review"
+        if current_stage == "analyst_final_review":
+            return "po_pending_approval" if workflow.require_po_approval else None
+        if current_stage == "po_pending_approval":
+            return None  # Waiting for PO approval
+        return None
+    
+    # If current stage is last, return None
+    if current_idx >= len(stages) - 1:
+        return None
+    
+    # Find next non-review stage or next stage based on review configuration
+    next_idx = current_idx + 1
+    while next_idx < len(stages):
+        next_stage = stages[next_idx]
+        
+        # If this is a review stage, check if automatic review is enabled
+        if next_stage in {"backend_review", "frontend_review", "qa_review", "analyst_final_review", "po_pending_approval"}:
+            if next_stage == "backend_review" and workflow.auto_backend_review:
+                return "backend_review"
+            elif next_stage == "frontend_review" and workflow.auto_frontend_review:
+                return "frontend_review"
+            elif next_stage == "qa_review" and workflow.auto_qa_review:
+                return "qa_review"
+            elif next_stage == "analyst_final_review" and workflow.auto_analyst_final_review:
+                return "analyst_final_review"
+            elif next_stage == "po_pending_approval" and workflow.require_po_approval:
+                return "po_pending_approval"
+            else:
+                # Skip review stage if not enabled, go to next
+                next_idx += 1
+                continue
+        
+        # Found next executable stage
+        return next_stage
+    
+    return None
+
+
+def can_transition_to(task: SDLCTask, target_stage: str, project: SDLCProjectConfig) -> tuple[bool, str]:
+    """Check if a task can transition to the target stage.
+    
+    Returns (can_transition, reason_if_not).
+    """
+    current_stage = task.current_stage
+    workflow = project.workflow
+    
+    # Define valid transitions
+    valid_transitions = {
+        "created": ["analyzing"],
+        "analyzing": ["human_review", "backend_running", "backend_review"],
+        "human_review": ["analyzing", "backend_running", "backend_review"],
+        "analysis_approved": ["backend_running", "backend_review"],
+        "backend_running": ["backend_review", "revision"],
+        "backend_review": ["frontend_running", "frontend_review", "backend_running", "revision"],
+        "frontend_running": ["frontend_review", "revision"],
+        "frontend_review": ["qa_running", "qa_review", "backend_running", "revision"],
+        "qa_running": ["qa_review", "revision"],
+        "qa_review": ["analyst_final_review", "backend_running", "frontend_running", "revision"],
+        "analyst_final_review": ["po_pending_approval", "qa_running", "revision"],
+        "po_pending_approval": ["analyst_final_review", "done"],
+        "revision": ["backend_running", "frontend_running", "qa_running", "analyzing"],
+        "failed": [],  # Terminal
+        "blocked": [],  # Terminal
+        "done": [],  # Terminal
+    }
+    
+    valid_targets = valid_transitions.get(current_stage, [])
+    
+    if target_stage not in valid_targets:
+        return False, f"Invalid transition from {current_stage} to {target_stage}. Valid targets: {', '.join(valid_targets)}"
+    
+    # Check for blocking conditions
+    if target_stage in {"backend_review", "frontend_review", "qa_review"}:
+        # These require previous stage to be completed successfully
+        previous_stage = current_stage.replace("_review", "").rstrip("_running")
+        if previous_stage not in task.agent_results:
+            return False, f"Previous stage {previous_stage} has not completed yet"
+        if task.agent_results[previous_stage].status != "completed":
+            return False, f"Previous stage {previous_stage} did not complete successfully"
+    
+    if target_stage == "po_pending_approval":
+        if not workflow.require_po_approval:
+            return False, "PO approval not required for this project"
+        # Check that QA passed (if qa_review exists)
+        if "qa_review" in workflow.stages and task.qa_report:
+            if task.qa_report.overall_recommendation not in {"pass", ""}:
+                return False, f"QA must pass before PO approval (currently: {task.qa_report.overall_recommendation})"
+    
+    if target_stage == "done":
+        # Must have PO approval if required
+        if workflow.require_po_approval:
+            if not task.po_decision or task.po_decision.decision != "approve":
+                return False, "PO approval required before marking task done"
+        # All stages must be completed
+        for stage in workflow.stages:
+            if stage not in {"backend_review", "frontend_review", "qa_review", "analyst_final_review", "po_pending_approval"}:
+                if stage not in task.agent_results:
+                    return False, f"Stage {stage} has not completed yet"
+                if task.agent_results[stage].status != "completed":
+                    return False, f"Stage {stage} did not complete successfully"
+    
+    return True, ""
+
+
+def create_sanitized_prompt_for_role(role: str, task: SDLCTask, project: SDLCProjectConfig) -> tuple[str, list[str]]:
+    """Create a prompt sanitized for the given role's knowledge boundaries.
+    
+    Returns (prompt, list of included directories).
+    """
+    sanitized_parts = []
+    included_dirs = []
+    
+    # Always include: original request, approved requirements
+    sanitized_parts.append(f"# Task {task.base_task.task_id}")
+    if task.title:
+        sanitized_parts.append(f"Title: {task.title}")
+    if task.description:
+        sanitized_parts.append(f"Description:\n{task.description}")
+    
+    if task.task_specification:
+        sanitized_parts.append(f"\n## Approved Requirements\n{task.task_specification.user_business_need}")
+        if task.task_specification.acceptance_criteria:
+            sanitized_parts.append(f"\n### Acceptance Criteria\n" + "\n".join(f"- {c}" for c in task.task_specification.acceptance_criteria))
+    
+    # Role-specific additions
+    if role == "analyst":
+        # Analyst needs all stage results
+        for stage, result in task.agent_results.items():
+            sanitized_parts.append(f"\n## {stage} Result\nStatus: {result.status}\nSummary: {result.summary}")
+            if result.issues:
+                sanitized_parts.append(f"Issues: {', '.join(result.issues)}")
+        
+        # Include revision history
+        if task.revisions:
+            sanitized_parts.append("\n## Revision History")
+            for rev in task.revisions:
+                sanitized_parts.append(f"- From {rev.requesting_agent} to {rev.target_agent}: {rev.reason}")
+        
+        # Add QA report
+        if task.qa_report:
+            sanitized_parts.append("\n## QA Report")
+            sanitized_parts.append(f"Recommendation: {task.qa_report.overall_recommendation}")
+            sanitized_parts.append(f"Test Cases: {len(task.qa_report.test_cases)}")
+        
+        # Add PO decision
+        if task.po_decision:
+            sanitized_parts.append("\n## PO Decision")
+            sanitized_parts.append(f"Decision: {task.po_decision.decision}")
+            sanitized_parts.append(f"Rationale: {task.po_decision.rationale}")
+    
+    elif role == "backend":
+        # Backend gets: original request, approved requirements, backend handoff (if exists)
+        sanitized_parts.append("\n## Your Task")
+        sanitized_parts.append("Implement the backend portion of this task.")
+        
+        if task.backend_handoff:
+            sanitized_parts.append("\n## Frontend Handoff")
+            sanitized_parts.append(task.backend_handoff.frontend_handoff.get("required", "No frontend impact"))
+        
+        # Add backend knowledge path
+        if project.agents.get("backend") and project.agents["backend"].knowledge_path:
+            included_dirs.append(project.agents["backend"].knowledge_path)
+    
+    elif role == "frontend":
+        # Frontend gets: original request, approved requirements, approved backend handoff
+        sanitized_parts.append("\n## Your Task")
+        sanitized_parts.append("Implement the frontend portion of this task.")
+        
+        if task.backend_handoff:
+            sanitized_parts.append("\n## Backend API Contract")
+            api = task.backend_handoff.api_contract
+            sanitized_parts.append(f"Endpoint: {api.get('method', 'GET')} {api.get('path', '/api')}")
+            sanitized_parts.append(f"Data Format: {task.backend_handoff.frontend_handoff.get('data_format', 'JSON')}")
+        
+        # Add frontend knowledge path
+        if project.agents.get("frontend") and project.agents["frontend"].knowledge_path:
+            included_dirs.append(project.agents["frontend"].knowledge_path)
+    
+    elif role == "qa":
+        # QA gets: ONLY original request, approved requirements, requirement-level decisions
+        # MUST NOT include: backend/frontend source, private knowledge, implementation details
+        
+        sanitized_parts.append("\n## Test Objective")
+        sanitized_parts.append("Create a black-box test strategy based solely on the requirements.")
+        sanitized_parts.append("Do NOT inspect implementation code or implementation-specific logic.")
+        
+        # Only include requirement-level task decisions, not implementation details
+        if task.stage_questions:
+            sanitized_parts.append("\n## Requirement-Level Decisions")
+            for q in task.stage_questions:
+                if q.answered_by == "human" or q.asking_stage in {"analysis", "backend", "frontend"}:
+                    sanitized_parts.append(f"- {q.question}: {q.answer}")
+        
+        # Add QA knowledge path
+        qa_knowledge = task.qa_knowledge_path or project.agents.get("qa", AgentConfig()).knowledge_path
+        if qa_knowledge:
+            included_dirs.append(qa_knowledge)
+    
+    return "\n".join(sanitized_parts), included_dirs
+
+
+def sanitize_agent_result_for_role(result: AgentResult, target_role: str) -> AgentResult:
+    """Sanitize an agent result for sharing with a role that has limited knowledge.
+    
+    Removes implementation details from results shared with roles that shouldn't see them.
+    """
+    sanitized = result.model_copy()
+    
+    if target_role == "qa":
+        # Remove implementation-specific information
+        sanitized.summary = "Implementation completed. See acceptance criteria for verification."
+        sanitized.changes = []  # Don't expose specific file changes to QA
+        sanitized.recommendations = {}  # Remove implementation suggestions
+        sanitized.issues = []  # Remove implementation-specific issues
+    
+    if target_role in {"backend", "frontend"}:
+        # For implementation stages, keep most information but redact sensitive paths
+        sanitized.summary = result.summary
+        sanitized.changes = result.changes
+    
+    return sanitized
+
+
+# Create singleton instances
+_ollama_discovery = OllamaDiscoveryService()
+_model_resolver = ModelResolutionService(_ollama_discovery)
+_ollama_coding_agent = OllamaCodingAgent()
+_ollama_runner = OllamaAgentRunner()
